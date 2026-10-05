@@ -19,4 +19,4 @@ Legacy RbxTools accounts and backups remain supported. A download cache cannot h
 
 Automated tests, installer checks, and package verification passed. Full real-client recovery, Discord delivery, and resource measurements remain unverified. The installer is unsigned.
 
-[User guide](USAGE.md) · [Validation](VALIDATION.md) · [Changelog](../CHANGELOG.md)
+[User guide](https://github.com/oangsa/RoLauncher/blob/v1.0.0/docs/USAGE.md) · [Validation](https://github.com/oangsa/RoLauncher/blob/v1.0.0/docs/VALIDATION.md) · [Changelog](https://github.com/oangsa/RoLauncher/blob/v1.0.0/CHANGELOG.md)
