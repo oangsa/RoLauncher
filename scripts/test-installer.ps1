@@ -56,7 +56,7 @@ fn main() {
         $taskManifest = Join-Path $taskCaseDirectory 'request.json'
         @{
             Installer=$taskInstaller; Sha256=if ($taskCase -eq 'bad-checksum') { '0' * 64 } else { $taskHash }
-            Version=$taskVersion; InstallDirectory=$taskInstall; DataDirectory=$taskData; Port=19371
+            Version=$taskVersion; InstallDirectory=$taskInstall; DataDirectory=($taskData + '\'); Port=19371
             ParentId=$taskParent.Id; ParentStarted=$taskParent.StartTime.ToUniversalTime().Ticks
             DesktopId=$taskDesktop.Id; DesktopStarted=$taskDesktop.StartTime.ToUniversalTime().Ticks
         } | ConvertTo-Json | Set-Content -LiteralPath $taskManifest -Encoding utf8
@@ -88,7 +88,7 @@ fn main() {
             if ($taskResult.status -ne 'installed') { throw 'Isolated installer handoff failed' }
             Wait-FixtureFile (Join-Path $taskData 'restarted.txt')
             $taskRestart = Get-Content -LiteralPath (Join-Path $taskData 'restarted.txt')
-            if ($taskRestart[1] -ne $taskData -or $taskRestart[3] -ne '19371') { throw 'Restart did not preserve data directory and port' }
+            if ($taskRestart[1] -ne ($taskData + '\') -or $taskRestart[3] -ne '19371') { throw 'Restart did not preserve data directory and port' }
             if (-not (Test-Path -LiteralPath (Join-Path $taskInstall 'payload.txt'))) { throw 'Complete payload not installed' }
             if ((Get-FileHash -LiteralPath (Join-Path $taskInstall 'RoLauncher.exe')).Hash -ne (Get-FileHash -LiteralPath (Join-Path $taskPayload 'RoLauncher.exe')).Hash) { throw 'Installed executable mismatch' }
         } else {

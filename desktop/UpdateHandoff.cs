@@ -23,7 +23,7 @@ internal static class UpdateHandoff
         await File.WriteAllTextAsync(manifest, JsonSerializer.Serialize(new
         {
             Installer = installer.Path, installer.Sha256, installer.Version,
-            InstallDirectory = Path.GetDirectoryName(executable), config.DataDirectory, config.Port,
+            InstallDirectory = Path.GetDirectoryName(executable), DataDirectory = Path.GetFullPath(config.DataDirectory), config.Port,
             ParentId = parent.Id, ParentStarted = parent.StartTime.ToUniversalTime().Ticks,
             DesktopId = desktop.Id, DesktopStarted = desktop.StartTime.ToUniversalTime().Ticks
         }), cancellation);

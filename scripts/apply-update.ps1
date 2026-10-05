@@ -72,7 +72,9 @@ try {
         ConvertTo-Json | Set-Content -LiteralPath (Join-Path $taskDirectory 'result.json') -Encoding utf8
 } finally {
     if ($taskReady -and $taskCanRestart -and (Test-Path -LiteralPath $taskExecutable -PathType Leaf)) {
-        $taskLaunchArguments = @('--data-dir', ('"' + [string]$taskRequest.DataDirectory + '"'), '--port', [string]$taskRequest.Port)
-        Start-Process -FilePath $taskExecutable -ArgumentList $taskLaunchArguments -WindowStyle Hidden | Out-Null
+        # Quoted Windows arguments must double trailing backslashes, including a root data directory.
+        $taskDataArgument = [regex]::Replace([string]$taskRequest.DataDirectory, '(\\+)$', '$1$1')
+        $taskLaunchArguments = @('--data-dir', ('"' + $taskDataArgument + '"'), '--port', [string]$taskRequest.Port)
+        Start-Process -FilePath $taskExecutable -ArgumentList $taskLaunchArguments -WorkingDirectory $taskInstallDirectory -WindowStyle Hidden | Out-Null
     }
 }
