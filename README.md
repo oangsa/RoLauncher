@@ -34,7 +34,7 @@ If database corruption prevents startup, close RoLauncher and Roblox clients, th
 
 ## Update checks
 
-In Settings, configure the publisher's public GitHub repository as `owner/repository`, save it and choose **Check updates**. No repository is assumed, and no background checks occur. The checker uses GitHub's public latest-release endpoint without credentials and accepts stable MAJOR.MINOR.PATCH tags with matching versioned Windows ZIP/checksum assets from that repository. It compares numeric versions and offers download/checksum links. It does not install or execute downloaded files. Create a backup, verify SHA256, exit RoLauncher and extract the entire new ZIP into a new folder. The upgrade keeps the existing data directory and backs up schema migrations. See [GitHub's release API](https://docs.github.com/en/rest/releases/releases#get-the-latest-release).
+RoLauncher checks [its official GitHub releases](https://github.com/oangsa/RoLauncher/releases) at startup and every six hours. A banner appears when a newer stable version is available. Press **Download**, then **Relaunch** when it finishes. The app verifies SHA256, creates an encrypted backup, exits, installs silently and reopens with the same data directory and API port. Roblox clients stay open. Cancel leaves your current app running; failed checks retry automatically. Settings also has **Check updates** and **Release notes**. Only official newer installers can be applied; no Roblox cookie or local API token is sent to GitHub.
 
 ## Discord notifications
 
@@ -50,7 +50,7 @@ The webhook URL is masked in the UI and encrypted with Windows DPAPI in the acco
 
 ## Run
 
-Extract the entire Windows release ZIP and run `RoLauncher.exe`. Keep `WebView2Loader.dll` and the complete `desktop` folder beside it. The desktop includes its .NET and Windows App SDK runtimes; no separate .NET install is required. Windows 10 version 1809 or later is required. Browser sign-in requires Microsoft's [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/); cookie import works without it.
+Download the versioned `rolauncher-vVERSION-setup-x64.exe` from [GitHub releases](https://github.com/oangsa/RoLauncher/releases) and run it. It installs for your Windows user and adds a Start menu shortcut; a desktop shortcut is optional. Uninstall removes the application while retaining saved data and backups. The portable ZIP remains available: extract all files and run `RoLauncher.exe`, keeping `WebView2Loader.dll` and the complete `desktop` folder beside it. The desktop includes its .NET and Windows App SDK runtimes; no separate .NET install is required. Windows 10 version 1809 or later is required. Browser sign-in requires Microsoft's [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/); cookie import works without it.
 
 1. Choose Browser sign-in, paste a session cookie, or import a UTF-8 file containing one cookie per line. Do not send cookies to anyone, including in bug reports.
 2. Click a row's pencil icon to view account details and edit its alias, PlaceId, optional JobId or private link, and automatic rejoin. Click **Save changes** to persist the edits or **Cancel** to discard them. Invalid destinations keep the modal open and leave all saved settings unchanged. Private links support full game URLs containing `privateServerLinkCode` and `/share?code=...&type=Server` links through a conservative response adapter. Changed response formats report Unsupported rather than guessing a destination.
@@ -93,8 +93,9 @@ Default address: `http://127.0.0.1:38471`. Click API token in the native UI to o
 | GET | `/v1/diagnostics` | Sanitized status/history report |
 | GET / POST | `/v1/backups` | List encrypted backup filenames / create a backup |
 | POST | `/v1/backups/FILENAME/restore` | Restore validated backup while all accounts are stopped |
-| PATCH | `/v1/updates` | `repository`: public GitHub owner/repository; blank disables checks |
-| POST | `/v1/updates/check` | Manually check the configured publisher's stable release |
+| PATCH | `/v1/updates` | Legacy API discovery repository; blank uses the official repository. Does not change the desktop's official publisher. |
+| POST | `/v1/updates/check` | Discover the legacy configured public repository's stable release |
+| POST | `/v1/updates/official/check` | Check the official publisher; used by automatic desktop checks |
 | GET | `/v1/settings/discord` | Enabled/configured flags, recovery preference, delivery status, recent activity; no webhook URL |
 | PATCH | `/v1/settings/discord` | Optional `enabled`, `notify_recovery`, `webhook_url`; empty URL removes it (also set `enabled:false`) |
 | POST | `/v1/settings/discord/test` | Queue a test to the saved webhook, even with notifications off; HTTP 202 means queued |
@@ -123,7 +124,7 @@ Current validation is recorded in [docs/VALIDATION.md](docs/VALIDATION.md). Auto
 
 ## Build and test
 
-Recommended: install Rust stable for `x86_64-pc-windows-msvc`, Visual Studio Build Tools with Desktop development with C++, .NET 8 SDK and Python 3. The pinned Windows App SDK and Windows SDK build tools restore from NuGet. Run:
+Recommended: install Rust 1.99.0 for `x86_64-pc-windows-msvc`, Visual Studio Build Tools with Desktop development with C++, .NET 8 SDK, Python 3.13 and Inno Setup 6.7+. The pinned Windows App SDK and Windows SDK build tools restore from NuGet. Run:
 
 ```powershell
 .\scripts\build.ps1
@@ -142,6 +143,8 @@ Use `scripts\benchmark.ps1 -ProcessId PID -Seconds 30 -Output idle.json` against
 
 Previously measured 0.4.0 supervisor baseline (headless, no accounts, 15.24 seconds): **14.6 MiB working set, 2.1 MiB private memory, 0.0% recorded machine CPU** at the sampled counter resolution. This excludes the new WinUI process and does not predict total Roblox resource usage or demonstrate an advantage over C#.
 
-## License and provenance
+## License and provenance
+
+Git development uses **feature/description → PR → dev → PR → main**. Main CI builds and publishes a version tag, installer, portable package, source and reviewed changelog. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for version preparation, required checks and immutable releases.
 
 GPL-3.0-only. Protocol behavior was referenced from [ic3w0lf22/Roblox-Account-Manager](https://github.com/ic3w0lf22/Roblox-Account-Manager), archived October 2024. See `THIRD_PARTY_NOTICES.md`. The tool does not redistribute Account Manager or its `handle.exe` utility.

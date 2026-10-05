@@ -1,5 +1,15 @@
-//! Read-only release discovery. Installation stays under the user's control.
+//! Release discovery; installers are validated and applied by the desktop updater.
 use serde::{Deserialize, Serialize};
+
+pub const DEFAULT_REPOSITORY: &str = "oangsa/RoLauncher";
+
+pub fn repository_or_default(repository: &str) -> &str {
+    if repository.trim().is_empty() {
+        DEFAULT_REPOSITORY
+    } else {
+        repository
+    }
+}
 
 pub fn validate_repository(repository: &str) -> Result<(), String> {
     let parts = repository.split('/').collect::<Vec<_>>();
@@ -56,6 +66,7 @@ pub struct UpdateView {
     pub release_url: String,
     pub download_url: String,
     pub checksums_url: String,
+    pub installer_url: String,
 }
 fn parse_release(repo: &str, value: Release) -> Result<UpdateView, String> {
     validate_repository(repo)?;
@@ -79,15 +90,18 @@ fn parse_release(repo: &str, value: Release) -> Result<UpdateView, String> {
     };
     let download_url = asset("windows-x64.zip")?;
     let checksums_url = asset("SHA256SUMS.txt")?;
+    let installer_url = asset("setup-x64.exe")?;
     Ok(UpdateView {
         available: number > version(env!("CARGO_PKG_VERSION"))?,
         version: release_version,
         release_url: format!("https://github.com/{repo}/releases/tag/{}", value.tag_name),
         download_url,
         checksums_url,
+        installer_url,
     })
 }
 pub async fn check(repository: &str) -> Result<UpdateView, String> {
+    let repository = repository_or_default(repository);
     validate_repository(repository)?;
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -149,11 +163,16 @@ mod tests {
     #[test]
     fn updates_compare_numeric_versions_and_require_matching_package_links() {
         let make = || {
-            Release { tag_name: "v1.10.0".into(), draft: false, prerelease: false, assets: ["windows-x64.zip", "SHA256SUMS.txt"].iter().map(|suffix| Asset { name: format!("rolauncher-v1.10.0-{suffix}"), browser_download_url: format!("https://github.com/owner/repo/releases/download/v1.10.0/rolauncher-v1.10.0-{suffix}") }).collect() }
+            Release { tag_name: "v1.10.0".into(), draft: false, prerelease: false, assets: ["windows-x64.zip", "SHA256SUMS.txt", "setup-x64.exe"].iter().map(|suffix| Asset { name: format!("rolauncher-v1.10.0-{suffix}"), browser_download_url: format!("https://github.com/owner/repo/releases/download/v1.10.0/rolauncher-v1.10.0-{suffix}") }).collect() }
         };
         let view = parse_release("owner/repo", make()).unwrap();
         assert!(view.available);
         assert_eq!(view.version, "1.10.0");
+        assert!(
+            view.installer_url
+                .ends_with("rolauncher-v1.10.0-setup-x64.exe")
+        );
+        assert_eq!(repository_or_default(""), DEFAULT_REPOSITORY);
         assert!(version("1.10.0").unwrap() > version("1.9.9").unwrap());
         assert!(version("1.1.0-beta").is_err());
         let mut bad = make();
@@ -162,5 +181,8 @@ mod tests {
         let mut draft = make();
         draft.draft = true;
         assert!(parse_release("owner/repo", draft).is_err());
+        let mut missing = make();
+        missing.assets.pop();
+        assert!(parse_release("owner/repo", missing).is_err());
     }
 }

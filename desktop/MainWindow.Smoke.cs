@@ -35,9 +35,28 @@ public sealed partial class MainWindow
             for (var i = 0; i < 100 && _rows.Count == 0; i++) await Task.Delay(100);
             Assert(_rows.Count == 3, "Three simulated accounts load.");
             _timer.Stop();
+            for (var i = 0; i < 100 && _refreshing; i++) await Task.Delay(50);
+            Assert(!_refreshing, "Initial account and settings refresh finishes before layout measurements.");
+            await CheckForUpdateAsync(false);
+            Assert(_update?.Available == true && UpdateNotice.IsOpen && UpdateNotice.Visibility == Visibility.Visible,
+                "A newer official release appears in the persistent update banner.");
+            Assert(UpdateNoticeButton.IsEnabled && (string)UpdateNoticeButton.Content == "Download" && (string)UpdateDownloadButton.Content == "Download",
+                "The banner and Settings share the Download action.");
+            await CaptureAsync(directory, "update-available.png");
+            _downloadedUpdate = new("FIXTURE_NOT_EXECUTED", new string('0', 64), _update!.Version);
+            UpdateActions();
+            Assert((string)UpdateNoticeButton.Content == "Relaunch" && (string)UpdateDownloadButton.Content == "Relaunch",
+                "A verified ready installer changes both actions to Relaunch.");
+            _modalOpen = true;
+            await ApplyDownloadedUpdateAsync();
+            Assert(!_installingUpdate && !_exiting, "An open editor blocks relaunch without closing the app.");
+            _modalOpen = false; Feedback.IsOpen = false;
+            _update = null; _downloadedUpdate = null; UpdateNotice.IsOpen = false; UpdateNotice.Visibility = Visibility.Collapsed; UpdateActions();
+            Root.UpdateLayout();
             Assert(!Feedback.IsOpen, "No permanent Ready banner is shown at startup.");
             Tab_Click(SettingsTab, new RoutedEventArgs());
             await Task.Delay(150);
+            Root.UpdateLayout();
             var pageHeight = SettingsPage.ActualHeight;
             WebhookTest_Click(SettingsTab, new RoutedEventArgs());
             await Task.Delay(150);

@@ -26,7 +26,7 @@ fn run_shell(engine: Engine, port: u16, shell: &std::path::Path) -> Result<(), S
     let bootstrap = zeroize::Zeroizing::new(
         serde_json::json!({
             "port": port, "token": engine.token(), "version": env!("CARGO_PKG_VERSION"),
-            "parent_id": std::process::id()
+            "parent_id": std::process::id(), "data_directory": engine.data_directory()
         })
         .to_string(),
     );

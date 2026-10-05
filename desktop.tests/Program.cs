@@ -64,4 +64,5 @@ var retrying = new AccountRow(account with { Status = "backoff", NextRetry = Dat
 Check(retrying.CanRetry && retrying.Retry.Contains("Next retry"), "Scheduled retries expose a countdown and Retry now.");
 retrying.Update(retrying.Account with { RecoveryReason = "RateLimit" });
 Check(!retrying.CanRetry, "Rate-limit cooldown disables Retry now.");
-Console.WriteLine($"{passed} desktop model/editor checks passed.");
+await UpdateDownloadTests.RunAsync(Check);
+Console.WriteLine($"{passed} desktop model/editor/update checks passed.");

@@ -1,4 +1,4 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings><RestorePackagesWithLockFile>true</RestorePackagesWithLockFile></PropertyGroup>
-  <ItemGroup><Compile Include="../desktop/Models.cs" Link="Models.cs"/><Compile Include="../desktop/EditorDraft.cs" Link="EditorDraft.cs"/><Compile Include="../desktop/BulkDraft.cs" Link="BulkDraft.cs"/><Compile Include="../desktop/AccountFilter.cs" Link="AccountFilter.cs"/></ItemGroup>
+  <ItemGroup><Compile Include="../desktop/Models.cs" Link="Models.cs"/><Compile Include="../desktop/EditorDraft.cs" Link="EditorDraft.cs"/><Compile Include="../desktop/BulkDraft.cs" Link="BulkDraft.cs"/><Compile Include="../desktop/AccountFilter.cs" Link="AccountFilter.cs"/><Compile Include="../desktop/UpdateDownloader.cs" Link="UpdateDownloader.cs"/></ItemGroup>
 </Project>

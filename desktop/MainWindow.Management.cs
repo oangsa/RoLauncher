@@ -16,7 +16,6 @@ public sealed partial class MainWindow
     private BulkForm? _bulkForm;
     private ContentDialog? _bulkDialog;
     private LaunchProfile[] _profiles = [];
-    private string? _savedUpdateRepository;
     private UpdateView? _update;
     private static int PolicyIndex(string policy) => policy switch { "stay" => 1, "pause" => 2, _ => 0 };
     private static string PolicyValue(int index) => index switch { 1 => "stay", 2 => "pause", _ => "allow_public" };
@@ -28,12 +27,6 @@ public sealed partial class MainWindow
     private void UpdateManagement(Snapshot snapshot)
     {
         CompatibilityText.Text = snapshot.Compatibility;
-        if (_savedUpdateRepository != snapshot.UpdateRepository)
-        {
-            _savedUpdateRepository = snapshot.UpdateRepository; UpdateRepository.Text = snapshot.UpdateRepository;
-            _update = null; UpdateDownloadButton.IsEnabled = UpdateChecksumsButton.IsEnabled = false;
-            UpdateStatus.Text = string.IsNullOrEmpty(snapshot.UpdateRepository) ? "Set a release repository to check for updates." : "Repository saved. Check updates when ready.";
-        }
         var groups = _rows.Select(r => r.Account.Group).Distinct().OrderBy(g => g).ToArray();
         var fingerprint = JsonSerializer.Serialize(groups);
         if (fingerprint != _groupFingerprint)
@@ -263,29 +256,5 @@ public sealed partial class MainWindow
         if (BackupPicker.SelectedItem is not string name) { FeedbackMessage("Choose a backup first."); return; }
         if (!await ConfirmAsync("Restore backup?", "Current accounts, profiles, activity and Discord settings will be replaced. A backup of the current state is created first. All restored accounts remain stopped. Your current API token is retained.", "Restore")) return;
         await GuardAsync(async () => { await _api.SendAsync(HttpMethod.Post, $"backups/{Uri.EscapeDataString(name)}/restore"); await RefreshAsync(); await RefreshBackupsAsync(); FeedbackMessage("Backup restored. Accounts are stopped.", InfoBarSeverity.Success); });
-    }
-    private async void SaveUpdateRepository_Click(object sender, RoutedEventArgs e) => await GuardAsync(async () =>
-    {
-        await _api.SendAsync(HttpMethod.Patch, "updates", new { repository = UpdateRepository.Text });
-        await RefreshAsync(); FeedbackMessage("Release repository saved.", InfoBarSeverity.Success);
-    });
-    private async void CheckUpdates_Click(object sender, RoutedEventArgs e)
-    {
-        CheckUpdatesButton.IsEnabled = false; UpdateDownloadButton.IsEnabled = UpdateChecksumsButton.IsEnabled = false;
-        _update = null;
-        try { await GuardAsync(async () =>
-        {
-            var result = (await _api.SendAsync(HttpMethod.Post, "updates/check"))!.Value;
-            _update = result.Deserialize<UpdateView>(ApiClient.JsonOptions)!;
-            UpdateStatus.Text = _update.Available ? $"Version {_update.Version} is available. Create a backup, exit RoLauncher and extract the entire new ZIP into a new folder." : $"Installed v{_config.Version}; latest published version is {_update.Version}.";
-            UpdateDownloadButton.IsEnabled = UpdateChecksumsButton.IsEnabled = _update.Available;
-        }); }
-        finally { CheckUpdatesButton.IsEnabled = true; }
-    }
-    private async void OpenUpdate_Click(object sender, RoutedEventArgs e)
-    {
-        if (_update is null) return;
-        var url = (string)((Button)sender).Tag == "checksums" ? _update.ChecksumsUrl : _update.DownloadUrl;
-        await GuardAsync(async () => { if (!await Windows.System.Launcher.LaunchUriAsync(new Uri(url))) FeedbackMessage("Windows could not open the download link.", InfoBarSeverity.Error); });
     }
 }
