@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 pub fn default_directory(local_app_data: &Path) -> PathBuf {
     let current = local_app_data.join("RoLauncher");
     let legacy = local_app_data.join("RbxTools");
-    if !current.exists() && legacy.is_dir() {
+    // Download caches can create the new brand's folder without an account database.
+    // Keep using legacy state until the new folder actually contains a database.
+    if !current.join("accounts.json").exists() && legacy.is_dir() {
         legacy
     } else {
         current
@@ -231,7 +233,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn renamed_app_reuses_legacy_data_and_prefers_an_existing_new_folder() {
+    fn renamed_app_reuses_legacy_data_despite_a_new_update_cache() {
         let root = std::env::temp_dir().join(format!("rolauncher-data-{}", uuid::Uuid::new_v4()));
         let current = root.join("RoLauncher");
         let legacy = root.join("RbxTools");
@@ -246,7 +248,14 @@ mod tests {
             b"existing encrypted database fixture"
         );
         assert!(!current.exists());
-        std::fs::create_dir(&current).unwrap();
+        std::fs::create_dir_all(current.join("updates")).unwrap();
+        std::fs::write(current.join("updates").join("download.partial"), b"fixture").unwrap();
+        assert_eq!(default_directory(&root), legacy);
+        assert_eq!(
+            std::fs::read(&saved).unwrap(),
+            b"existing encrypted database fixture"
+        );
+        std::fs::write(current.join("accounts.json"), b"new database fixture").unwrap();
         assert_eq!(default_directory(&root), current);
         std::fs::remove_dir_all(root).unwrap();
     }

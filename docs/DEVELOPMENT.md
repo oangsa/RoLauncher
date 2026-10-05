@@ -13,3 +13,21 @@ Windows builds require Rust 1.99.0 (MSVC plus the C++ build tools and Windows SD
 The updater fetches public release metadata without Roblox credentials. Only stable newer releases from `oangsa/RoLauncher` can be downloaded by the desktop. Downloads are capped, verified against SHA256SUMS and rechecked before installation. Relaunch creates a DPAPI backup, starts a hidden two-phase helper, and closes RoLauncher itself. The helper holds original process exit handles, waits for both app processes, runs the per-user installer silently, and restarts with the same data directory and API port. It never closes Roblox clients. The installer keeps data outside its install folder and refuses downgrades. Portable installations can also update in place when their directory is writable.
 
 The app and installer are not code-signed. SHA256 protects against corruption and mismatched downloads; it depends on the integrity of the official GitHub publisher. Windows may show an unknown-publisher prompt for a new download. Signing requires an owner-provided certificate or signing service.
+
+## Build and test
+
+Recommended: install Rust 1.99.0 for `x86_64-pc-windows-msvc`, Visual Studio Build Tools with Desktop development with C++, .NET 8 SDK, Python 3.13 and Inno Setup 6.7+. The pinned Windows App SDK and Windows SDK build tools restore from NuGet. Run:
+
+```powershell
+
+.\scripts\build.ps1
+
+.\scripts\test.ps1
+
+```
+
+Build output is `dist\rolauncher`, including the WinUI shell in `desktop`. The scripts also support workspace-local Rust/GCC and .NET toolchains, without changing machine-wide environment variables. `Cargo.lock` and the desktop package lock files pin dependencies. Run `cargo fmt` after Rust source edits. `scripts\test.ps1` runs Rust tests, desktop model/editor checks and the actual WinUI shell against a loopback fixture with simulated accounts. It renders previews under `target\ui-preview`; it does not use saved accounts, launch Roblox or send Discord messages.
+
+After tests and `cargo clippy --locked --all-targets -- -D warnings` pass, `scripts\package.ps1` builds versioned Windows/source ZIPs and SHA256 checksums. It refuses to replace existing release artifacts.
+
+See [Resource usage](PERFORMANCE.md) for measurement instructions.
