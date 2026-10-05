@@ -32,7 +32,8 @@ with zipfile.ZipFile(dist / f"{name}-source.zip") as source:
     paths = {p.replace("\\", "/"): p for p in source.namelist()}
     for filename in ["Cargo.toml", "Cargo.lock", "AGENTS.md", "README.md", "src/engine/management.rs",
                      "src/updates.rs", "desktop/MainWindow.Management.cs", "desktop/BulkDraft.cs",
-                     f"docs/RELEASE-{version}.md", "docs/VALIDATION.md", "desktop/packages.lock.json",
+                     f"docs/RELEASE-{version}.md", "docs/VALIDATION.md", "docs/API.md", "docs/USAGE.md",
+                     "docs/DEVELOPMENT.md", "docs/PERFORMANCE.md", "desktop/packages.lock.json",
                      "desktop.tests/packages.lock.json", "desktop/RoLauncher.Desktop.csproj",
                      "desktop.tests/RoLauncher.Desktop.Tests.csproj", "src/store.rs", "src/platform.rs",
                      "scripts/verify-package.py", "build.rs", "assets/RoLauncher.ico", "installer/RoLauncher.iss",
@@ -54,6 +55,8 @@ with zipfile.ZipFile(dist / f"{name}-windows-x64.zip") as package:
         assert f"{name}/{filename}" in paths, filename
     assert package.read(paths[f"{name}/AGENTS.md"]) == (root / "AGENTS.md").read_bytes()
     assert package.read(paths[f"{name}/README.md"]) == (root / "README.md").read_bytes()
+    for filename in ["API.md", "USAGE.md", "DEVELOPMENT.md", "PERFORMANCE.md"]:
+        assert package.read(paths[f"{name}/docs/{filename}"]) == (root / "docs" / filename).read_bytes()
     assert not any("RbxTools.Desktop" in p or p.endswith("/rbx-tools.exe") for p in paths)
     assert b"RbxTools" not in package.read(paths[f"{name}/desktop/RoLauncher.Desktop.dll"])
     assert "WinUI bridge passed".encode("utf-16le") not in package.read(paths[f"{name}/desktop/RoLauncher.Desktop.dll"])
