@@ -4,6 +4,7 @@
     <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <RootNamespace>RoLauncher.Desktop</RootNamespace>
+    <ApplicationIcon>../assets/RoLauncher.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <Platforms>x64</Platforms>
     <PlatformTarget>x64</PlatformTarget>
@@ -23,6 +24,10 @@
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.4654" />
   </ItemGroup>
   <ItemGroup><Content Include="CHANGELOG.txt" CopyToOutputDirectory="PreserveNewest" /></ItemGroup>
+  <ItemGroup>
+    <Content Include="../assets/RoLauncher.ico" Link="RoLauncher.ico" CopyToOutputDirectory="PreserveNewest" />
+    <EmbeddedResource Include="../scripts/apply-update.ps1" LogicalName="RoLauncher.ApplyUpdate.ps1" />
+  </ItemGroup>
   <Target Name="PublishXamlResources" BeforeTargets="ComputeFilesToPublish" AfterTargets="Build">
     <ItemGroup><ResolvedFileToPublish Include="$(TargetDir)$(TargetName).pri"><RelativePath>$(TargetName).pri</RelativePath><CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory></ResolvedFileToPublish></ItemGroup>
   </Target>

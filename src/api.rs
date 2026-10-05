@@ -44,6 +44,7 @@ pub fn router(engine: Engine) -> Router {
         .route("/v1/backups/{name}/restore", post(restore))
         .route("/v1/updates", patch(update_repository))
         .route("/v1/updates/check", post(update_check))
+        .route("/v1/updates/official/check", post(official_update_check))
         .route("/v1/login", post(browser_login))
         .route("/v1/accounts/{id}", patch(update).delete(remove))
         .route("/v1/accounts/{id}/repair", post(repair))
@@ -101,6 +102,12 @@ async fn update_check(
     State(engine): State<Engine>,
 ) -> Result<Json<crate::updates::UpdateView>, ApiError> {
     crate::updates::check(&engine.snapshot().update_repository)
+        .await
+        .map(Json)
+        .map_err(error)
+}
+async fn official_update_check() -> Result<Json<crate::updates::UpdateView>, ApiError> {
+    crate::updates::check(crate::updates::DEFAULT_REPOSITORY)
         .await
         .map(Json)
         .map_err(error)

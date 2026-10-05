@@ -33,7 +33,7 @@
       <SolidColorBrush x:Key="TextControlBorderBrushFocused" Color="#18181B"/>
       <SolidColorBrush x:Key="PasswordBoxBorderBrushFocused" Color="#18181B"/>
     </Grid.Resources>
-    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
     <Grid Margin="28,22,28,18" ColumnSpacing="16">
       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
       <StackPanel Spacing="4">
@@ -51,7 +51,10 @@
         <ToggleButton x:Name="RecoveryTab" Content="Recovery" Tag="3" Click="Tab_Click" Padding="20,8" CornerRadius="7"/>
       </StackPanel>
     </Border>
-    <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" HorizontalScrollMode="Disabled" Padding="28,0,28,8">
+    <InfoBar x:Name="UpdateNotice" Grid.Row="2" Margin="28,0,28,18" Visibility="Collapsed" IsOpen="False" IsClosable="False" Severity="Informational">
+      <InfoBar.ActionButton><Button x:Name="UpdateNoticeButton" Content="Download" Click="UpdateAction_Click"/></InfoBar.ActionButton>
+    </InfoBar>
+    <ScrollViewer Grid.Row="3" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" HorizontalScrollMode="Disabled" Padding="28,0,28,8">
       <Grid MinWidth="860">
         <StackPanel x:Name="AccountsPage" Spacing="16">
           <Border Style="{StaticResource Card}">
@@ -208,10 +211,9 @@
           </Border>
           <Border Style="{StaticResource Card}"><StackPanel Spacing="12">
             <TextBlock Text="Updates" Style="{StaticResource SectionTitle}"/>
-            <TextBlock Text="Choose the publisher’s public GitHub repository. Checks run only when requested. Download the complete ZIP and verify its SHA256 checksum before upgrading." Style="{StaticResource Caption}" TextWrapping="Wrap"/>
-            <TextBox x:Name="UpdateRepository" Header="Release repository · owner/repository" MaxLength="201"/>
-            <StackPanel Orientation="Horizontal" Spacing="8"><Button Content="Save repository" Click="SaveUpdateRepository_Click"/><Button x:Name="CheckUpdatesButton" Content="Check updates" Click="CheckUpdates_Click"/><Button x:Name="UpdateDownloadButton" Content="Download package" Click="OpenUpdate_Click" Tag="download" IsEnabled="False"/><Button x:Name="UpdateChecksumsButton" Content="View checksums" Click="OpenUpdate_Click" Tag="checksums" IsEnabled="False"/></StackPanel>
-            <TextBlock x:Name="UpdateStatus" Text="No update check has run." TextWrapping="Wrap" Style="{StaticResource Caption}"/>
+            <TextBlock Text="RoLauncher checks GitHub automatically on startup and every six hours. Download an available update, then choose Relaunch to install it. Your accounts and settings are backed up, and Roblox clients stay open." Style="{StaticResource Caption}" TextWrapping="Wrap"/>
+            <StackPanel Orientation="Horizontal" Spacing="8"><Button x:Name="CheckUpdatesButton" Content="Check updates" Click="CheckUpdates_Click"/><Button x:Name="UpdateDownloadButton" Content="Download" Click="UpdateAction_Click" IsEnabled="False"/><Button x:Name="UpdateReleaseNotesButton" Content="Release notes" Click="OpenUpdate_Click" IsEnabled="False"/></StackPanel>
+            <TextBlock x:Name="UpdateStatus" Text="Updates are checked automatically." TextWrapping="Wrap" Style="{StaticResource Caption}"/>
           </StackPanel></Border>
         </StackPanel>
         <Border x:Name="ChangelogPage" Style="{StaticResource Card}" Visibility="Collapsed">

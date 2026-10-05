@@ -1,6 +1,6 @@
 # RoLauncher 1.0.0
 
-Reissued on 2026-10-06 under the RoLauncher name at the explicitly requested version 1.0.0. The Windows entry point is `RoLauncher.exe`, with `RoLauncher.Desktop` companion files. Application UI, tray actions, browser sign-in, Discord identity, user agents, exports, project names, documentation and update package matching now use the new brand. Packages are named `rolauncher-v1.0.0-*`; existing RbxTools release artifacts are preserved.
+First public installer release on 2026-10-06 under the RoLauncher name at the explicitly requested version 1.0.0. The Windows entry point is `RoLauncher.exe`, with `RoLauncher.Desktop` companion files. Application UI, tray actions, browser sign-in, Discord identity, user agents, exports, project names, documentation and update package matching use the new brand and the selected launch-arrow icon. Packages are named `rolauncher-v1.0.0-*`; earlier local release artifacts are preserved.
 
 New installs use `%LOCALAPPDATA%\RoLauncher`. Existing `%LOCALAPPDATA%\RbxTools` data is reused when the new folder is absent, so accounts, profiles, history and encrypted backups remain available without credential copying. New `.rolbackup` files and existing `.rbxbackup` files are supported. Both old and new application coordination locks are held to prevent simultaneous supervision by the two brands.
 
@@ -12,8 +12,8 @@ The Recovery page shows reasons, retry countdowns and policy status, with Retry 
 
 Persistent history keeps 1,000 safe events with account filters. Support-report export uses allowlisted fields and excludes credentials, private links, trackers and raw errors/logs. Ten whole-file DPAPI backups support automatic previous-state/pre-upgrade protection, manual snapshots, validated stopped-account restore and offline corruption recovery. Restored accounts stay stopped. Backups remain bound to the Windows user.
 
-Manual update discovery uses a configured public GitHub repository, stable numeric version tags and matching package/checksum links. It does not auto-install or execute downloads, and no publisher repository is assumed.
+Automatic update checks use the official `oangsa/RoLauncher` GitHub repository at startup and every six hours. Press Download to fetch a newer stable installer and verify SHA256, then Relaunch to create a backup, close RoLauncher, install silently and reopen with the same data directory and API port. The helper waits for both application processes using their original exit handles. Roblox clients stay open. Download cancellation and failed preparation leave the current app running. No Roblox credentials or local API token are sent to GitHub.
 
-The Windows ZIP includes the self-contained desktop, WebView2Loader.dll, notices and AGENTS.md. Corresponding source and SHA256 checksums are included. Existing artifacts are not replaced.
+`rolauncher-v1.0.0-setup-x64.exe` installs per user with a Start menu shortcut and uninstall support; no administrator access is required. It includes the complete self-contained desktop, WebView2Loader.dll, notices and AGENTS.md. The portable Windows ZIP, corresponding source ZIP and SHA256SUMS are also included. Main CI verifies and publishes all four files with the reviewed changelog through the feature PR → dev → main flow. Published artifacts are not replaced. The installer is not code-signed, so Windows may show an unknown-publisher prompt.
 
 Automated checks and real-client limitations are recorded in VALIDATION.md. Live multi-account launch, end-to-end Roblox recovery, real Discord delivery and 10/50-client resource measurements remain required before claiming those integrations are verified. This artifact does not claim those checks have passed.
