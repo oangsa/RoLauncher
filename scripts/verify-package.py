@@ -17,10 +17,16 @@ name = f"rolauncher-v{version}"
 dist = root / "dist"
 parser = argparse.ArgumentParser()
 parser.add_argument("--smoke-shell", action="store_true")
+parser.add_argument("--dist-directory", type=Path, default=dist)
 args = parser.parse_args()
-for line in (dist / f"{name}-SHA256SUMS.txt").read_text().splitlines():
+dist = args.dist_directory.resolve()
+lines = (dist / f"{name}-SHA256SUMS.txt").read_text().splitlines()
+assert {line.split()[1] for line in lines} == {f"{name}-source.zip", f"{name}-windows-x64.zip", f"{name}-setup-x64.exe"}
+for line in lines:
     digest, filename = line.split()
     assert hashlib.sha256((dist / filename).read_bytes()).hexdigest() == digest, filename
+with (dist / f"{name}-setup-x64.exe").open("rb") as installer:
+    assert installer.read(2) == b"MZ", "Installer must be a Windows executable"
 with zipfile.ZipFile(dist / f"{name}-source.zip") as source:
     assert source.testzip() is None
     paths = {p.replace("\\", "/"): p for p in source.namelist()}
@@ -29,7 +35,9 @@ with zipfile.ZipFile(dist / f"{name}-source.zip") as source:
                      f"docs/RELEASE-{version}.md", "docs/VALIDATION.md", "desktop/packages.lock.json",
                      "desktop.tests/packages.lock.json", "desktop/RoLauncher.Desktop.csproj",
                      "desktop.tests/RoLauncher.Desktop.Tests.csproj", "src/store.rs", "src/platform.rs",
-                     "scripts/verify-package.py"]:
+                     "scripts/verify-package.py", "build.rs", "assets/RoLauncher.ico", "installer/RoLauncher.iss",
+                     "scripts/apply-update.ps1", "scripts/build-installer.ps1", ".github/workflows/ci-release.yml",
+                     "desktop/MainWindow.Updates.cs", "desktop/UpdateDownloader.cs", "desktop/UpdateHandoff.cs", "CHANGELOG.md"]:
         assert filename in paths, filename
         assert source.read(paths[filename]) == (root / filename).read_bytes(), filename
     assert not any("/bin/" in p or "/obj/" in p or ".tools/" in p for p in paths)
@@ -42,7 +50,7 @@ with zipfile.ZipFile(dist / f"{name}-windows-x64.zip") as package:
     paths = {p.replace("\\", "/"): p for p in package.namelist()}
     for filename in ["RoLauncher.exe", "WebView2Loader.dll", "AGENTS.md", "README.md", "LICENSE",
                      "THIRD_PARTY_NOTICES.md", "desktop/RoLauncher.Desktop.exe", "desktop/RoLauncher.Desktop.pri",
-                     "desktop/CHANGELOG.txt", "desktop/licenses/dependencies.json", "licenses/dependencies.json"]:
+                     "desktop/CHANGELOG.txt", "desktop/RoLauncher.ico", "desktop/licenses/dependencies.json", "licenses/dependencies.json"]:
         assert f"{name}/{filename}" in paths, filename
     assert package.read(paths[f"{name}/AGENTS.md"]) == (root / "AGENTS.md").read_bytes()
     assert package.read(paths[f"{name}/README.md"]) == (root / "README.md").read_bytes()
@@ -56,6 +64,19 @@ if args.smoke_shell:
     class Fixture(BaseHTTPRequestHandler):
         def log_message(self, *_):
             pass
+        def respond(self, body):
+            data = json.dumps(body).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        def do_POST(self):
+            requests.append(self.path)
+            assert self.path == "/v1/updates/official/check", self.path
+            self.respond(dict(repository="oangsa/RoLauncher", current_version=version, version=version,
+                              available=False, release_url=f"https://github.com/oangsa/RoLauncher/releases/tag/v{version}",
+                              download_url="", checksums_url="", installer_url=""))
         def do_GET(self):
             requests.append(self.path)
             if self.path == "/v1/status":
@@ -66,12 +87,7 @@ if args.smoke_shell:
                 body = []
             else:
                 body = {}
-            data = json.dumps(body).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+            self.respond(body)
     server = ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     config = dict(port=server.server_port, token="FIXTURE_ONLY_" + "x" * 48, version=version, parent_id=os.getpid())
@@ -84,6 +100,7 @@ if args.smoke_shell:
             time.sleep(0.1)
         assert process.poll() is None, f"Published shell exited: {process.returncode}"
         assert requests.count("/v1/status") >= 2 and "/v1/settings/discord" in requests, requests
+        assert "/v1/updates/official/check" in requests, "Automatic startup update check did not occur"
         print("Published WinUI shell passed startup/polling against an isolated API fixture; no saved accounts or external services accessed.")
     finally:
         if process.poll() is None:

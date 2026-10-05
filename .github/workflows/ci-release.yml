@@ -1,0 +1,108 @@
+name: CI and release
+
+on:
+  push:
+    branches: [main, dev, 'feature/**']
+  pull_request:
+    branches: [dev, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  branch-flow:
+    name: Branch flow
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require feature PRs into dev and dev PRs into main
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.base_ref }}
+          HEAD: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            if [ "$BASE" = main ]; then
+              test "$HEAD" = dev && test "$HEAD_REPO" = "$REPO"
+            else
+              case "$HEAD" in feature/*) ;; *) exit 1 ;; esac
+            fi
+          fi
+
+  windows-checks:
+    name: Windows checks
+    needs: branch-flow
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
+          if ($LASTEXITCODE -ne 0) { throw 'Rust installation failed' }
+          rustup default 1.99.0
+      - name: Check version and release notes
+        run: python scripts/check-release.py
+      - name: Rust, desktop and WinUI tests
+        run: ./scripts/test.ps1
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test isolated installer and update handoff
+        run: ./scripts/test-installer.ps1
+      - name: Package executable installer, portable app and corresponding source
+        run: ./scripts/package.ps1
+      - name: Verify packaged files and published desktop
+        run: python scripts/verify-package.py --smoke-shell
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          path: |
+            dist/rolauncher-v*-setup-x64.exe
+            dist/rolauncher-v*-windows-x64.zip
+            dist/rolauncher-v*-source.zip
+            dist/rolauncher-v*-SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: test-diagnostics
+          path: |
+            target/ui-preview/*.txt
+            target/ui-preview/*.png
+            target/ui-bridge/*.txt
+
+  release:
+    name: Publish stable release
+    needs: windows-checks
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    concurrency:
+      group: publish-stable-release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-files
+          path: dist
+      - name: Publish verified assets and versioned changelog
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/publish-release.py

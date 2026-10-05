@@ -158,6 +158,9 @@ impl Engine {
     pub fn token(&self) -> &str {
         &self.0.token
     }
+    pub fn data_directory(&self) -> &std::path::Path {
+        &self.0.store.directory
+    }
     pub fn snapshot(&self) -> Snapshot {
         let s = self.0.state.lock().unwrap();
         snapshot(&s)

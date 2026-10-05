@@ -42,6 +42,7 @@ public sealed partial class MainWindow : Window
         RecoveryList.ItemsSource = _rows;
         var hwnd = WindowNative.GetWindowHandle(this);
         var appWindow = AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(hwnd));
+        appWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "RoLauncher.ico"));
         var scale = NativeTray.Scale(hwnd);
         var work = DisplayArea.GetFromWindowId(appWindow.Id, DisplayAreaFallback.Primary).WorkArea;
         appWindow.Resize(new Windows.Graphics.SizeInt32(Math.Min((int)(1180 * scale), work.Width - 48),
@@ -60,6 +61,8 @@ public sealed partial class MainWindow : Window
         _ = RefreshAsync();
 #if UI_SMOKE
         Root.Loaded += async (sender, e) => await SmokeAsync();
+#else
+        Root.Loaded += (_, _) => StartUpdateChecks();
 #endif
     }
 
@@ -478,5 +481,6 @@ public sealed partial class MainWindow : Window
     private void DisposeResources()
     {
         _disposed = true; _timer.Stop(); _feedbackTimer.Stop(); _tray.Dispose(); _api.Dispose();
+        DisposeUpdateResources();
     }
 }

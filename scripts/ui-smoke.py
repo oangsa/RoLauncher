@@ -46,6 +46,14 @@ class Fixture(BaseHTTPRequestHandler):
         commands.append(self.path)
         data = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         body = json.loads(data) if data else None
+        if self.path == "/v1/updates/official/check":
+            major, minor, patch = map(int, version.split('.'))
+            newer = f"{major}.{minor}.{patch + 1}"
+            prefix = f"https://github.com/oangsa/RoLauncher/releases/download/v{newer}/rolauncher-v{newer}"
+            self.reply(dict(available=True, version=newer,
+                release_url=f"https://github.com/oangsa/RoLauncher/releases/tag/v{newer}",
+                download_url=prefix + "-windows-x64.zip", checksums_url=prefix + "-SHA256SUMS.txt", installer_url=prefix + "-setup-x64.exe"))
+            return
         if self.path == "/v1/profiles":
             selected = [next(a for a in accounts if a["id"] == i) for i in body["account_ids"]]
             entries = [dict(account_id=a["id"], alias=a["alias"], target=a["target"], auto_recovery=a["auto_recovery"], fallback_policy=a.get("fallback_policy", "allow_public"), group=a.get("group", "")) for a in selected]

@@ -7,7 +7,11 @@
 • Destination fallback policy: allow public, stay on destination, or pause and notify.
 • Persistent bounded history, account filtering and sanitized support-report export.
 • Ten encrypted local backups, pre-upgrade protection, stopped-account restore and offline corruption recovery.
-• Manual public-GitHub release checks with versioned package/checksum links. Configure the publisher repository in Settings.
+• Launch-arrow app/tray icon and a per-user Windows executable installer with shortcuts and uninstall support.
+
+• Automatic official-GitHub update checks at startup and every six hours. Download verifies SHA256; Relaunch backs up data, installs and reopens automatically. Roblox clients stay open.
+
+• Reviewed feature → dev → main delivery, Windows CI and versioned GitHub releases with complete source, notices and checksums.
 • Live multi-account Roblox, recovery and Discord delivery remain unverified; see docs/VALIDATION.md.
 
 0.7.0

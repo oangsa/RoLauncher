@@ -16,3 +16,5 @@ GNU builds may include GCC runtime and winpthreads DLLs. These carry their upstr
 The WinUI 3 desktop uses Microsoft's Windows App SDK, Windows SDK projections/build tools and .NET runtime. Versions and package integrity hashes are pinned in desktop/packages.lock.json. The self-contained desktop includes the relevant package license files, nuspec metadata and runtime third-party notices in desktop/licenses. These components retain their respective Microsoft/MIT and other upstream terms; see the included notices.
 
 Distribute the complete Rust and XAML/C# application source, Cargo.lock and desktop package lock files with any binary redistribution under GPL-3.0. Do not redistribute build tool archives or unrelated personal credentials.
+
+The Windows executable installer is built with Inno Setup by Jordan Russell and Martijn Laan (https://jrsoftware.org/). Its unchanged license and copyright notice are included in licenses/inno-setup.txt. Inno Setup is a separate build tool and retains its own license.

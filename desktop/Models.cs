@@ -14,7 +14,7 @@ public sealed record LaunchProfile(string Id, string Name, ProfileEntry[] Entrie
     public override string ToString() => $"{Name} · {Entries.Length} accounts";
 }
 public sealed record Snapshot(Account[] Accounts, bool NetworkSuspended, string Compatibility, LaunchProfile[]? Profiles = null, string UpdateRepository = "");
-public sealed record UpdateView(bool Available, string Version, string ReleaseUrl, string DownloadUrl, string ChecksumsUrl);
+public sealed record UpdateView(bool Available, string Version, string ReleaseUrl, string DownloadUrl, string ChecksumsUrl, string InstallerUrl = "");
 public sealed record Activity(DateTimeOffset Timestamp, string AccountId, ulong? PlaceId, string Status, uint Failures, string Message)
 {
     public string Summary => $"{Timestamp.ToLocalTime():g} · {(AccountId.Length == 0 ? "RoLauncher" : $"Account {AccountId}")} · {Status.Replace('_', ' ')} · {Message}";
