@@ -1,0 +1,16 @@
+/target/
+/.tools/
+/dist/
+*.tmp
+/data/
+**/bin/
+**/obj/
+/.codex/
+/.agents/
+.env
+.env.*
+accounts.json
+accounts*.tmp
+*.rolbackup
+*.rbxbackup
+**/__pycache__/

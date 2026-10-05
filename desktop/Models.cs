@@ -1,0 +1,55 @@
+using System.ComponentModel;
+
+namespace RoLauncher.Desktop;
+
+public sealed record Target(ulong PlaceId, string? JobId, string? PrivateServerLink);
+public sealed record ProcessInfo(uint Pid);
+public sealed record Account(string Id, string Username, string Alias, Target? Target,
+    bool AutoRecovery, string Status, ProcessInfo? Process, uint Failures, string? LastError,
+    string Group = "", string FallbackPolicy = "allow_public", DateTimeOffset? NextRetry = null,
+    string RecoveryReason = "", bool PublicFallbackActive = false, bool DesiredRunning = false);
+public sealed record ProfileEntry(string AccountId, string Alias, Target? Target, bool AutoRecovery, string FallbackPolicy, string Group);
+public sealed record LaunchProfile(string Id, string Name, ProfileEntry[] Entries)
+{
+    public override string ToString() => $"{Name} · {Entries.Length} accounts";
+}
+public sealed record Snapshot(Account[] Accounts, bool NetworkSuspended, string Compatibility, LaunchProfile[]? Profiles = null, string UpdateRepository = "");
+public sealed record UpdateView(bool Available, string Version, string ReleaseUrl, string DownloadUrl, string ChecksumsUrl);
+public sealed record Activity(DateTimeOffset Timestamp, string AccountId, ulong? PlaceId, string Status, uint Failures, string Message)
+{
+    public string Summary => $"{Timestamp.ToLocalTime():g} · {(AccountId.Length == 0 ? "RoLauncher" : $"Account {AccountId}")} · {Status.Replace('_', ' ')} · {Message}";
+}
+public sealed record Notice(DateTimeOffset Timestamp, string Account, string Title, string Message, ulong? PlaceId);
+public sealed record DiscordView(bool Enabled, bool Configured, bool NotifyRecovery, string DeliveryStatus, Notice[] Recent);
+
+public sealed class AccountRow(Account account) : INotifyPropertyChanged
+{
+    public Account Account { get; private set; } = account;
+    public string Id => Account.Id;
+    public string Alias => Account.Alias;
+    public string Group => string.IsNullOrEmpty(Account.Group) ? "Ungrouped" : Account.Group;
+    public string Retry => Account.NextRetry is { } time ? $"Next retry in {Math.Max(0, (int)(time - DateTimeOffset.UtcNow).TotalSeconds)}s · {time.ToLocalTime():T}" : Account.Status == "reconnecting" ? "Waiting through the 30-second reconnect grace" : "No retry scheduled";
+    public string Recovery => Account.RecoveryReason switch { "Auth" => "Session expired · sign in again", "Permission" => "Experience denied access", "TargetUnavailable" => "Configured destination unavailable", "Unsupported" => "Integration compatibility needs attention", "RateLimit" => "Rate limited · waiting before retry", "Network" => "Connectivity interrupted", _ => Error };
+    public bool CanRetry => Account.Status == "backoff" && Account.NextRetry is not null && Account.AutoRecovery && Account.DesiredRunning && Account.RecoveryReason != "RateLimit";
+    public string Fallback => Account.PublicFallbackActive ? "Public fallback active" : Account.FallbackPolicy switch { "stay" => "Stay on destination", "pause" => "Pause and notify if unavailable", _ => "Public fallback allowed" };
+    public string Username => $"@{Account.Username}";
+    public string Pid => Account.Process?.Pid.ToString() ?? "—";
+    public string Status => Account.Status switch
+    {
+        "needs_attention" => "Needs attention",
+        "stopped" => "Stopped", "queued" => "Queued", "launching" => "Launching",
+        "running" => "Running", "reconnecting" => "Reconnecting", "backoff" => "Backoff", _ => "Unknown"
+    };
+    public string Destination => Account.Target is null ? "Set target" : Account.Target.PlaceId.ToString();
+    public string DestinationKind => Account.Target?.PrivateServerLink is not null ? "Private server" : Account.Target?.JobId is not null ? "Specific server" : "Public server";
+    public string Failures => Account.Failures.ToString();
+    public string RecoveryAttempts => $"{Account.Failures}/5 consecutive failed attempts";
+    public string Rejoin => Account.AutoRecovery ? "On" : "Off";
+    public string Error => (Account.LastError ?? "—").Replace("recovery", "rejoin").Replace("Recovery", "Rejoin");
+    public void Update(Account account)
+    {
+        Account = account;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));
+    }
+    public event PropertyChangedEventHandler? PropertyChanged;
+}

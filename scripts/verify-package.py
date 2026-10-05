@@ -1,0 +1,92 @@
+"""Verify the current version's release artifacts; optional isolated published-shell smoke."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import threading
+import time
+import zipfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+root = Path(__file__).resolve().parent.parent
+version = re.search(r'^version = "(\d+\.\d+\.\d+)"', (root / "Cargo.toml").read_text(encoding="utf-8"), re.M)[1]
+name = f"rolauncher-v{version}"
+dist = root / "dist"
+parser = argparse.ArgumentParser()
+parser.add_argument("--smoke-shell", action="store_true")
+args = parser.parse_args()
+for line in (dist / f"{name}-SHA256SUMS.txt").read_text().splitlines():
+    digest, filename = line.split()
+    assert hashlib.sha256((dist / filename).read_bytes()).hexdigest() == digest, filename
+with zipfile.ZipFile(dist / f"{name}-source.zip") as source:
+    assert source.testzip() is None
+    paths = {p.replace("\\", "/"): p for p in source.namelist()}
+    for filename in ["Cargo.toml", "Cargo.lock", "AGENTS.md", "README.md", "src/engine/management.rs",
+                     "src/updates.rs", "desktop/MainWindow.Management.cs", "desktop/BulkDraft.cs",
+                     f"docs/RELEASE-{version}.md", "docs/VALIDATION.md", "desktop/packages.lock.json",
+                     "desktop.tests/packages.lock.json", "desktop/RoLauncher.Desktop.csproj",
+                     "desktop.tests/RoLauncher.Desktop.Tests.csproj", "src/store.rs", "src/platform.rs",
+                     "scripts/verify-package.py"]:
+        assert filename in paths, filename
+        assert source.read(paths[filename]) == (root / filename).read_bytes(), filename
+    assert not any("/bin/" in p or "/obj/" in p or ".tools/" in p for p in paths)
+    assert f'version = "{version}"'.encode() in source.read(paths["Cargo.toml"])
+    assert re.search(r'name = "rolauncher"\s+version = "' + re.escape(version) + '"', source.read(paths["Cargo.lock"]).decode())
+    assert source.read(paths["README.md"]).decode().startswith(f"# RoLauncher {version}")
+    assert not any("RbxTools.Desktop" in p for p in paths)
+with zipfile.ZipFile(dist / f"{name}-windows-x64.zip") as package:
+    assert package.testzip() is None
+    paths = {p.replace("\\", "/"): p for p in package.namelist()}
+    for filename in ["RoLauncher.exe", "WebView2Loader.dll", "AGENTS.md", "README.md", "LICENSE",
+                     "THIRD_PARTY_NOTICES.md", "desktop/RoLauncher.Desktop.exe", "desktop/RoLauncher.Desktop.pri",
+                     "desktop/CHANGELOG.txt", "desktop/licenses/dependencies.json", "licenses/dependencies.json"]:
+        assert f"{name}/{filename}" in paths, filename
+    assert package.read(paths[f"{name}/AGENTS.md"]) == (root / "AGENTS.md").read_bytes()
+    assert package.read(paths[f"{name}/README.md"]) == (root / "README.md").read_bytes()
+    assert not any("RbxTools.Desktop" in p or p.endswith("/rbx-tools.exe") for p in paths)
+    assert b"RbxTools" not in package.read(paths[f"{name}/desktop/RoLauncher.Desktop.dll"])
+    assert "WinUI bridge passed".encode("utf-16le") not in package.read(paths[f"{name}/desktop/RoLauncher.Desktop.dll"])
+print("Verified SHA256, intact ZIPs, matching version/source/instructions, runtime and license files, and absence of smoke code/build caches.")
+
+if args.smoke_shell:
+    requests = []
+    class Fixture(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+        def do_GET(self):
+            requests.append(self.path)
+            if self.path == "/v1/status":
+                body = dict(accounts=[], profiles=[], update_repository="", network_suspended=False, compatibility="Isolated release fixture")
+            elif self.path == "/v1/settings/discord":
+                body = dict(enabled=False, configured=False, notify_recovery=True, delivery_status="Fixture only", recent=[])
+            elif self.path in ("/v1/backups", "/v1/activity"):
+                body = []
+            else:
+                body = {}
+            data = json.dumps(body).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    config = dict(port=server.server_port, token="FIXTURE_ONLY_" + "x" * 48, version=version, parent_id=os.getpid())
+    process = subprocess.Popen([str(dist / name / "desktop" / "RoLauncher.Desktop.exe")], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        process.stdin.write((json.dumps(config) + "\n").encode())
+        process.stdin.close()
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline and requests.count("/v1/status") < 2 and process.poll() is None:
+            time.sleep(0.1)
+        assert process.poll() is None, f"Published shell exited: {process.returncode}"
+        assert requests.count("/v1/status") >= 2 and "/v1/settings/discord" in requests, requests
+        print("Published WinUI shell passed startup/polling against an isolated API fixture; no saved accounts or external services accessed.")
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=10)
+        server.shutdown()

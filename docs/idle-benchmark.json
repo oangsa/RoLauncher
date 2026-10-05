@@ -1,0 +1,8 @@
+{
+  "processId": 32184,
+  "elapsedSeconds": 15.2372395,
+  "cpuPercentOfMachine": 0.0,
+  "meanWorkingSetBytes": 15306752.0,
+  "meanPrivateBytes": 2195456.0,
+  "scope": "This process only; measure Roblox and temporary WebView2 processes separately"
+}

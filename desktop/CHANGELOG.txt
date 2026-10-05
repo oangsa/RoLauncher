@@ -1,0 +1,44 @@
+1.0.0 — RoLauncher: saved sessions and dependable recovery
+
+• Renamed to RoLauncher, including the desktop, tray, notifications, exports and release packages. Existing saved accounts and encrypted backups remain supported.
+• Edit selected or all accounts together: aliases/patterns, destinations, rejoin, groups and fallback. Unchecked fields stay unchanged; all changes save atomically.
+• Organize accounts into groups and save launch profiles with individual account settings. Review, apply, launch, replace, rename, import and export profiles.
+• Recovery dashboard with reasons, countdowns, eligible Retry now and account-specific sign-in repair.
+• Destination fallback policy: allow public, stay on destination, or pause and notify.
+• Persistent bounded history, account filtering and sanitized support-report export.
+• Ten encrypted local backups, pre-upgrade protection, stopped-account restore and offline corruption recovery.
+• Manual public-GitHub release checks with versioned package/checksum links. Configure the publisher repository in Settings.
+• Live multi-account Roblox, recovery and Discord delivery remain unverified; see docs/VALIDATION.md.
+
+0.7.0
+Action feedback now appears as a compact toast at the top center, disappears after five seconds and can be dismissed early. New actions restart the timeout; repeated background warnings do not keep the toast open.
+
+0.6.1
+Match the status and automatic-rejoin filter height to the search input and Clear button.
+
+0.6.0
+Account details now open in a modal with Save and Cancel. Each row has view/edit and delete icons. Search aliases/usernames and combine status and automatic-rejoin filters. Bulk actions apply to visible selections; deletion asks for confirmation.
+
+0.5.0
+WinUI 3 desktop workspace. Minimal monochrome cards, modern native controls, status badges and improved account editing.
+
+0.4.0
+Discord webhook alerts for kicks, disconnects, client exits and accounts needing attention. Optional rejoin/back-online updates, encrypted webhook settings, test delivery and Recent activity log.
+
+0.3.0
+Accounts, Settings and Changelog tabs. Valid account edits save automatically. Automatic rejoin can be changed for selected accounts. Ctrl+A selects all accounts for bulk actions.
+
+0.2.0
+Broader kick, disconnect and failed-join detection. Reconnection can cancel replacement during the grace period.
+
+0.1.4
+Detect connection-failed error 279 in current Roblox logs.
+
+0.1.3
+Fix rejoin being paused when a client exited while it was being closed.
+
+0.1.2
+Fix authentication-ticket requests and PID discovery for current clients.
+
+0.1.0
+Initial native Windows account launcher, encrypted sessions and local API.

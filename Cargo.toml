@@ -1,0 +1,39 @@
+[package]
+name = "rolauncher"
+version = "1.0.0"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "Native Windows Roblox account launcher and recovery supervisor"
+
+[[bin]]
+name = "RoLauncher"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.8"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+futures-util = "0.3"
+rand = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "cookies"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+url = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+zeroize = "1"
+
+[target.'cfg(windows)'.dependencies]
+wmi = "0.18"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_System_Memory", "Win32_System_Threading", "Win32_System_RestartManager", "Win32_System_LibraryLoader", "Win32_System_Com", "Win32_UI_WindowsAndMessaging", "Win32_UI_Controls", "Win32_UI_Controls_Dialogs", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com"] }
+webview2-com = "0.39"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
