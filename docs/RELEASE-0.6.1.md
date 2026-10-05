@@ -1,5 +1,7 @@
 # RoLauncher 0.6.1
 
-Fixes the shorter status and automatic-rejoin dropdowns in the Accounts toolbar. Both filters now stretch to the row height and center their text, matching the search input and Clear button at Windows DPI scales.
+2026-10-05 · Windows x64
 
-The Windows release includes the complete self-contained desktop, WebView2Loader.dll, license notices and AGENTS.md, with corresponding source and SHA256 checksums. Extract the entire ZIP and run RoLauncher.exe.
+- Matched status and rejoin filter heights to the Accounts toolbar.
+
+Normal and smaller-window previews were checked; existing tests passed.
