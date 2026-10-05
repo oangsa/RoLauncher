@@ -7,6 +7,8 @@
 - Added a per-user Windows `.exe` installer with shortcuts and uninstall support.
 - Check the official GitHub repository automatically at startup and every six hours. Download a verified installer, then press Relaunch to back up data, install and reopen automatically. Roblox clients stay open.
 - Added groups, atomic bulk editing, saved launch profiles, recovery policies, persistent history, support reports and encrypted backups.
+- Kept legacy accounts available when an update download creates the new data folder before migration.
+- Simplified the README and separated the user guide, API reference and build instructions.
 - Added reviewed `feature/* -> dev -> main` delivery, Windows CI, versioned release notes, corresponding source, license notices and SHA256 checksums.
 
 The first public GitHub release remains 1.0.0 at the owner's explicit request. Earlier local packages are retained. See `docs/VALIDATION.md` for test coverage and live-integration limitations.
