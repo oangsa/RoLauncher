@@ -32,7 +32,7 @@ fn main() {
     'Fixture data must remain byte-for-byte unchanged' | Set-Content -LiteralPath $taskSentinel
     $taskDataHash = (Get-FileHash -LiteralPath $taskSentinel).Hash
     & "$PSScriptRoot\build-installer.ps1" -DistributionDirectory $taskPayload -OutputDirectory $taskTest -TestInstaller
-    $taskVersion = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version = "(\d+\.\d+\.\d+)"').Groups[1].Value
+    $taskVersion = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version = "(\d+\.\d+\.\d+(?:-dev\.[0-9a-f]{12})?)"').Groups[1].Value
     $taskInstaller = Join-Path $taskTest "rolauncher-v$taskVersion-setup-x64.exe"
     $taskHash = (Get-FileHash -LiteralPath $taskInstaller -Algorithm SHA256).Hash
     $taskPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'

@@ -9,7 +9,9 @@ from urllib.request import Request, urlopen
 from release_files import checked_files
 
 root = Path(__file__).resolve().parent.parent
-version = re.search(r'^version = "(\d+\.\d+\.\d+)"', (root / 'Cargo.toml').read_text(), re.M)[1]
+version = re.search(r'^version = "(\d+\.\d+\.\d+(?:-dev\.[0-9a-f]{12})?)"', (root / 'Cargo.toml').read_text(), re.M)[1]
+if "-dev." in version:
+    raise ValueError("Development builds must never be published to GitHub; prepare an intentional stable/beta release first")
 tag = 'v' + version
 repo = os.environ['GITHUB_REPOSITORY']
 sha = os.environ['GITHUB_SHA']

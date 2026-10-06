@@ -4,7 +4,7 @@ $taskRoot = Split-Path -Parent $PSScriptRoot
 Push-Location -LiteralPath $taskRoot
 try {
     . "$PSScriptRoot\environment.ps1"
-    $taskVersion = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version = "(\d+\.\d+\.\d+)"').Groups[1].Value
+    $taskVersion = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version = "(\d+\.\d+\.\d+(?:-dev\.[0-9a-f]{12})?)"').Groups[1].Value
     & dotnet restore desktop/RoLauncher.Desktop.csproj --locked-mode --configfile desktop/NuGet.Config -p:Platform=x64
     if ($LASTEXITCODE -ne 0) { throw 'WinUI dependency restore failed' }
     $taskArgs = @('publish', 'desktop/RoLauncher.Desktop.csproj', '--no-restore', '-c', 'Release', '-p:Platform=x64', "-p:Version=$taskVersion", '-o', $OutputDirectory)

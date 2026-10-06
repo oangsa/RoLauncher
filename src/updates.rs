@@ -43,6 +43,16 @@ fn version(value: &str) -> Result<(u64, u64, u64), String> {
         parts[2].parse().map_err(|_| "Invalid release version")?,
     ))
 }
+fn newer_than_current(candidate: (u64, u64, u64), current: &str) -> Result<bool, String> {
+    let (base, development) = match current.split_once("-dev.") {
+        Some((base, hash)) if hash.len() == 12 && hash.bytes().all(|c| c.is_ascii_hexdigit()) => {
+            (base, true)
+        }
+        _ => (current, false),
+    };
+    let current = version(base)?;
+    Ok(candidate > current || (development && candidate == current))
+}
 #[derive(Deserialize)]
 pub struct RepositoryPatch {
     pub repository: String,
@@ -108,7 +118,7 @@ fn parse_release(repo: &str, value: Release, include_beta: bool) -> Result<Updat
     #[cfg(target_os = "linux")]
     let installer_url = String::new();
     Ok(UpdateView {
-        available: number > version(env!("CARGO_PKG_VERSION"))?,
+        available: newer_than_current(number, env!("CARGO_PKG_VERSION"))?,
         version: release_version,
         release_url: format!("https://github.com/{repo}/releases/tag/{}", value.tag_name),
         download_url,
@@ -304,6 +314,11 @@ mod tests {
         assert_eq!(repository_or_default(""), DEFAULT_REPOSITORY);
         assert!(version("1.10.0").unwrap() > version("1.9.9").unwrap());
         assert!(version("1.1.0-beta").is_err());
+        assert!(newer_than_current((1, 4, 0), "1.4.0-dev.123456abcdef").unwrap());
+        assert!(!newer_than_current((1, 3, 0), "1.4.0-dev.123456abcdef").unwrap());
+        assert!(!newer_than_current((1, 4, 0), "1.4.0").unwrap());
+        assert!(newer_than_current((1, 5, 0), "1.4.0-dev.123456abcdef").unwrap());
+        assert!(newer_than_current((1, 4, 0), "1.4.0-dev.invalid").is_err());
         let mut bad = make();
         bad.assets
             .iter_mut()

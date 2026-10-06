@@ -1,9 +1,13 @@
-param([switch]$Debug, [string]$OutputDirectory = 'dist\rolauncher')
+param([switch]$UseCurrentVersion, [switch]$Debug, [string]$OutputDirectory = 'dist\rolauncher')
 $ErrorActionPreference = 'Stop'
 $taskRoot = Split-Path -Parent $PSScriptRoot
 Push-Location -LiteralPath $taskRoot
 try {
     . "$PSScriptRoot\environment.ps1"
+    if (-not $UseCurrentVersion) {
+        & python "$PSScriptRoot\versioning.py"
+        if ($LASTEXITCODE -ne 0) { throw 'Development version stamping failed' }
+    }
     $taskArgs = @('build', '--locked')
     if (-not $Debug) { $taskArgs += '--release' }
     & cargo @taskArgs

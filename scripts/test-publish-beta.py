@@ -40,6 +40,12 @@ class GitHubFixture:
 
 
 class BetaChecks(unittest.TestCase):
+    def test_local_development_build_is_rejected_before_github_access(self):
+        fixture = GitHubFixture()
+        with self.assertRaises(ValueError):
+            beta.publish(fixture, {}, "1.4.0-dev.123456abcdef", SHA, "Local preview")
+        self.assertEqual(fixture.calls, [])
+
     def test_publishes_only_after_complete_upload_and_never_latest(self):
         api = GitHubFixture()
         beta.publish(api, {"test.zip": b"verified"}, "1.1.0", SHA, "notes")

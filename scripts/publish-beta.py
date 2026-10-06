@@ -10,6 +10,8 @@ from release_files import checked_files
 
 
 def publish(call, files, version, sha, notes):
+    if "-dev." in version:
+        raise ValueError("Development builds must never be published to GitHub; prepare an intentional stable/beta release first")
     tag = "beta-v" + version
     existing_tag = call("/git/ref/tags/" + tag)
     obj = existing_tag["object"]
@@ -65,7 +67,9 @@ def publish(call, files, version, sha, notes):
 
 def main():
     root = Path(__file__).resolve().parent.parent
-    version = re.search(r'^version = "(\d+\.\d+\.\d+)"', (root / "Cargo.toml").read_text(), re.M)[1]
+    version = re.search(r'^version = "(\d+\.\d+\.\d+(?:-dev\.[0-9a-f]{12})?)"', (root / "Cargo.toml").read_text(), re.M)[1]
+    if "-dev." in version:
+        raise ValueError("Development builds must never be published to GitHub")
     repo = os.environ["GITHUB_REPOSITORY"]
     sha = os.environ["GITHUB_SHA"]
     if repo != "oangsa/RoLauncher" or os.environ.get("GITHUB_REF") != "refs/tags/beta-v" + version:

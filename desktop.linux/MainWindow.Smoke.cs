@@ -22,10 +22,33 @@ public sealed partial class MainWindow
             for (var i = 0; i < 100 && (_rows.Count == 0 || _refreshing); i++) await Task.Delay(100);
             _timer.Stop();
             Check(_rows.Count == 3 && !_refreshing, "Simulated accounts load through the authenticated API.");
-            Check(_config.Version == GetType().Assembly.GetName().Version!.ToString(3), "Version matches the supervisor.");
+            Check(_config.Version == GetType().Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false).Cast<System.Reflection.AssemblyInformationalVersionAttribute>().Single().InformationalVersion.Split('+')[0], "Version matches the supervisor.");
             Root.UpdateLayout();
             Check(Math.Abs(GroupFilter.ActualHeight - BulkEditButton.ActualHeight) < 0.5 && GroupFilter.ActualHeight > 0, "The group dropdown matches the adjacent button height.");
             await CaptureLinuxAsync(directory, "accounts.png");
+            Tab_Click(PresetsTab, new RoutedEventArgs());
+            var lookup = ShowPresetLookupAsync();
+            await WaitLinuxAsync(() => _presetLookupDialog.ActualWidth > 0, "Linux lookup modal opens.");
+            PresetSearch.Text = "alpha"; await Task.Delay(100);
+            PresetSelectVisible_Click(PresetAccounts, new RoutedEventArgs());
+            Check(_presetVisibleRows.Count == 1 && PresetLookupIds.Count == 1 && PresetSelected().Length == 0, "Preset lookup selects the searched account.");
+            PresetSearch.Text = "beta"; await Task.Delay(100);
+            Check(PresetLookupIds.Count == 1 && PresetLookupSummary.Text.Contains("hidden"), "Lookup choices survive Linux filtering.");
+            PresetSearch.Text = ""; await Task.Delay(100);
+            Root.UpdateLayout();
+            Check(PresetTableHeader.ColumnDefinitions.Count == 6 && PresetTable.ActualWidth >= 640, "Linux renders the six-column account lookup table.");
+            await CaptureLinuxAsync(directory, "preset-account-lookup.png", _presetLookupDialog);
+            _presetLookupDialog.Hide(); await lookup;
+            Check(PresetSelected().Length == 0 && !_modalOpen, "Cancel discards Linux lookup choices.");
+            lookup = ShowPresetLookupAsync();
+            await WaitLinuxAsync(() => _presetLookupDialog.ActualWidth > 0, "Linux lookup reopens.");
+            PresetSearch.Text = "alpha"; await Task.Delay(100);
+            PresetSelectVisible_Click(PresetAccounts, new RoutedEventArgs());
+            Root.UpdateLayout();
+            var useAccounts = FindLinux<Button>(_presetLookupDialog, "PrimaryButton") ?? throw new InvalidOperationException("Lookup confirmation button missing.");
+            SendPointerClick(useAccounts); await lookup.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(PresetSelected().Length == 1 && !_modalOpen, "Native Linux lookup confirmation commits the selected accounts.");
+            Tab_Click(AccountsTab, new RoutedEventArgs());
             NameSearch.Text = "alpha";
             ApplyFilters();
             Check(_visibleRows.Count == 1, "The shared name filter works.");
@@ -45,7 +68,8 @@ public sealed partial class MainWindow
             await Task.Delay(200);
             File.WriteAllText(Path.Combine(directory, "pointer-trace.txt"), string.Join("\n", trace) + $"\nrow {rowButton.ActualWidth}x{rowButton.ActualHeight}; tag {rowButton.Tag}; modal {_modalOpen}; feedback {Feedback.Message}");
             Check(_modalOpen && _editorRow == ResolveAccount(rowButton), "Actual row edit button resolves the clicked account.");
-            AccountDialog.Hide(); await Task.Delay(200);
+            _accountDialog.Hide();
+            await WaitLinuxAsync(() => !_modalOpen, "The row editor finishes closing before another dialog opens.");
             Tab_Click(SettingsTab, new RoutedEventArgs());
             PageScroll.ChangeView(null, 10000, null, true); await Task.Delay(150);
             Tab_Click(AccountsTab, new RoutedEventArgs()); await Task.Delay(150);
@@ -57,19 +81,19 @@ public sealed partial class MainWindow
             await Task.Delay(150);
             await CaptureLinuxAsync(directory, "recovery.png");
             var changelog = ShowChangelogAsync();
-            await Task.Delay(150);
-            var popup = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetOpenPopupsForXamlRoot(Root.XamlRoot).First();
-            await CaptureLinuxAsync(directory, "changelog.png", (FrameworkElement)popup.Child);
-            _changelogDialog!.Hide(); await changelog;
+            await WaitLinuxAsync(() => _changelogDialog is { ActualWidth: > 0, ActualHeight: > 0 }, "The changelog dialog opens.");
+            var changelogDialog = _changelogDialog!;
+            await CaptureLinuxAsync(directory, "changelog.png", changelogDialog);
+            changelogDialog.Hide(); await changelog;
             Tab_Click(AccountsTab, new RoutedEventArgs());
             var originalAlias = _rows[0].Alias;
             var showing = ShowAccountAsync(_rows[0]);
             await Task.Delay(250);
-            Check(AccountDialog.ActualWidth > 0 && AccountDialog.ActualHeight > 0, "The account dialog opens in a popup.");
+            Check(_accountDialog.ActualWidth > 0 && _accountDialog.ActualHeight > 0, "The account dialog opens in a popup.");
             Check(DialogFields.DataContext == _rows[0] && AliasInput.Text == originalAlias, "The shared editor binds the selected account.");
             AliasInput.Text = "Cancelled fixture edit";
-            await CaptureLinuxAsync(directory, "account-dialog.png", AccountDialog);
-            AccountDialog.Hide();
+            await CaptureLinuxAsync(directory, "account-dialog.png", _accountDialog);
+            _accountDialog.Hide();
             await showing;
             Check(!_modalOpen && _rows[0].Alias == originalAlias, "Cancel closes the editor without saving edits.");
             showing = ShowAccountAsync(_rows[0]);
@@ -79,7 +103,7 @@ public sealed partial class MainWindow
             PlaceInput.Text = "1";
             AliasInput.Text = "Saved Linux fixture";
             Check(await SaveEditorAsync(), "Valid editor changes reach the authenticated API.");
-            AccountDialog.Hide();
+            _accountDialog.Hide();
             await showing;
             Check(_rows[0].Alias == "Saved Linux fixture", "Saved account edits are refreshed from the API.");
             showing = ShowBulkAsync(_rows.ToArray());
@@ -100,7 +124,7 @@ public sealed partial class MainWindow
         catch (Exception e)
         {
             // Never include API tokens, cookies, request bodies or raw process arguments.
-            File.WriteAllText(Path.Combine(directory, "result.txt"), "FAILED: " + e.GetType().Name + ": " + e.Message);
+            File.WriteAllText(Path.Combine(directory, "result.txt"), "FAILED: " + e.GetType().Name + ": " + e.Message + "\n" + e.StackTrace);
         }
         finally { _exiting = true; Close(); }
     }
@@ -158,6 +182,15 @@ public sealed partial class MainWindow
     [DllImport("libX11.so.6")] private static extern int XFlush(nint display);
     private static void Check(bool condition, string message)
     { if (!condition) throw new InvalidOperationException(message); }
+    private static async Task WaitLinuxAsync(Func<bool> ready, string message)
+    {
+        for (var i = 0; i < 100; i++)
+        {
+            if (ready()) return;
+            await Task.Delay(50);
+        }
+        throw new InvalidOperationException(message);
+    }
     private async Task CaptureLinuxAsync(string directory, string name, FrameworkElement? content = null)
     {
         Root.UpdateLayout();

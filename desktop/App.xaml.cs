@@ -9,7 +9,6 @@ public partial class App : Microsoft.UI.Xaml.Application
     private MainWindow? _window;
     public App()
     {
-        RequestedTheme = ApplicationTheme.Light;
 #if UI_SMOKE
         DebugSettings.IsXamlResourceReferenceTracingEnabled = true;
         DebugSettings.XamlResourceReferenceFailed += (sender, e) =>

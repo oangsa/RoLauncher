@@ -81,7 +81,7 @@ fn run() -> Result<(), String> {
     let multi = platform::MultiInstanceGuard::acquire();
     #[cfg(windows)]
     let compatibility = if multi.is_ok() {
-        "OS multi-instance mutex acquired; Roblox launch, mapping and log compatibility require live validation".into()
+        "OS multi-instance coordination initialized; if an existing client owns the mutex, close it yourself and retry Start. Roblox launch, mapping and log compatibility require live validation".into()
     } else {
         multi.as_ref().err().unwrap().clone()
     };
@@ -90,8 +90,14 @@ fn run() -> Result<(), String> {
         Ok(_) => "Linux / Sober: built-in per-account runtime/IPC isolation; concurrent game sessions and UI parity require live validation".into(),
         Err(error) => error.clone(),
     };
-    let engine = Engine::open(Store::new(directory)?, compatibility)?;
-    engine.set_launch_allowed(multi.is_ok());
+    #[cfg(windows)]
+    let launch_gate = multi
+        .as_ref()
+        .map(|guard| guard.launch_gate())
+        .unwrap_or_else(|_| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    #[cfg(target_os = "linux")]
+    let launch_gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(multi.is_ok()));
+    let engine = Engine::open_with_launch_gate(Store::new(directory)?, compatibility, launch_gate)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()

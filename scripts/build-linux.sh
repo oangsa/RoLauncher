@@ -2,6 +2,11 @@
 set -euo pipefail
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
+if [[ "${1:-}" == "--use-current-version" ]]; then
+    shift
+else
+    python3 scripts/versioning.py
+fi
 version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
 output="${1:-$root/target/linux/rolauncher-v$version}"
 # Publish executes from the project directory, so resolve custom relative outputs now.

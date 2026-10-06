@@ -96,6 +96,10 @@ try:
         if shell.returncode or not result.exists() or not result.read_text().startswith("Linux shell smoke passed"):
             # Only compile/smoke fixture diagnostics; no live credentials exist here.
             (args.output / "runtime.txt").write_text(errors[-20000:])
+            if result.exists():
+                print(result.read_text(), flush=True)
+            if errors:
+                print(errors[-20000:], flush=True)
             raise RuntimeError("Linux UI smoke failed; see isolated runtime.txt")
     assert "/v1/status" in requests and "/v1/settings/discord" in requests
     assert patches == [("/v1/accounts/1", {"alias": "Saved Linux fixture"})], "Only the explicit Save may change fixture accounts"

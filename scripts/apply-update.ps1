@@ -25,7 +25,7 @@ function Get-InstallerHash([string]$taskPath) {
 }
 try {
     $taskRequest = Get-Content -LiteralPath $Manifest -Raw | ConvertFrom-Json
-    if ($taskRequest.Version -notmatch '^\d+\.\d+\.\d+$' -or $taskRequest.Sha256 -notmatch '^[a-fA-F0-9]{64}$' -or
+    if ($taskRequest.Version -notmatch '^\d+\.\d+\.\d+(?:-dev\.[0-9a-f]{12})?$' -or $taskRequest.Sha256 -notmatch '^[a-fA-F0-9]{64}$' -or
         $taskRequest.Port -lt 1 -or $taskRequest.Port -gt 65535) { throw 'Invalid update request' }
     $taskStage = 'paths'
     $taskInstaller = [IO.Path]::GetFullPath([string]$taskRequest.Installer)
