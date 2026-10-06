@@ -15,7 +15,7 @@ For the portable ZIP, extract everything and run `RoLauncher.exe`. Keep `WebView
 
 ## Manage accounts
 
-- Use the pencil icon to edit an alias, Place ID, optional Job ID/private link, and rejoin settings. **Save changes** saves; **Cancel** discards edits.
+- Use the pencil icon to edit an alias, choose a saved game or enter a Place ID, optional Job ID/private link, and rejoin settings. **Save changes** saves; **Cancel** discards edits.
 - Search by alias or username, or filter by status, group, and rejoin setting.
 - Ctrl-click/Shift-click selects several rows. Ctrl+A selects visible accounts.
 - **Edit selected** changes a batch. Check **Apply** only for fields you want to change. The whole batch saves together.
@@ -23,11 +23,15 @@ For the portable ZIP, extract everything and run `RoLauncher.exe`. Keep `WebView
 
 Alias patterns accept `{username}`, `{id}`, and `{index}`. Destination changes apply on the next launch.
 
-## Groups and profiles
+## Saved games
+
+Open **Games → Add game**, name the profile, and enter its Place ID and optional private-server link or Job ID. RoLauncher fetches the game name and thumbnail using a saved Roblox session. Edit or delete profiles from the game cards. Choose **Saved game** in the account editor or bulk editor to copy its destination; changes apply on the next launch. Editing or deleting a profile leaves destinations already saved on accounts intact.
+
+## Groups and account presets
 
 Set a group in the account editor to organize and filter accounts.
 
-In Settings, select accounts and choose **Save selected as profile**. Use **Review / launch** to check and launch a saved setup, or **Apply settings** to restore settings without launching. Profiles can be replaced, renamed, deleted, imported, or exported.
+Under **Settings → Legacy account presets**, select accounts and choose **Save selected as profile**. Use **Review / launch** to check and launch a saved setup, or **Apply settings** to restore settings without launching. Profiles can be replaced, renamed, deleted, imported, or exported.
 
 Profile exports contain account settings and private links, but no session cookies. Keep private links private.
 
@@ -35,7 +39,7 @@ Profile exports contain account settings and private links, but no session cooki
 
 Enable **Automatic rejoin** for accounts you want RoLauncher to recover. Turning it off cancels automatic retries and leaves running clients open.
 
-The Recovery page shows retry reasons and countdowns. **Retry now** advances an eligible retry. **Sign in again** repairs an expired session using the same account; press Start afterward.
+The read-only **Dashboard** shows account counts, event trends over the past 24 hours, retry reasons, persistent history, and recent activity. History filters also filter the event trend. Use **Accounts → More → Retry selected now** to advance an eligible retry. Select one account and choose **More → Sign in again** to repair an expired session; press Start afterward.
 
 Choose a fallback policy:
 
@@ -47,7 +51,7 @@ Choose a fallback policy:
 
 Disconnects allow 30 seconds to reconnect. Five failed attempts pause recovery. Authentication errors and uncertain process ownership require attention. **Unknown** means the app cannot confirm the connection; it does not mean Running.
 
-**Stop** closes the managed client. Closing the app window hides it in the tray. **Exit** leaves Roblox open and stops supervision.
+**Stop** closes the managed client. In **Settings → Window**, choose whether closing minimizes to tray or closes completely. Closing completely leaves Roblox clients open and stops supervision. Linux minimizes to the taskbar when a tray host is unavailable. The changelog icon beside the version opens the latest two releases and links to the full changelog.
 
 ## Backups and data
 

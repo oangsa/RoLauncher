@@ -32,6 +32,7 @@ impl Store {
         if !path.exists() {
             return Ok(Database {
                 version: 2,
+                close_to_tray: true,
                 ..Default::default()
             });
         }
@@ -143,6 +144,7 @@ impl Store {
         if !matches!(db.version, 1 | 2)
             || db.accounts.len() > 50
             || db.profiles.len() > 50
+            || db.game_profiles.len() > 100
             || db.activity.len() > 1000
         {
             return Err("Unsupported backup schema or size".into());
@@ -174,6 +176,14 @@ impl Store {
         }
         db.retired_launches.clear();
         db.version = 2;
+        let mut game_ids = std::collections::HashSet::new();
+        let mut game_names = std::collections::HashSet::new();
+        for profile in &db.game_profiles {
+            profile.validate()?;
+            if !game_ids.insert(profile.id) || !game_names.insert(profile.name.to_lowercase()) {
+                return Err("Duplicate backup game profiles".into());
+            }
+        }
         for profile in &db.profiles {
             if profile.name.trim().is_empty()
                 || profile.name.len() > 100

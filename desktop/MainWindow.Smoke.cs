@@ -83,7 +83,7 @@ public sealed partial class MainWindow
             await Task.Delay(150);
             Assert(Feedback.IsOpen && Feedback.Message == "Test queued. Check recent activity for delivery status.", "Send test displays the toast.");
             var toastPosition = Feedback.TransformToVisual(Root).TransformPoint(new Windows.Foundation.Point());
-            Assert(toastPosition.Y == 12 && Math.Abs(toastPosition.X + Feedback.ActualWidth / 2 - Root.ActualWidth / 2) < 1,
+            Assert(toastPosition.Y == 12 && Math.Abs(toastPosition.X + Feedback.ActualWidth / 2 - (Root.ActualWidth + 152) / 2) < 1,
                 "Toast overlays the top center of the window.");
             Assert(SettingsPage.ActualHeight == pageHeight, "Toast does not move or resize page content.");
             await CaptureAsync(directory, "toast.png");
@@ -200,9 +200,34 @@ public sealed partial class MainWindow
             await Task.Delay(150);
             commands = await _api.GetAsync<string[]>("test/commands");
             Assert(commands.Contains("/v1/login"), "Browser sign-in uses the authenticated bridge.");
-            Tab_Click(ChangelogTab, new RoutedEventArgs());
+            var changelog = ShowChangelogAsync();
             await Task.Delay(500);
-            await CaptureAsync(directory, "changelog.png");
+            await CaptureAsync(directory, "changelog.png", OpenDialog());
+            InvokeDialogButton("CloseButton"); await changelog;
+            Tab_Click(SettingsTab, new RoutedEventArgs());
+            PageScroll.ChangeView(null, 10000, null, true); await Task.Delay(150);
+            Tab_Click(AccountsTab, new RoutedEventArgs()); await Task.Delay(150);
+            Assert(PageScroll.VerticalOffset == 0, "Page switching resets the Settings scroll position.");
+            Tab_Click(GamesTab, new RoutedEventArgs());
+            var game = EditGameAsync(null); await Task.Delay(300);
+            FindVisual<TextBox>(_gameDialog!, "GameProfileName")!.Text = "Private fixture";
+            FindVisual<TextBox>(_gameDialog!, "GamePlace")!.Text = "123";
+            await CaptureAsync(directory, "game-editor.png", _gameDialog);
+            InvokeDialogButton("PrimaryButton"); await game.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert(_gameProfiles.Length == 1 && _gameProfiles[0].GameName == "Fixture game", "Saving a game resolves metadata and persists its destination.");
+            await CaptureAsync(directory, "games.png");
+            game = EditGameAsync(_gameProfiles[0]); await Task.Delay(300);
+            FindVisual<TextBox>(_gameDialog!, "GameProfileName")!.Text = "Renamed fixture";
+            InvokeDialogButton("PrimaryButton"); await game.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert(_gameProfiles.Length == 1 && _gameProfiles[0].Name == "Renamed fixture", "Editing preserves game identity.");
+            modal = ShowAccountAsync(_rows[0]); await Task.Delay(300);
+            DialogGame.SelectedItem = _gameProfiles[0];
+            Assert(PlaceInput.Text == "123", "Saved games populate account destinations.");
+            InvokeDialogButton("PrimaryButton"); await modal.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert(_rows[0].Account.Target!.PlaceId == 123, "Account save applies a saved game.");
+            CloseBehavior.SelectedIndex = 1; await Task.Delay(300);
+            Assert(!_closeToTray && !(await _api.GetAsync<Snapshot>("status")).CloseToTray, "Close preference saves through the API.");
+            CloseBehavior.SelectedIndex = 0; await Task.Delay(300);
             Tab_Click(AccountsTab, new RoutedEventArgs());
             var bulk = ShowBulkAsync([_rows[0], _rows[2]]);
             await Task.Delay(450);
@@ -291,7 +316,7 @@ public sealed partial class MainWindow
             _rows.Clear();
             ApplyFilters();
             await CaptureAsync(directory, "empty.png");
-            File.WriteAllText(Path.Combine(directory, "result.txt"), "WinUI smoke passed: bulk settings Save/Cancel, atomic invalid/rejected saves, alias patterns, selected/all account scopes, groups and filtering, saved profile review/apply, backup picker, recovery/history and account filtering; inherited toast, modal, deletion, selection, bulk-action, sign-in, resize and rendering checks.");
+            File.WriteAllText(Path.Combine(directory, "result.txt"), "WinUI smoke passed: sidebar scroll reset, saved game create/edit/account selection, close preference, changelog modal; bulk settings Save/Cancel, atomic invalid/rejected saves, alias patterns, selected/all account scopes, groups and filtering, saved profile review/apply, backup picker, recovery/history and account filtering; inherited toast, modal, deletion, selection, bulk-action, sign-in, resize and rendering checks.");
         }
         catch (Exception ex)
         {

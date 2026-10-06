@@ -1,4 +1,4 @@
-# RoLauncher 1.2.1
+# RoLauncher 1.3.0
 
 A Roblox account launcher. Manage your accounts, save launch profiles, and reconnect automatically when a session disconnects. Windows uses native WinUI; the Linux development port reuses the same views through Uno and targets Sober on Ubuntu and Arch with GNOME and KDE.
 
@@ -12,15 +12,17 @@ Choose the **setup-x64.exe** installer, run it, then open RoLauncher from the St
 
 Requires Windows 10 (1809+) or Windows 11, 64-bit. Browser sign-in needs the [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/).
 
-[**Download the 1.2.1 Linux preview**](https://github.com/oangsa/RoLauncher/releases/tag/v1.2.1)
+[**Download the 1.3.0 Linux preview**](https://github.com/oangsa/RoLauncher/releases/tag/v1.3.0)
 
 For Linux, choose **linux-x64.tar.gz** and follow the [setup instructions](docs/LINUX.md#install-the-linux-preview). Linux remains a preview even though the Windows release is stable.
 
 ## Features
 
-- Organize accounts into groups and launch them with saved profiles.
+- Save games with thumbnails and private-server destinations, then choose them in account settings.
+- Organize accounts into groups and launch them together.
 - Edit several accounts at once and manage automatic rejoin.
-- View recovery status and activity history.
+- Monitor a read-only Dashboard with account counts, event trends, and activity history.
+- Navigate from the sidebar and choose whether closing minimizes to tray or exits.
 - Keep encrypted backups and receive optional Discord alerts.
 - Update with **Download → Relaunch** when a new version is available.
 - Use **Settings → Include beta updates** to opt into beta releases. Windows 1.0.0 and 1.1.0 can update to this stable version through their existing update check.

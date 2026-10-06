@@ -110,6 +110,56 @@ impl Roblox {
             .await
             .is_ok_and(|r| r.status().is_success())
     }
+    pub async fn game_details(
+        &self,
+        cookie: &str,
+        place_id: u64,
+    ) -> Result<(String, Option<String>), Failure> {
+        let response = self
+            .client
+            .get("https://games.roblox.com/v1/games/multiget-place-details")
+            .query(&[("placeIds", place_id.to_string())])
+            .header(COOKIE, Self::cookie_header(cookie)?)
+            .send()
+            .await
+            .map_err(|_| Failure::network())?;
+        Self::check(response.status(), "Game lookup")?;
+        let details: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|_| Failure::new(FailureKind::Other, "Game details unavailable"))?;
+        let game = details
+            .as_array()
+            .and_then(|a| a.first())
+            .ok_or_else(|| Failure::new(FailureKind::TargetUnavailable, "Game not found"))?;
+        let name = game["name"]
+            .as_str()
+            .ok_or_else(|| Failure::new(FailureKind::Other, "Game name unavailable"))?
+            .to_string();
+        let universe = game["universeId"]
+            .as_u64()
+            .ok_or_else(|| Failure::new(FailureKind::Other, "Game universe unavailable"))?;
+        // A delayed thumbnail must not prevent saving a destination.
+        let thumbnail = async {
+            let response = self
+                .client
+                .get("https://thumbnails.roblox.com/v1/games/icons")
+                .query(&[
+                    ("universeIds", universe.to_string()),
+                    ("size", "150x150".into()),
+                    ("format", "Png".into()),
+                    ("isCircular", "false".into()),
+                ])
+                .header(COOKIE, Self::cookie_header(cookie).ok()?)
+                .send()
+                .await
+                .ok()?;
+            let value: serde_json::Value = response.json().await.ok()?;
+            value["data"][0]["imageUrl"].as_str().map(str::to_string)
+        }
+        .await;
+        Ok((name, thumbnail))
+    }
     pub async fn launch_uri(
         &self,
         cookie: &str,

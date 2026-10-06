@@ -12,6 +12,8 @@ Typography is a known parity gap. [Uno uses Open Sans by default outside Windows
 
 ## Runtime prerequisites
 
+Flatpak 1.15.6 or newer is required for the input-device grant. Older distro packages must be updated before using the launcher. See the [Flatpak device reference](https://docs.flatpak.org/en/latest/flatpak-command-reference.html#flatpak-metadata).
+
 Install Sober yourself from Flathub, complete its first-run setup, and use its unmodified runtime. RoLauncher does not install, patch or change Roblox or Sober binaries or client configuration.
 
 Ubuntu 24.04+ development prerequisites:
@@ -76,7 +78,9 @@ cd ..
 python3 scripts/ui-smoke-linux.py --shell target/linux-ui-smoke/RoLauncher.Desktop
 ```
 
-The fixture captures Accounts, Settings, Recovery, Changelog, account and bulk dialogs, and feedback without using real accounts. It checks filtering, selection, account Save/Cancel, invalid edit rejection and bulk Cancel. Smoke output must not be shipped. The package verifier separately starts the normal Uno shell against a simulated authenticated API and checks supervisor-exit cleanup. These tests do not exercise Secret Service, WebKit sign-in or Sober. Screenshot success proves rendering and selected interactions only; it is not a visual parity assertion.
+Linux UI development tests also require XTest (`libxtst6` on Ubuntu, `libxtst` on Arch) for native pointer-event checks. This is a smoke-test dependency only.
+
+The fixture captures Accounts, Settings, Dashboard, changelog modal, account and bulk dialogs, and feedback without using real accounts. It checks filtering, selection, account Save/Cancel, invalid edit rejection and bulk Cancel. Smoke output must not be shipped. The package verifier separately starts the normal Uno shell against a simulated authenticated API and checks supervisor-exit cleanup. These tests do not exercise Secret Service, WebKit sign-in or Sober. Screenshot success proves rendering and selected interactions only; it is not a visual parity assertion.
 
 After extracting a normal package into a stable writable folder, run `python3 install-linux.py` there to register it in the application menu. Keep the folder in place. Updates swap that application folder after both processes exit. The data directory and update cache must be outside the application folder, and no root access is needed.
 
@@ -85,6 +89,8 @@ After extracting a normal package into a stable writable folder, run `python3 in
 Launches use the authenticated Roblox request flow and Sober's `roblox-player` protocol. A stable per-account Flatpak HOME keeps saved state separate; the real XDG directories still locate user-installed Flatpak runtimes. Sober can show its own onboarding once in each isolated home. That extra onboarding is another platform difference to validate.
 
 **Concurrent Sober instances have no upstream support.** [Sober's maintainer declined multi-session support](https://github.com/vinegarhq/sober/issues/390). Private homes do not isolate all runtime resources: [Flatpak shares temporary and runtime directories between instances of the same application](https://github.com/flatpak/flatpak/blob/main/common/flatpak-run.c). The 1.1.0 beta attempted concurrent launches without validating this behavior; an Arch/KDE report shows later clients displaying the frozen-instance warning. Version 1.2.0 integrates OS isolation into every launch and automatic retry. Users start accounts normally; there is no separate adapter to install or environment variable to set. Duplicate launches for an account are reserved during startup. These changes are included in 1.2.0 and are absent from the earlier 1.1.0 beta.
+
+Version 1.3.0 also grants `--device=input` on every isolated launch and retry. Sandbox mode strips manifest/host device grants, so running a host `flatpak override` alone was insufficient. This uses the documented per-launch device grant; no system-wide override or Sober/client file modification is performed.
 
 ### Experimental concurrent launch isolation
 

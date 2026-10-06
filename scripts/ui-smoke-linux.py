@@ -13,6 +13,7 @@ version = tomllib.loads((root / "Cargo.toml").read_text())["package"]["version"]
 token = "isolated-linux-smoke-token-" + "x" * 40
 requests = []
 patches = []
+commands = []
 accounts = [dict(id=str(i), username=name, alias=name.title(), group="Fixture", target=dict(place_id=1),
                  auto_recovery=i == 1, status=status, process=None, failures=0, last_error=None)
             for i, name, status in ((1, "alpha", "running"), (2, "beta", "stopped"), (3, "gamma", "backoff"))]
@@ -21,6 +22,17 @@ accounts = [dict(id=str(i), username=name, alias=name.title(), group="Fixture", 
 class Fixture(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
+
+    def do_POST(self):
+        if self.headers.get("Authorization") != "Bearer " + token:
+            self.send_error(401); return
+        if self.path not in [f"/v1/accounts/{a['id']}/start" for a in accounts]:
+            self.send_error(400); return
+        commands.append(self.path)
+        self.send_response(202)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", "2")
+        self.end_headers(); self.wfile.write(b"{}")
 
     def do_PATCH(self):
         if self.headers.get("Authorization") != "Bearer " + token:
@@ -87,6 +99,7 @@ try:
             raise RuntimeError("Linux UI smoke failed; see isolated runtime.txt")
     assert "/v1/status" in requests and "/v1/settings/discord" in requests
     assert patches == [("/v1/accounts/1", {"alias": "Saved Linux fixture"})], "Only the explicit Save may change fixture accounts"
+    assert sorted(commands) == ["/v1/accounts/1/start", "/v1/accounts/2/start", "/v1/accounts/3/start"], "Start must reach every selected account"
     print(result.read_text())
 finally:
     server.shutdown()

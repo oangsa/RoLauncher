@@ -15,6 +15,7 @@ RUNTIME = 'org.rolauncher.ProbePlatform'
 C_SOURCE = r'''
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 static unsigned long inode(const char *path) {
@@ -25,13 +26,23 @@ static unsigned long device(const char *path) {
     struct stat st;
     return stat(path, &st) == 0 ? st.st_dev : 0;
 }
+static int input_permission(void) {
+    FILE *info = fopen("/.flatpak-info", "r");
+    if (!info) return 0;
+    char line[1024]; int granted = 0;
+    while (fgets(line, sizeof(line), info)) {
+        if (strncmp(line, "devices=", 8) == 0 && strstr(line, "input")) granted = 1;
+    }
+    fclose(info); return granted;
+}
 int main(void) {
     const char *name = getenv("ROLAUNCHER_PROBE_NAME");
     if (!name) return 2;
     char lock[512];
     snprintf(lock, sizeof(lock), "/tmp/rolauncher-probe-%s", name);
     int owned = mkdir(lock, 0700) == 0;
-    printf("{\"locked\":%s,\"tmp\":%lu,\"tmp_dev\":%lu,\"runtime\":%lu,\"runtime_dev\":%lu,\"ipc\":%lu,\"pid\":%lu,\"net\":%lu}\n",
+    printf("{\"input_device\":%s,\"locked\":%s,\"tmp\":%lu,\"tmp_dev\":%lu,\"runtime\":%lu,\"runtime_dev\":%lu,\"ipc\":%lu,\"pid\":%lu,\"net\":%lu}\n",
+        input_permission() ? "true" : "false",
         owned ? "true" : "false", inode("/tmp"), device("/tmp"),
         inode(getenv("XDG_RUNTIME_DIR")), device(getenv("XDG_RUNTIME_DIR")),
         inode("/proc/self/ns/ipc"), inode("/proc/self/ns/pid"), inode("/proc/self/ns/net"));

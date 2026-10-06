@@ -527,6 +527,17 @@ impl Drop for InstanceGuard {
 pub struct MultiInstanceGuard;
 impl MultiInstanceGuard {
     pub fn acquire() -> Result<Self, String> {
+        let version = Command::new("flatpak")
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output();
+        if !version.is_ok_and(|output| {
+            output.status.success()
+                && supports_input_device(&String::from_utf8_lossy(&output.stdout))
+        }) {
+            return Err("Flatpak 1.15.6 or newer is required for isolated Sober input access. Update Flatpak, then restart RoLauncher".into());
+        }
         let installed = Command::new("flatpak")
             .args(["info", "--show-ref", SOBER])
             .stdin(Stdio::null())
@@ -540,10 +551,35 @@ impl MultiInstanceGuard {
         }
     }
 }
+fn supports_input_device(version: &str) -> bool {
+    let Some(number) = version.split_whitespace().nth(1) else {
+        return false;
+    };
+    let parts: Vec<_> = number
+        .split('.')
+        .take(3)
+        .map(|v| v.parse::<u32>())
+        .collect();
+    matches!(parts.as_slice(), [Ok(major), Ok(minor), Ok(patch)] if (*major, *minor, *patch) >= (1, 15, 6))
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn input_device_grants_require_a_supported_flatpak_version() {
+        for version in ["Flatpak 1.15.6", "Flatpak 1.16.3", "Flatpak 2.0.0"] {
+            assert!(supports_input_device(version));
+        }
+        for version in [
+            "Flatpak 1.14.10",
+            "Flatpak 1.15.5",
+            "unexpected",
+            "Flatpak 1.x.0",
+        ] {
+            assert!(!supports_input_device(version));
+        }
+    }
     #[test]
     #[ignore = "Requires scripts/test-sober-isolation.py's disposable Flatpak fixture"]
     fn flatpak_runtime_isolation_separates_locks() {
@@ -611,6 +647,10 @@ mod tests {
         let (_isolated_a, isolated_a) = launch("isolated-a", true);
         let (_isolated_b, isolated_b) = launch("isolated-b", true);
         for report in [&isolated_a, &isolated_b] {
+            assert_eq!(
+                report["input_device"], true,
+                "Isolated launches must advertise input access to Sober"
+            );
             assert_eq!(report["locked"], true);
             for field in ["tmp", "runtime", "ipc", "pid", "net"] {
                 assert!(report[field].as_u64().unwrap() > 0);

@@ -1,5 +1,16 @@
 # Validation
 
+## 1.3.0 workspace, saved games and Linux interactions — 2026-10-06
+
+Windows: 50 Rust tests and the separately invoked authenticated Rust/WinUI bootstrap check passed. Linux in Arch WSL: 52 Rust tests passed, plus the separately invoked disposable Flatpak isolation probe. Formatting and Clippy with warnings denied passed on both platforms; 60 desktop model/editor/update checks passed on Windows. Installer fixtures passed checksum rejection, cancellation, complete installation, process waiting, relaunch, and data preservation.
+
+WinUI smoke passed sidebar navigation and scroll reset, saved game creation/editing and account destination selection, persisted close preferences, the two-version changelog modal, bulk edits, legacy account presets, backup/history filtering, modal validation, and small-window rendering. Linux Uno smoke passed native Ctrl+A, XTest mouse clicks on Start and account row edit buttons, selected-account requests reaching the authenticated fixture, page scroll reset, account Save/Cancel and invalid destination rejection, bulk Cancel, changelog rendering, and feedback. Rendered Windows and Linux screenshots were inspected. Linux smoke requires XTest only for tests; production builds do not depend on it.
+
+The Flatpak probe confirms that each sandbox advertises input-device access in its own metadata while retaining separate temporary/runtime filesystems, IPC and PID namespaces and host networking. This avoids depending on a host override inside `--sandbox`. Flatpak 1.15.6 or newer is required; older versions receive a startup message explaining the prerequisite. Saved game tests verify validation, duplicate names, persistence across restart, encrypted backup/restore, and independent account destinations after profile deletion. New API routes reject missing authentication and cross-origin requests.
+
+These checks use simulated sessions and a harmless Flatpak probe. Live Roblox game metadata/thumbnail lookup and Sober onboarding/launches on GNOME and KDE remain unverified. Linux font/DPI/tray/portal parity and concurrent real games still require the native desktop acceptance matrix below.
+
+
 ## 1.2.0 Linux isolation, update channel and dropdown fixes — 2026-10-06
 
 Windows: 49 Rust tests plus the separate authenticated Rust/WinUI bootstrap fixture passed. Linux in Arch WSL: 50 Rust tests passed, plus the separately invoked Flatpak isolation regression. Clippy passed with warnings denied on both platforms. All 60 desktop model/editor/updater checks passed on Windows and Linux (the Linux net8 test assembly ran on the existing .NET 10 runtime with major roll-forward). Native WinUI and Uno rendering fixtures passed; both measured equal heights for the group dropdown and adjacent buttons. WinUI also verified beta opt-in persistence, labeled beta banners and returning to stable updates. Tests cover authenticated preference storage across restarts, numeric release selection, exact beta download URLs and checksum-verified beta downloads. Formatting and release consistency checks passed.
