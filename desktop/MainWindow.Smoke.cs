@@ -43,6 +43,14 @@ public sealed partial class MainWindow
             Assert(UpdateNoticeButton.IsEnabled && (string)UpdateNoticeButton.Content == "Download" && (string)UpdateDownloadButton.Content == "Download",
                 "The banner and Settings share the Download action.");
             await CaptureAsync(directory, "update-available.png");
+            AssertUpdateButtonCentered();
+            _downloadingUpdate = true;
+            UpdateActions();
+            SetUpdateMessage("Downloading the update… 40%");
+            await CaptureAsync(directory, "update-downloading.png");
+            AssertUpdateButtonCentered();
+            _downloadingUpdate = false;
+            UpdateActions();
             Assert(!IncludeBetaUpdates.IsChecked!.Value, "Stable updates are selected by default.");
             IncludeBetaUpdates.IsChecked = true;
             for (var i = 0; i < 100 && (_savingUpdateSettings || _checkingUpdate); i++) await Task.Delay(50);
@@ -57,6 +65,8 @@ public sealed partial class MainWindow
             UpdateActions();
             Assert((string)UpdateNoticeButton.Content == "Relaunch" && (string)UpdateDownloadButton.Content == "Relaunch",
                 "A verified ready installer changes both actions to Relaunch.");
+            await CaptureAsync(directory, "update-ready.png");
+            AssertUpdateButtonCentered();
             _modalOpen = true;
             await ApplyDownloadedUpdateAsync();
             Assert(!_installingUpdate && !_exiting, "An open editor blocks relaunch without closing the app.");
@@ -289,6 +299,15 @@ public sealed partial class MainWindow
         }
         _exiting = true;
         Close();
+    }
+
+    private void AssertUpdateButtonCentered()
+    {
+        Root.UpdateLayout();
+        var position = UpdateNoticeButton.TransformToVisual(UpdateNotice).TransformPoint(new Windows.Foundation.Point());
+        Assert(UpdateNoticeButton.ActualHeight > 0 &&
+            Math.Abs(position.Y + UpdateNoticeButton.ActualHeight / 2 - UpdateNotice.ActualHeight / 2) < 1,
+            $"The update action is vertically centered in the banner (top {position.Y}, button {UpdateNoticeButton.ActualHeight}, banner {UpdateNotice.ActualHeight}).");
     }
     private static void Assert(bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }
     private static T? FindVisual<T>(DependencyObject root, string? name = null) where T : FrameworkElement
