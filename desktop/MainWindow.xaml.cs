@@ -34,7 +34,6 @@ public sealed partial class MainWindow : Window
         _config = config;
         Title = $"RoLauncher {config.Version}";
         VersionLabel.Text = $"v{config.Version}";
-        ChangelogText.Text = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "CHANGELOG.txt"));
         AccountList.ItemsSource = _visibleRows;
         RecoveryList.ItemsSource = _rows;
         _tray = ConfigureDesktop();
@@ -171,7 +170,7 @@ public sealed partial class MainWindow : Window
     private void UpdateSelectionSettings()
     {
         var selected = Selected();
-        foreach (var button in new[] { StartButton, StopButton, RestartButton, RemoveButton }) button.IsEnabled = selected.Length != 0;
+        StartButton.IsEnabled = StopButton.IsEnabled = RestartButton.IsEnabled = RemoveButton.IsEnabled = selected.Length != 0;
         BulkEditButton.IsEnabled = selected.Length != 0;
         AccountCount.Text = $"{_visibleRows.Count} of {_rows.Count} accounts · {selected.Length} selected · Ctrl+A to select visible";
         var enabled = selected.Count(r => r.Account.AutoRecovery);
@@ -182,7 +181,7 @@ public sealed partial class MainWindow : Window
     }
     private async void RowDetails_Click(object sender, RoutedEventArgs e)
     {
-        if (((Button)sender).DataContext is AccountRow row) await GuardAsync(() => ShowAccountAsync(row));
+        if (ResolveAccount(sender) is AccountRow row) await GuardAsync(() => ShowAccountAsync(row));
     }
     private async Task ShowAccountAsync(AccountRow row)
     {
@@ -191,8 +190,11 @@ public sealed partial class MainWindow : Window
         _editorRow = row;
         _editorOriginal = EditorDraft.From(row.Account);
         DialogFields.DataContext = row;
+        DialogGame.ItemsSource = _gameProfiles;
+        DialogGame.SelectedItem = null;
         AliasInput.Text = _editorOriginal.Alias; PlaceInput.Text = _editorOriginal.Place;
         JobInput.Text = _editorOriginal.Job; PrivateInput.Text = _editorOriginal.Private;
+        DialogGame.SelectedItem = _gameProfiles.FirstOrDefault(p => p.Target == row.Account.Target);
         DialogRejoin.IsChecked = row.Account.AutoRecovery;
         DialogGroup.Text = row.Account.Group;
         DialogFallback.SelectedIndex = PolicyIndex(row.Account.FallbackPolicy);
@@ -266,11 +268,11 @@ public sealed partial class MainWindow : Window
     {
         AliasInput.IsEnabled = PlaceInput.IsEnabled = JobInput.IsEnabled = PrivateInput.IsEnabled = enabled;
         DialogRejoin.IsEnabled = enabled;
-        DialogGroup.IsEnabled = DialogFallback.IsEnabled = DialogClearTarget.IsEnabled = enabled;
+        DialogGame.IsEnabled = DialogGroup.IsEnabled = DialogFallback.IsEnabled = DialogClearTarget.IsEnabled = enabled;
     }
     private async void RowDelete_Click(object sender, RoutedEventArgs e)
     {
-        if (((Button)sender).DataContext is AccountRow row) await GuardAsync(() => DeleteAccountsAsync([row]));
+        if (ResolveAccount(sender) is AccountRow row) await GuardAsync(() => DeleteAccountsAsync([row]));
     }
     private async Task DeleteAccountsAsync(AccountRow[] accounts)
     {
@@ -300,25 +302,27 @@ public sealed partial class MainWindow : Window
     private void Tab_Click(object sender, RoutedEventArgs e)
     {
         var page = int.Parse((string)((ToggleButton)sender).Tag);
-        AccountsTab.IsChecked = page == 0; SettingsTab.IsChecked = page == 1; ChangelogTab.IsChecked = page == 2;
+        AccountsTab.IsChecked = page == 0; SettingsTab.IsChecked = page == 1; GamesTab.IsChecked = page == 4;
         AccountsPage.Visibility = page == 0 ? Visibility.Visible : Visibility.Collapsed;
         SettingsPage.Visibility = page == 1 ? Visibility.Visible : Visibility.Collapsed;
-        ChangelogPage.Visibility = page == 2 ? Visibility.Visible : Visibility.Collapsed;
+        GamesPage.Visibility = page == 4 ? Visibility.Visible : Visibility.Collapsed;
         RecoveryTab.IsChecked = page == 3;
         RecoveryPage.Visibility = page == 3 ? Visibility.Visible : Visibility.Collapsed;
+        PageScroll.UpdateLayout();
+        PageScroll.ChangeView(0, 0, null, true);
+        DispatcherQueue.TryEnqueue(() => PageScroll.ChangeView(0, 0, null, true));
         if (page == 3) _ = GuardAsync(RefreshHistoryAsync);
     }
-    private void Root_KeyDown(object sender, KeyRoutedEventArgs e)
+    private void SelectAll_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs e)
     {
-        if (e.Key == VirtualKey.A && IsControlDown() &&
-            !_modalOpen && Root.XamlRoot is { } xamlRoot && Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(xamlRoot) is not (TextBox or PasswordBox) && AccountsPage.Visibility == Visibility.Visible)
+        if (!_modalOpen && Root.XamlRoot is { } xamlRoot && Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(xamlRoot) is not (TextBox or PasswordBox) && AccountsPage.Visibility == Visibility.Visible)
         {
             SelectAllRows(); e.Handled = true;
         }
     }
     private async void Action_Click(object sender, RoutedEventArgs e)
     {
-        var action = (string)((Button)sender).Tag;
+        var action = (string)((FrameworkElement)sender).Tag;
         var selected = Selected();
         if (action == "remove") await GuardAsync(() => DeleteAccountsAsync(selected));
         else await RunActionAsync(action, selected);

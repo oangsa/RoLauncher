@@ -19,6 +19,8 @@ public sealed partial class MainWindow
         appWindow.Closing += (sender, e) =>
         {
             if (_exiting) return;
+            if (_saving) { e.Cancel = true; return; }
+            if (!_closeToTray) { _exiting = true; return; }
             e.Cancel = true;
             appWindow.Hide();
         };

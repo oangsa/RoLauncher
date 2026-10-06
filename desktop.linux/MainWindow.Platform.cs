@@ -20,6 +20,8 @@ public sealed partial class MainWindow
         AppWindow.Closing += (_, e) =>
         {
             if (_exiting) return;
+            if (_saving) { e.Cancel = true; return; }
+            if (!_closeToTray) { _exiting = true; return; }
             e.Cancel = true;
             if (tray.IsConnected) window.Hide();
             else (AppWindow.Presenter as OverlappedPresenter)?.Minimize();

@@ -16,6 +16,7 @@
     <DefineConstants Condition="'$(UiSmoke)' == 'true'">$(DefineConstants);LINUX_UI_SMOKE</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../desktop/MainWindow.Workspace.cs" Link="MainWindow.Workspace.cs" />
     <!-- Windows remains a native WinUI project. These are the same views and handlers. -->
     <ApplicationDefinition Include="../desktop/App.xaml" Link="App.xaml" />
     <Page Include="../desktop/MainWindow.xaml" Link="MainWindow.xaml" />

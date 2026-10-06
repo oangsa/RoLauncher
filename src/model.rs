@@ -42,6 +42,39 @@ pub struct LaunchProfile {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GameProfile {
+    pub id: Uuid,
+    pub name: String,
+    pub game_name: String,
+    pub thumbnail_url: Option<String>,
+    pub target: Target,
+}
+
+impl GameProfile {
+    pub fn validate(&self) -> Result<(), String> {
+        self.target.validate()?;
+        for value in [&self.name, &self.game_name] {
+            if value.trim().is_empty() || value.len() > 100 || value.chars().any(char::is_control) {
+                return Err("Profile and game names must be 1–100 characters".into());
+            }
+        }
+        if self.thumbnail_url.as_ref().is_some_and(|v| {
+            v.len() > 2048
+                || url::Url::parse(v).map_or(true, |u| {
+                    u.scheme() != "https"
+                        || !u.host_str().is_some_and(|h| h.ends_with(".rbxcdn.com"))
+                        || !u.username().is_empty()
+                        || u.password().is_some()
+                        || u.port().is_some()
+                })
+        }) {
+            return Err("Invalid game thumbnail URL".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Activity {
     pub timestamp: DateTime<Utc>,
     pub account_id: String,
@@ -202,6 +235,10 @@ pub struct SavedAccount {
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Database {
+    #[serde(default)]
+    pub game_profiles: Vec<GameProfile>,
+    #[serde(default = "default_close_to_tray")]
+    pub close_to_tray: bool,
     #[serde(default = "schema_version")]
     pub version: u32,
     pub accounts: Vec<SavedAccount>,
@@ -230,6 +267,9 @@ pub struct RetiredLaunch {
 fn schema_version() -> u32 {
     2
 }
+fn default_close_to_tray() -> bool {
+    true
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Operation {
@@ -241,6 +281,8 @@ pub struct Operation {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Snapshot {
+    pub game_profiles: Vec<GameProfile>,
+    pub close_to_tray: bool,
     pub accounts: Vec<Account>,
     pub network_suspended: bool,
     pub compatibility: String,

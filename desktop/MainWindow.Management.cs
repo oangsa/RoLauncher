@@ -25,6 +25,7 @@ public sealed partial class MainWindow
     };
     private void UpdateManagement(Snapshot snapshot)
     {
+        UpdateWorkspace(snapshot);
         CompatibilityText.Text = snapshot.Compatibility;
         if (!_savingUpdateSettings)
         {
@@ -70,6 +71,7 @@ public sealed partial class MainWindow
         var history = await _api.GetAsync<Activity[]>(id is null ? "activity" : $"activity?account_id={Uri.EscapeDataString(id)}");
         if (id != ((HistoryAccount.SelectedItem as ComboBoxItem)?.Tag as string)) return;
         var json = JsonSerializer.Serialize(history);
+        UpdateTrend(history);
         if (json == _activityJson) return;
         _activityJson = json; _history = history; ShowHistoryPage();
     }
@@ -105,6 +107,7 @@ public sealed partial class MainWindow
         public TextBox Alias = new() { Header = "Alias · supports {username}, {id}, {index}", MaxLength = 100 },
             Place = new() { Header = "Place ID" }, Job = new() { Header = "Job ID · optional" }, Private = new() { Header = "Private server link · optional", MaxLength = 2048 }, Group = new() { Header = "Group · blank removes membership", MaxLength = 100 };
         public ComboBox Fallback = PolicyPicker();
+        public ComboBox Game = new() { Header = "Saved game · optional", HorizontalAlignment = HorizontalAlignment.Stretch, PlaceholderText = "Custom destination" };
         public InfoBar Error = new() { IsClosable = false, Severity = InfoBarSeverity.Error };
         public BulkDraft Draft() => new()
         {
@@ -120,6 +123,13 @@ public sealed partial class MainWindow
         if (_modalOpen || rows.Length == 0) { if (rows.Length == 0) FeedbackMessage("Select accounts first."); return; }
         var ids = rows.Select(r => r.Id).ToArray(); // Freeze scope while the dialog is open.
         var form = new BulkForm(); _bulkForm = form;
+        form.Game.ItemsSource = _gameProfiles;
+        form.Game.SelectionChanged += (_, _) => {
+            if (form.Game.SelectedItem is not GameProfile profile) return;
+            form.TargetApply.IsChecked = true; form.ClearTarget.IsChecked = false;
+            form.Place.Text = profile.Target.PlaceId.ToString(); form.Job.Text = profile.Target.JobId ?? "";
+            form.Private.Text = profile.Target.PrivateServerLink ?? "";
+        };
         form.Alias.Text = Common(rows, a => a.Alias); form.Alias.PlaceholderText = "Mixed aliases · example: Team {index} ({username})";
         form.Place.Text = Common(rows, a => a.Target?.PlaceId.ToString() ?? ""); form.Place.PlaceholderText = "Mixed or unset destinations";
         form.Job.Text = Common(rows, a => a.Target?.JobId ?? ""); form.Private.Text = Common(rows, a => a.Target?.PrivateServerLink ?? "");
@@ -131,7 +141,7 @@ public sealed partial class MainWindow
         var content = new StackPanel { Spacing = 10 };
         content.Children.Add(new TextBlock { Text = $"{rows.Length} accounts. Only checked Apply settings change. Destination replaces Place ID, Job ID and private link together, on the next launch.", TextWrapping = TextWrapping.Wrap });
         content.Children.Add(new Expander { Header = "Included accounts", HorizontalAlignment = HorizontalAlignment.Stretch, Content = new ScrollViewer { MaxHeight = 160, Content = new TextBlock { Text = string.Join("\n", rows.Select(r => $"{r.Alias} · @{r.Account.Username} · {r.Id}")), TextWrapping = TextWrapping.Wrap } } });
-        foreach (var element in new UIElement[] { form.AliasApply, form.Alias, form.TargetApply, form.ClearTarget, form.Place, form.Job, form.Private, form.RejoinApply, form.Rejoin, form.GroupApply, form.Group, form.FallbackApply, form.Fallback, form.Error }) content.Children.Add(element);
+        foreach (var element in new UIElement[] { form.AliasApply, form.Alias, form.TargetApply, form.ClearTarget, form.Game, form.Place, form.Job, form.Private, form.RejoinApply, form.Rejoin, form.GroupApply, form.Group, form.FallbackApply, form.Fallback, form.Error }) content.Children.Add(element);
         void EnableFields()
         {
             form.Alias.IsEnabled = form.AliasApply.IsChecked == true;

@@ -1,10 +1,10 @@
 # Local API reference
 
-Default address: `http://127.0.0.1:38471`. Open Settings and click API token to obtain your token. All routes require `Authorization: Bearer TOKEN`. Browser Origin and cross-site requests are rejected. No endpoint exports account credentials. Keep the API token private.
+Default address: `http://127.0.0.1:38471`. Open Settings → Support and integrations and click API token to obtain your token. All routes require `Authorization: Bearer TOKEN`. Browser Origin and cross-site requests are rejected. No endpoint exports account credentials. Keep the API token private.
 
 | Method | Route | Body / behavior |
 | --- | --- | --- |
-| GET | `/v1/status` | Accounts, connectivity suspension, compatibility status |
+| GET | `/v1/status` | Accounts, saved game profiles, close preference, connectivity suspension, compatibility status |
 | POST | `/v1/login` | Open the isolated browser sign-in window; HTTP 202 means queued |
 | GET | `/v1/accounts` | Safe account/status records |
 | POST | `/v1/accounts` | `{"cookies":["SESSION_VALUE"]}`; per-index import errors |
@@ -19,6 +19,10 @@ Default address: `http://127.0.0.1:38471`. Open Settings and click API token to 
 | POST | `/v1/accounts/USER_ID/retry` | Advance an eligible retry; retain failure count and respect cooldowns |
 | POST | `/v1/accounts/USER_ID/repair` | Queue isolated sign-in requiring the same account ID |
 | GET / POST | `/v1/profiles` | List / save current settings for `name`, `account_ids`, optional existing `id` |
+| POST | `/v1/game-profiles` | Create/update `{id,name,game_name,thumbnail_url,target}`; UUID identifies the game profile, up to 100 |
+| DELETE | `/v1/game-profiles/UUID` | Delete saved game; account destinations remain unchanged |
+| GET | `/v1/games/PLACE_ID` | Authenticated Roblox game name and optional thumbnail lookup using a saved session |
+| PATCH | `/v1/settings/window` | Save `{ "close_to_tray": true }` or `false`; snapshots include `close_to_tray` |
 | POST | `/v1/profiles/import` | JSON array of credential-free profile definitions; atomic import |
 | DELETE | `/v1/profiles/UUID` | Remove saved profile |
 | POST | `/v1/profiles/UUID/apply` or `/start` | Apply profile settings / apply then Start; per-account launch results |
