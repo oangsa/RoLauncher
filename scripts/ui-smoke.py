@@ -16,6 +16,8 @@ accounts = [dict(id=str(i), username=f"sample_{i}", alias=name,
         ("Build account", "needs_attention", "Session expired; sign in again")])]
 commands = []
 profiles = []
+game_profiles = []
+close_to_tray = True
 backups = []
 include_beta_updates = False
 activity = [dict(timestamp="2026-10-05T09:20:00+07:00", account_id="1", place_id=1818, status="backoff", failures=1, message="Retry scheduled; inspect the next retry time")]
@@ -31,7 +33,8 @@ class Fixture(BaseHTTPRequestHandler):
         self.wfile.write(data)
     def do_GET(self):
         if self.path == "/v1/status":
-            self.reply(dict(accounts=accounts, profiles=profiles, update_repository="", include_beta_updates=include_beta_updates, network_suspended=False, compatibility="UI fixture · real-client validation remains outstanding"))
+            self.reply(dict(accounts=accounts, profiles=profiles, game_profiles=game_profiles, close_to_tray=close_to_tray, update_repository="", include_beta_updates=include_beta_updates, network_suspended=False, compatibility="UI fixture · real-client validation remains outstanding"))
+        elif self.path.startswith("/v1/games/"): self.reply(dict(name="Fixture game", thumbnail_url=None))
         elif self.path == "/v1/profiles": self.reply(profiles)
         elif self.path == "/v1/backups": self.reply(backups)
         elif self.path.startswith("/v1/activity"):
@@ -56,6 +59,9 @@ class Fixture(BaseHTTPRequestHandler):
                 prerelease=include_beta_updates, release_url=f"https://github.com/oangsa/RoLauncher/releases/tag/{tag}",
                 download_url=prefix + "-windows-x64.zip", checksums_url=prefix + "-SHA256SUMS.txt", installer_url=prefix + "-setup-x64.exe"))
             return
+        if self.path == "/v1/game-profiles":
+            game_profiles[:] = [p for p in game_profiles if p["id"] != body["id"]] + [body]
+            self.reply(body); return
         if self.path == "/v1/profiles":
             selected = [next(a for a in accounts if a["id"] == i) for i in body["account_ids"]]
             entries = [dict(account_id=a["id"], alias=a["alias"], target=a["target"], auto_recovery=a["auto_recovery"], fallback_policy=a.get("fallback_policy", "allow_public"), group=a.get("group", "")) for a in selected]
@@ -76,8 +82,10 @@ class Fixture(BaseHTTPRequestHandler):
             account.update(status="stopped", process=None)
         self.reply({}, 202)
     def do_PATCH(self):
-        global include_beta_updates
+        global include_beta_updates, close_to_tray
         patch = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+        if self.path == "/v1/settings/window":
+            close_to_tray = patch["close_to_tray"]; self.reply({}); return
         if self.path == "/v1/settings/updates":
             include_beta_updates = patch["include_beta"]
             self.reply({}); return
@@ -101,6 +109,9 @@ class Fixture(BaseHTTPRequestHandler):
         else: account.update(patch); self.reply(account)
     def do_DELETE(self):
         commands.append(self.path)
+        if self.path.startswith("/v1/game-profiles/"):
+            game_profiles[:] = [p for p in game_profiles if p["id"] != self.path.rsplit("/", 1)[-1]]
+            self.reply({}); return
         if self.path.startswith("/v1/profiles/"):
             profiles[:] = [p for p in profiles if p["id"] != self.path.rsplit("/", 1)[-1]]
             self.reply({}); return

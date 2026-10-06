@@ -30,9 +30,9 @@ jobs:
         run: |
           if command -v apt-get >/dev/null; then
             apt-get update
-            DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential pkg-config libdbus-1-dev curl git python3 libicu74 libssl3 zlib1g libfontconfig1 libx11-6 libxrandr2 libxi6 libgl1 xvfb xauth fonts-dejavu-core
+            DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential pkg-config libdbus-1-dev curl git python3 libicu74 libssl3 zlib1g libfontconfig1 libx11-6 libxrandr2 libxi6 libxtst6 libgl1 xvfb xauth fonts-dejavu-core
           else
-            pacman -Syu --noconfirm --needed base-devel pkgconf dbus curl git python icu openssl zlib fontconfig libx11 libxrandr libxi mesa xorg-server-xvfb xorg-xauth ttf-dejavu
+            pacman -Syu --noconfirm --needed base-devel pkgconf dbus curl git python icu openssl zlib fontconfig libx11 libxrandr libxi libxtst mesa xorg-server-xvfb xorg-xauth ttf-dejavu
           fi
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4

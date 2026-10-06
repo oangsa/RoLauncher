@@ -34,6 +34,13 @@ pub fn router(engine: Engine) -> Router {
         .route("/v1/status", get(status))
         .route("/v1/accounts", get(accounts).post(import))
         .route("/v1/accounts/bulk", patch(bulk_update))
+        .route("/v1/game-profiles", post(game_profile_save))
+        .route(
+            "/v1/game-profiles/{id}",
+            axum::routing::delete(game_profile_delete),
+        )
+        .route("/v1/games/{place_id}", get(game_details))
+        .route("/v1/settings/window", patch(window_settings))
         .route("/v1/profiles", get(profiles).post(profile_save))
         .route("/v1/profiles/import", post(profile_import))
         .route("/v1/profiles/{id}", axum::routing::delete(profile_delete))
@@ -63,6 +70,43 @@ pub fn router(engine: Engine) -> Router {
 }
 async fn browser_login(State(engine): State<Engine>) -> Result<StatusCode, ApiError> {
     open_login(engine, None)
+}
+async fn game_profile_save(
+    State(engine): State<Engine>,
+    Json(profile): Json<crate::model::GameProfile>,
+) -> Result<Json<crate::model::GameProfile>, ApiError> {
+    engine.save_game_profile(profile).map(Json).map_err(error)
+}
+async fn game_profile_delete(
+    State(engine): State<Engine>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    engine
+        .delete_game_profile(id)
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(error)
+}
+async fn game_details(
+    State(engine): State<Engine>,
+    Path(place_id): Path<u64>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (name, thumbnail_url) = engine.game_details(place_id).await.map_err(error)?;
+    Ok(Json(
+        serde_json::json!({"name": name, "thumbnail_url": thumbnail_url}),
+    ))
+}
+#[derive(Deserialize)]
+struct WindowSettings {
+    close_to_tray: bool,
+}
+async fn window_settings(
+    State(engine): State<Engine>,
+    Json(settings): Json<WindowSettings>,
+) -> Result<StatusCode, ApiError> {
+    engine
+        .set_close_to_tray(settings.close_to_tray)
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(error)
 }
 fn open_login(engine: Engine, expected: Option<String>) -> Result<StatusCode, ApiError> {
     #[cfg(any(windows, target_os = "linux"))]
@@ -463,6 +507,13 @@ mod tests {
         for (method, route) in [
             ("PATCH", "/v1/accounts/bulk"),
             ("GET", "/v1/profiles"),
+            ("POST", "/v1/game-profiles"),
+            (
+                "DELETE",
+                "/v1/game-profiles/00000000-0000-0000-0000-000000000000",
+            ),
+            ("GET", "/v1/games/1818"),
+            ("PATCH", "/v1/settings/window"),
             ("POST", "/v1/profiles/import"),
             ("GET", "/v1/activity"),
             ("GET", "/v1/diagnostics"),

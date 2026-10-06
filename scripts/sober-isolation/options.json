@@ -6,6 +6,7 @@
   "--socket=fallback-x11",
   "--socket=pulseaudio",
   "--device=dri",
+  "--device=input",
   "--allow=devel",
   "--session-bus",
   "--a11y-bus"

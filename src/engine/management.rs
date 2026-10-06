@@ -95,6 +95,60 @@ fn expand_alias(value: &str, a: &Account, index: usize) -> String {
 }
 
 impl Engine {
+    pub fn set_close_to_tray(&self, enabled: bool) -> Result<(), String> {
+        self.transaction(|s| {
+            s.database.close_to_tray = enabled;
+            Ok(())
+        })
+    }
+    pub fn save_game_profile(&self, mut profile: GameProfile) -> Result<GameProfile, String> {
+        profile.validate()?;
+        profile.name = profile.name.trim().into();
+        self.transaction(|s| {
+            if s.database
+                .game_profiles
+                .iter()
+                .any(|p| p.id != profile.id && p.name.eq_ignore_ascii_case(&profile.name))
+            {
+                return Err("A game profile with that name already exists".into());
+            }
+            if s.database.game_profiles.len() >= 100
+                && !s.database.game_profiles.iter().any(|p| p.id == profile.id)
+            {
+                return Err("Up to 100 game profiles are supported".into());
+            }
+            s.database.game_profiles.retain(|p| p.id != profile.id);
+            s.database.game_profiles.push(profile.clone());
+            Ok(profile)
+        })
+    }
+    pub fn delete_game_profile(&self, id: Uuid) -> Result<(), String> {
+        self.transaction(|s| {
+            if !s.database.game_profiles.iter().any(|p| p.id == id) {
+                return Err("Game profile not found".into());
+            }
+            s.database.game_profiles.retain(|p| p.id != id);
+            Ok(())
+        })
+    }
+    pub async fn game_details(&self, place_id: u64) -> Result<(String, Option<String>), String> {
+        let encrypted = self
+            .0
+            .state
+            .lock()
+            .unwrap()
+            .database
+            .accounts
+            .first()
+            .map(|a| a.encrypted_session.clone())
+            .ok_or("Add an account to look up games")?;
+        let cookie = platform::unprotect(&encrypted)?;
+        self.0
+            .roblox
+            .game_details(&cookie, place_id)
+            .await
+            .map_err(|e| e.message)
+    }
     pub fn set_beta_updates(&self, include_beta: bool) -> Result<(), String> {
         self.transaction(|s| {
             s.database.include_beta_updates = include_beta;

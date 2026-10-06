@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.3.0] — 2026-10-06
+
+- Sidebar navigation for Accounts, Games, Dashboard, and Settings; secondary actions move into menus and expanders.
+- Saved game profiles include a profile name, Roblox game name, thumbnail, and public, specific, or private-server destination. Create, edit, delete, and choose a saved game in single or bulk account settings.
+- Read-only Dashboard with account counts, 24-hour event trends, persistent history, and recent activity moved from Settings. Recovery actions live in Accounts.
+- Changelog opens from the icon beside the version, shows the latest two versions, and links to the full GitHub changelog.
+- Settings renames Recovery & Access to Auto Rejoin and saves the close-to-tray or close-completely preference. The header Exit button is removed.
+- Page changes reset scrolling; account row actions resolve the clicked account explicitly; Ctrl+A uses the shared keyboard accelerator without overriding text selection.
+- Every isolated Sober launch grants input-device access, including retries, so a host Flatpak override is no longer required for that permission.
+
 ## [1.2.1] — 2026-10-06
 
 - Center the update banner's Download, Cancel download and Relaunch button vertically with balanced spacing.

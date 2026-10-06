@@ -24,6 +24,7 @@ if args[0] == "run":
     home = Path(os.environ["HOME"])
     assert "--sandbox" in args and "--unshare=ipc" in args
     assert "--share=network" in args
+    assert "--device=input" in args
     assert f"--filesystem={home}" in args
     assert f"--env=XDG_DATA_HOME={home}/.var/app/org.vinegarhq.Sober/data" in args
 else:

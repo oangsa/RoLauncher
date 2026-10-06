@@ -899,6 +899,8 @@ fn account_mut<'a>(s: &'a mut State, id: &str) -> Result<&'a mut Account, String
 }
 fn snapshot(s: &State) -> Snapshot {
     Snapshot {
+        game_profiles: s.database.game_profiles.clone(),
+        close_to_tray: s.database.close_to_tray,
         accounts: s
             .database
             .accounts
@@ -1607,6 +1609,60 @@ mod tests {
             })
             .unwrap();
         (engine, path)
+    }
+    #[test]
+    fn game_profiles_survive_restarts_validate_and_leave_account_targets_independent() {
+        let (engine, path) = fixture(1);
+        engine
+            .transaction(|s| {
+                s.database.accounts[0].encrypted_session = platform::protect("TEST_ONLY_SESSION")?;
+                Ok(())
+            })
+            .unwrap();
+        let mut profile = GameProfile {
+            id: Uuid::new_v4(),
+            name: "Private game".into(),
+            game_name: "Game name".into(),
+            thumbnail_url: Some("https://tr.rbxcdn.com/game.png".into()),
+            target: Target {
+                place_id: 1818,
+                job_id: None,
+                private_server_link: Some(
+                    "https://www.roblox.com/games/1818?privateServerLinkCode=abc123".into(),
+                ),
+            },
+        };
+        engine.save_game_profile(profile.clone()).unwrap();
+        let mut invalid = profile.clone();
+        invalid.id = Uuid::new_v4();
+        assert!(engine.save_game_profile(invalid.clone()).is_err());
+        invalid.name = "Other".into();
+        invalid.thumbnail_url = Some("https://example.com/game.png".into());
+        assert!(engine.save_game_profile(invalid).is_err());
+        profile.name = "Updated private game".into();
+        engine.save_game_profile(profile.clone()).unwrap();
+        engine
+            .patch(
+                "1",
+                AccountPatch {
+                    target: Some(profile.target.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        engine.set_close_to_tray(false).unwrap();
+        drop(engine);
+        let reopened = Engine::open(Store::new(path.clone()).unwrap(), "simulated".into()).unwrap();
+        assert!(!reopened.snapshot().close_to_tray);
+        assert_eq!(reopened.snapshot().game_profiles[0].name, profile.name);
+        let backup = reopened.backup().unwrap();
+        reopened.delete_game_profile(profile.id).unwrap();
+        assert_eq!(reopened.snapshot().accounts[0].target, Some(profile.target));
+        reopened.restore(&backup).unwrap();
+        assert_eq!(reopened.snapshot().game_profiles.len(), 1);
+        assert!(!reopened.snapshot().close_to_tray);
+        drop(reopened);
+        std::fs::remove_dir_all(path).unwrap();
     }
     #[cfg(any(windows, target_os = "linux"))]
     #[test]

@@ -31,7 +31,9 @@ with zipfile.ZipFile(dist / f"{name}-source.zip") as source:
     assert source.testzip() is None
     paths = {p.replace("\\", "/"): p for p in source.namelist()}
     for filename in ["Cargo.toml", "Cargo.lock", "AGENTS.md", "README.md", "src/engine/management.rs",
-                     "src/updates.rs", "desktop/MainWindow.Management.cs", "desktop/BulkDraft.cs",
+                     "src/updates.rs", "desktop/MainWindow.Management.cs", "desktop/MainWindow.Workspace.cs",
+                     "desktop/MainWindow.xaml", "desktop/MainWindow.xaml.cs", "desktop/BulkDraft.cs",
+                     "scripts/sober-isolation/options.json", "desktop.linux/MainWindow.Smoke.cs",
                      f"docs/RELEASE-{version}.md", "docs/VALIDATION.md", "docs/API.md", "docs/USAGE.md",
                      "docs/DEVELOPMENT.md", "docs/PERFORMANCE.md", "desktop/packages.lock.json",
                      "desktop.tests/packages.lock.json", "desktop/RoLauncher.Desktop.csproj",
