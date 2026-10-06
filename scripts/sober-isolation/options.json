@@ -1,0 +1,12 @@
+[
+  "--sandbox",
+  "--share=network",
+  "--unshare=ipc",
+  "--socket=wayland",
+  "--socket=fallback-x11",
+  "--socket=pulseaudio",
+  "--device=dri",
+  "--allow=devel",
+  "--session-bus",
+  "--a11y-bus"
+]

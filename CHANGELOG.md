@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.2.0] — 2026-10-06
+
+- Match the account group dropdown height to its adjacent action buttons.
+- Add a saved "Include beta updates" setting, beta release discovery and validated beta downloads; stable updates remain the default.
+- Integrate private Flatpak runtime/IPC isolation into every Linux launch and retry, with separate saved state per account; no adapter installation or environment variable is needed. Simultaneous games remain unverified.
+- Accept a Sober log inherited by helpers in the same verified sandbox; continue rejecting logs shared across sandboxes and ambiguous ownership.
+- Discover logs immediately after verifying a launched PID and include safe log-availability counts in compatibility diagnostics.
+- Include the Linux preview package alongside the stable Windows release; concurrent Roblox games and complete Linux parity remain unverified.
+
 ## [1.1.0] — 2026-10-06
 
 - Add a Linux development port for Sober with shared WinUI views rendered by Uno.

@@ -51,7 +51,14 @@ fn run() -> Result<(), String> {
     platform::initialize(&directory)?;
     if diagnostic {
         let players = platform::players();
-        let report = serde_json::json!({"platform":std::env::consts::OS,"memory_access":"none","metadata_available":players.is_ok(),"identified_player_count":players.as_ref().map(|p|p.len()).unwrap_or(0),"live_account_tests":"not performed"});
+        let logs = players.as_ref().ok().map(|players| {
+            let identities: Vec<_> = players
+                .iter()
+                .map(|player| player.identity(uuid::Uuid::nil()))
+                .collect();
+            platform::owned_logs(&identities)
+        });
+        let report = serde_json::json!({"platform":std::env::consts::OS,"memory_access":"none","metadata_available":players.is_ok(),"identified_player_count":players.as_ref().map(|p|p.len()).unwrap_or(0),"log_metadata_available":logs.as_ref().is_some_and(|logs| logs.is_ok()),"verified_log_count":logs.as_ref().and_then(|logs| logs.as_ref().ok()).map(|logs|logs.len()).unwrap_or(0),"live_account_tests":"not performed"});
         std::fs::create_dir_all(&directory).map_err(|_| "Cannot create diagnostics directory")?;
         std::fs::write(
             directory.join("compatibility.json"),
@@ -80,7 +87,7 @@ fn run() -> Result<(), String> {
     };
     #[cfg(target_os = "linux")]
     let compatibility = match &multi {
-        Ok(_) => "Linux / Sober: isolated Flatpak launch homes, process metadata and existing logs; live compatibility and UI parity require validation".into(),
+        Ok(_) => "Linux / Sober: built-in per-account runtime/IPC isolation; concurrent game sessions and UI parity require live validation".into(),
         Err(error) => error.clone(),
     };
     let engine = Engine::open(Store::new(directory)?, compatibility)?;

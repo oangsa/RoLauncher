@@ -53,6 +53,7 @@ jobs:
           cargo fmt --check
           python3 scripts/check-release.py
           python3 scripts/test-linux-update.py
+          python3 scripts/test-sober-isolation-adapter.py
           dotnet restore desktop.tests/RoLauncher.Desktop.Tests.csproj --locked-mode --configfile desktop/NuGet.Config
           dotnet run --project desktop.tests --no-restore -c Release
       - name: Build and render isolated Linux shell

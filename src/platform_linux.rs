@@ -7,7 +7,6 @@ use chacha20poly1305::{
     ChaCha20Poly1305, KeyInit, Nonce,
     aead::{Aead, Payload},
 };
-#[cfg(not(test))]
 use std::sync::Mutex;
 use std::{
     collections::{HashMap, HashSet},
@@ -18,7 +17,7 @@ use std::{
     },
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::OnceLock,
+    sync::{LazyLock, OnceLock},
 };
 use zeroize::Zeroizing;
 
@@ -26,6 +25,10 @@ const SOBER: &str = "org.vinegarhq.Sober";
 const ENVELOPE: &str = "linux-v1:";
 const AAD: &[u8] = b"RoLauncher credentials v1";
 static DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
+// Hold a launch reservation until Flatpak exits, including the startup interval
+// before Sober appears in /proc. The engine's launches are serialized as well.
+static LAUNCH_PENDING: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 #[cfg(not(test))]
 static KEY: Mutex<Option<Zeroizing<[u8; 32]>>> = Mutex::new(None);
 
@@ -199,27 +202,73 @@ pub fn launch_for(uri: &str, account_id: &str) -> Result<(), String> {
     {
         return Err("Invalid launch identity".into());
     }
+    let mut pending = LAUNCH_PENDING.lock().map_err(|_| "Sober launch is busy")?;
+    if pending.contains(account_id) {
+        return Err("This account's Sober launch is still active".into());
+    }
     let directory = DIRECTORY.get().ok_or("Linux platform is not initialized")?;
     let instance = directory.join("sober-instances").join(account_id);
     private_directory(&instance)?;
-    let mut child = Command::new("flatpak")
-        // Isolate Sober's own lock and state through its normal Flatpak home, without
-        // changing Roblox binaries, client files, or another installation's settings.
-        .env("HOME", instance)
-        .env("XDG_DATA_HOME", xdg("XDG_DATA_HOME", ".local/share")?)
-        .env("XDG_CONFIG_HOME", xdg("XDG_CONFIG_HOME", ".config")?)
-        .env("XDG_CACHE_HOME", xdg("XDG_CACHE_HOME", ".cache")?)
-        .args(["run", SOBER, uri])
+    let mut child = sober_command(&instance)?
+        .args([SOBER, uri])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .map_err(|_| "Cannot launch Sober; install Flatpak and org.vinegarhq.Sober")?;
+    pending.insert(account_id.to_owned());
+    let account_id = account_id.to_owned();
     // Reap the Flatpak child; closing the supervisor deliberately leaves clients open.
     std::thread::spawn(move || {
         let _ = child.wait();
+        if let Ok(mut pending) = LAUNCH_PENDING.lock() {
+            pending.remove(&account_id);
+        }
     });
     Ok(())
+}
+fn sober_command(instance: &Path) -> Result<Command, String> {
+    // Isolation is part of every launch, including retries. Preserve the real
+    // host XDG paths so Flatpak can locate the installed app/runtime; its inside
+    // XDG paths and HOME are private to this account. No wrapper or opt-in is needed.
+    let mut command = Command::new("flatpak");
+    command
+        .env("HOME", instance)
+        .env("XDG_DATA_HOME", xdg("XDG_DATA_HOME", ".local/share")?)
+        .env("XDG_CONFIG_HOME", xdg("XDG_CONFIG_HOME", ".config")?)
+        .env("XDG_CACHE_HOME", xdg("XDG_CACHE_HOME", ".cache")?)
+        .arg("run")
+        .args(isolation_arguments(instance)?);
+    Ok(command)
+}
+fn isolation_arguments(instance: &Path) -> Result<Vec<String>, String> {
+    let instance = instance.to_str().ok_or("Sober account path is not UTF-8")?;
+    if !Path::new(instance).is_absolute()
+        || instance.chars().any(|c| matches!(c, ':' | '\n' | '\r'))
+    {
+        return Err("Sober account path is not valid for a Flatpak filesystem grant".into());
+    }
+    // --sandbox disables Flatpak's shared per-app /tmp and runtime directories.
+    // Regrant normal rendering/network access, but keep SysV IPC private. X11
+    // clients must fall back from MIT-SHM; Wayland remains available normally.
+    // Sandbox mode does not mount the usual app data, so grant only this
+    // account's private HOME and explicitly restore its existing XDG paths.
+    let data = Path::new(instance).join(".var/app").join(SOBER);
+    // These options are compiled into the app; no external script is needed.
+    // The developer adapter for old beta binaries uses this same source file.
+    let mut args: Vec<String> =
+        serde_json::from_str(include_str!("../scripts/sober-isolation/options.json"))
+            .map_err(|_| "Invalid built-in Sober sandbox options")?;
+    args.push(format!("--filesystem={instance}"));
+    for (variable, suffix) in [
+        ("XDG_DATA_HOME", "data"),
+        ("XDG_CONFIG_HOME", "config"),
+        ("XDG_CACHE_HOME", "cache"),
+        ("XDG_STATE_HOME", ".local/state"),
+    ] {
+        args.push(format!("--env={variable}={}", data.join(suffix).display()));
+    }
+    Ok(args)
 }
 pub fn owned_log(identity: &ProcessIdentity) -> Result<Option<PathBuf>, String> {
     owned_logs(std::slice::from_ref(identity))
@@ -230,7 +279,8 @@ pub fn owned_logs(
 ) -> Result<HashMap<(u32, String), PathBuf>, String> {
     let mut logs = HashMap::new();
     let mut candidates = HashMap::new();
-    let mut owners: HashMap<(u64, u64), HashSet<u32>> = HashMap::new();
+    let mut trackers: HashMap<Sandbox, HashSet<String>> = HashMap::new();
+    let mut owners: HashMap<(u64, u64), HashSet<Sandbox>> = HashMap::new();
     // Include unmanaged Sober clients: a shared file is ambiguous even when only
     // one of its owners belongs to RoLauncher. Compare inodes across namespaces.
     for entry in std::fs::read_dir("/proc")
@@ -243,21 +293,43 @@ pub fn owned_logs(
         if !valid_sober(pid) {
             continue;
         }
+        let sandbox = sandbox(pid)?;
+        if let Some(tracker) = process_tracker(pid) {
+            trackers.entry(sandbox).or_default().insert(tracker);
+        }
         let files = open_logs(pid)?;
         for (_, file) in &files {
-            owners.entry(*file).or_default().insert(pid);
+            owners.entry(*file).or_default().insert(sandbox);
         }
-        candidates.insert(pid, files);
+        // Sober's helper and game processes can inherit the same log descriptor.
+        // A descriptor shared inside one kernel PID namespace is not shared
+        // between independent Flatpak launches. Keep all candidates so separate
+        // logs still cause an ambiguity instead of choosing the newest one.
+        let group: &mut Vec<LogFile> = candidates.entry(sandbox).or_default();
+        for file in files {
+            if !group.iter().any(|existing| existing.1 == file.1) {
+                group.push(file);
+            }
+        }
     }
     for identity in identities {
         if !alive(identity)? {
             continue;
         }
-        let Some(files) = candidates.get(&identity.pid) else {
+        let sandbox = sandbox(identity.pid)?;
+        // Helpers without a URI are allowed, but a different tracked launch in
+        // the same sandbox makes attributing its connection signals ambiguous.
+        if !trackers
+            .get(&sandbox)
+            .is_some_and(|group| group.len() == 1 && group.contains(&identity.tracker))
+        {
+            continue;
+        }
+        let Some(files) = candidates.get(&sandbox) else {
             continue;
         };
         // Multiple logs or shared ownership never become guessed connection signals.
-        if let Some(path) = exclusive_log(identity.pid, files, &owners)
+        if let Some(path) = exclusive_log(sandbox, files, &owners)
             && alive(identity)?
         {
             logs.insert(
@@ -270,6 +342,12 @@ pub fn owned_logs(
 }
 
 type LogFile = (PathBuf, (u64, u64));
+type Sandbox = (u64, u64);
+fn sandbox(pid: u32) -> Result<Sandbox, String> {
+    let metadata = std::fs::metadata(format!("/proc/{pid}/ns/pid"))
+        .map_err(|_| "Sober sandbox identity unavailable")?;
+    Ok((metadata.dev(), metadata.ino()))
+}
 fn open_logs(pid: u32) -> Result<Vec<LogFile>, String> {
     let root = PathBuf::from(format!("/proc/{pid}"));
     let entries = match std::fs::read_dir(root.join("fd")) {
@@ -301,14 +379,14 @@ fn open_logs(pid: u32) -> Result<Vec<LogFile>, String> {
     Ok(files)
 }
 fn exclusive_log<'a>(
-    pid: u32,
+    sandbox: Sandbox,
     files: &'a [LogFile],
-    owners: &HashMap<(u64, u64), HashSet<u32>>,
+    owners: &HashMap<(u64, u64), HashSet<Sandbox>>,
 ) -> Option<&'a Path> {
     let [(path, file)] = files else { return None };
     owners
         .get(file)
-        .filter(|pids| pids.len() == 1 && pids.contains(&pid))?;
+        .filter(|sandboxes| sandboxes.len() == 1 && sandboxes.contains(&sandbox))?;
     Some(path)
 }
 
@@ -467,16 +545,112 @@ impl MultiInstanceGuard {
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "Requires scripts/test-sober-isolation.py's disposable Flatpak fixture"]
+    fn flatpak_runtime_isolation_separates_locks() {
+        use std::io::{BufRead, BufReader, Write};
+        struct Probe(std::process::Child);
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                if let Some(stdin) = self.0.stdin.as_mut() {
+                    let _ = stdin.write_all(b"\n");
+                }
+                let _ = self.0.wait();
+            }
+        }
+        let root = PathBuf::from(std::env::var_os("ROLAUNCHER_ISOLATION_FIXTURE_ROOT").unwrap());
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let launch = |slot: &str, isolated: bool| {
+            let home = root.join(slot);
+            private_directory(&home).unwrap();
+            let mut command = if isolated {
+                sober_command(&home).unwrap()
+            } else {
+                let mut command = Command::new("flatpak");
+                command.arg("run").env("HOME", &home);
+                command
+            };
+            command.args(["--user", "--branch=1"]);
+            let mut child = Probe(
+                command
+                    // The fixture needs no desktop integration. Test only the
+                    // actual filesystem, IPC, PID and network namespace behavior.
+                    .args(["--no-session-bus", "--no-a11y-bus"])
+                    .arg(format!("--env=ROLAUNCHER_PROBE_NAME={nonce}"))
+                    .arg("org.rolauncher.IsolationProbe")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::inherit())
+                    .spawn()
+                    .unwrap(),
+            );
+            let stdout = child.0.stdout.take().unwrap();
+            let mut fd = libc::pollfd {
+                fd: stdout.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            assert!(
+                unsafe { libc::poll(&mut fd, 1, 30_000) } > 0,
+                "Flatpak probe timed out"
+            );
+            let mut line = String::new();
+            BufReader::new(stdout).read_line(&mut line).unwrap();
+            let report: serde_json::Value = serde_json::from_str(&line)
+                .expect("Flatpak fixture did not produce a namespace report");
+            (child, report)
+        };
+        let (_normal_a, normal_a) = launch("normal-a", false);
+        let (_normal_b, normal_b) = launch("normal-b", false);
+        assert_eq!(normal_a["locked"], true);
+        assert_eq!(
+            normal_b["locked"], false,
+            "Control must reproduce a shared lock"
+        );
+        assert_eq!(normal_a["tmp"], normal_b["tmp"]);
+        assert_eq!(normal_a["runtime"], normal_b["runtime"]);
+        let (_isolated_a, isolated_a) = launch("isolated-a", true);
+        let (_isolated_b, isolated_b) = launch("isolated-b", true);
+        for report in [&isolated_a, &isolated_b] {
+            assert_eq!(report["locked"], true);
+            for field in ["tmp", "runtime", "ipc", "pid", "net"] {
+                assert!(report[field].as_u64().unwrap() > 0);
+            }
+        }
+        // Different tmpfs mounts can reuse an inode number; compare devices too.
+        for field in ["tmp", "runtime"] {
+            let device = format!("{field}_dev");
+            assert_ne!(
+                (&isolated_a[&device], &isolated_a[field]),
+                (&isolated_b[&device], &isolated_b[field]),
+                "Shared {field}"
+            );
+        }
+        for field in ["ipc", "pid"] {
+            assert_ne!(isolated_a[field], isolated_b[field], "Shared {field}");
+        }
+        assert_eq!(
+            isolated_a["net"], isolated_b["net"],
+            "Networking must stay available"
+        );
+        println!(
+            "Control shared a lock; two experimental sandboxes had independent temp/runtime/IPC/PID resources and retained host networking."
+        );
+    }
+    #[test]
     fn log_ownership_rejects_shared_files_and_multiple_candidates() {
         let a = (PathBuf::from("/proc/10/root/log"), (1, 20));
         let b = (PathBuf::from("/proc/10/root/other-log"), (1, 21));
         let files = [a.clone()];
-        let mut owners = HashMap::from([(a.1, HashSet::from([10]))]);
-        assert!(exclusive_log(10, &files, &owners).is_some());
-        assert!(exclusive_log(11, &files, &owners).is_none());
-        assert!(exclusive_log(10, &[a.clone(), b], &owners).is_none());
-        owners.get_mut(&a.1).unwrap().insert(11);
-        assert!(exclusive_log(10, &files, &owners).is_none());
+        let sandbox = (4, 10);
+        let other = (4, 11);
+        let mut owners = HashMap::from([(a.1, HashSet::from([sandbox]))]);
+        // Another helper in the same sandbox inherits the log: still one owner.
+        owners.get_mut(&a.1).unwrap().insert(sandbox);
+        assert!(exclusive_log(sandbox, &files, &owners).is_some());
+        assert!(exclusive_log(other, &files, &owners).is_none());
+        assert!(exclusive_log(sandbox, &[a.clone(), b], &owners).is_none());
+        owners.get_mut(&a.1).unwrap().insert(other);
+        assert!(exclusive_log(sandbox, &files, &owners).is_none());
     }
     #[test]
     fn ordinary_processes_and_stale_birth_identities_cannot_be_closed() {

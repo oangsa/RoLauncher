@@ -85,9 +85,75 @@ jobs:
             target/ui-preview/*.png
             target/ui-bridge/*.txt
 
+  linux-checks:
+    name: Linux checks and package (Ubuntu 24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Install build and fixture dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libdbus-1-dev python3 libfontconfig1 libx11-6 libxrandr2 libxi6 libgl1 xvfb xauth fonts-dejavu-core
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - name: Install pinned Rust
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.99.0 --profile minimal --component clippy --component rustfmt
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Rust, credential, API and archive tests
+        shell: bash
+        run: |
+          cargo fetch --locked --target x86_64-unknown-linux-gnu
+          cargo test --locked
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo fmt --check
+          python3 scripts/check-release.py
+          python3 scripts/test-linux-update.py
+          python3 scripts/test-publish-beta.py
+          python3 scripts/test-sober-isolation-adapter.py
+          dotnet restore desktop.tests/RoLauncher.Desktop.Tests.csproj --locked-mode --configfile desktop/NuGet.Config
+          dotnet run --project desktop.tests --no-restore -c Release
+      - name: Build and render isolated Linux shell
+        shell: bash
+        run: |
+          cd desktop.linux
+          dotnet restore --locked-mode -p:Configuration=Release --configfile NuGet.Config
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("../Cargo.toml", "rb"))["package"]["version"])')"
+          dotnet publish --no-restore -c Release -p:Version="$version" -p:UiSmoke=true -o ../target/linux-ui-smoke
+          cd ..
+          xvfb-run -a -s '-screen 0 1280x1024x24' python3 scripts/ui-smoke-linux.py --shell target/linux-ui-smoke/RoLauncher.Desktop
+      - name: Package normal Linux shell
+        shell: bash
+        run: |
+          bash scripts/build-linux.sh
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
+          python3 scripts/package-linux.py --directory "target/linux/rolauncher-v$version"
+          xvfb-run -a -s '-screen 0 1280x1024x24' python3 scripts/verify-linux-package.py --directory "target/linux/rolauncher-v$version" --smoke-shell
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-files
+          path: |
+            dist/rolauncher-v*-linux-x64.tar.gz
+            dist/rolauncher-v*-linux-SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: release-linux-files-diagnostics
+          path: |
+            target/linux-ui-preview/*.png
+            target/linux-ui-preview/*.txt
+
   release:
     name: Publish stable release
-    needs: windows-checks
+    needs: [windows-checks, linux-checks]
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -100,7 +166,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: release-files
+          pattern: release-*
+          merge-multiple: true
           path: dist
       - name: Publish verified assets and versioned changelog
         env:

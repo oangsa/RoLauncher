@@ -30,12 +30,13 @@ public sealed class UpdateDownloader : IDisposable
         if (!Regex.IsMatch(view.Version ?? "", @"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$") ||
             !Version.TryParse(view.Version, out var target) || !Version.TryParse(installedVersion, out var installed) ||
             !view.Available || target <= installed)
-            throw new InvalidDataException("The update must be a newer stable version.");
+            throw new InvalidDataException("The update must be a newer version.");
         var name = $"rolauncher-v{view.Version}-" + (OperatingSystem.IsLinux() ? "linux-x64.tar.gz" : "setup-x64.exe");
-        var prefix = $"{Publisher}/releases/download/v{view.Version}/";
+        var tag = (view.Prerelease ? "beta-v" : "v") + view.Version;
+        var prefix = $"{Publisher}/releases/download/{tag}/";
         var downloadUrl = OperatingSystem.IsLinux() ? view.DownloadUrl : view.InstallerUrl;
         if (downloadUrl != prefix + name || view.ChecksumsUrl != prefix + $"rolauncher-v{view.Version}-SHA256SUMS.txt" ||
-            view.ReleaseUrl != $"{Publisher}/releases/tag/v{view.Version}")
+            view.ReleaseUrl != $"{Publisher}/releases/tag/{tag}")
             throw new InvalidDataException("Automatic installation is supported only for official RoLauncher releases.");
         return name;
     }

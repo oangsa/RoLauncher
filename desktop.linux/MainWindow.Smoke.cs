@@ -19,6 +19,8 @@ public sealed partial class MainWindow
             _timer.Stop();
             Check(_rows.Count == 3 && !_refreshing, "Simulated accounts load through the authenticated API.");
             Check(_config.Version == GetType().Assembly.GetName().Version!.ToString(3), "Version matches the supervisor.");
+            Root.UpdateLayout();
+            Check(Math.Abs(GroupFilter.ActualHeight - BulkEditButton.ActualHeight) < 0.5 && GroupFilter.ActualHeight > 0, "The group dropdown matches the adjacent button height.");
             await CaptureLinuxAsync(directory, "accounts.png");
             NameSearch.Text = "alpha";
             ApplyFilters();

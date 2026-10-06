@@ -21,6 +21,16 @@ internal static class UpdateDownloadTests
         Rejected(() => UpdateDownloader.ValidateRelease(linux ? view with { DownloadUrl = "https://evil.example/package.tar.gz" }
             : view with { InstallerUrl = "https://evil.example/setup.exe" }, "1.0.0"), "Foreign platform packages are rejected.");
         Rejected(() => UpdateDownloader.ValidateRelease(view with { Version = "1.0.1-beta" }, "1.0.0"), "Prerelease metadata is rejected.");
+        var beta = view with {
+            Prerelease = true,
+            ReleaseUrl = view.ReleaseUrl.Replace("/v1.0.1", "/beta-v1.0.1"),
+            DownloadUrl = view.DownloadUrl.Replace("/v1.0.1/", "/beta-v1.0.1/"),
+            ChecksumsUrl = view.ChecksumsUrl.Replace("/v1.0.1/", "/beta-v1.0.1/"),
+            InstallerUrl = view.InstallerUrl.Replace("/v1.0.1/", "/beta-v1.0.1/")
+        };
+        check(UpdateDownloader.ValidateRelease(beta, "1.0.0") == name, "Official beta packages retain numeric versions and exact beta tag URLs.");
+        Rejected(() => UpdateDownloader.ValidateRelease(beta with { Prerelease = false }, "1.0.0"), "Beta links cannot masquerade as a stable release.");
+        Rejected(() => UpdateDownloader.ValidateRelease(view with { Prerelease = true }, "1.0.0"), "Beta metadata cannot authorize mismatched stable links.");
         check(!UpdateDownloader.AllowedRedirect(new("https://github.com.evil.example/a")) && !UpdateDownloader.AllowedRedirect(new("http://release-assets.githubusercontent.com/a")), "Redirects cannot escape GitHub or downgrade HTTPS.");
         var payload = linux ? new byte[] { 0x1f, 0x8b, 0x08, 0x00, 1, 2, 3 } : "MZisolated-installer-fixture"u8.ToArray();
         var hash = Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant();
@@ -51,6 +61,8 @@ internal static class UpdateDownloadTests
             check(File.ReadAllBytes(ready.Path).SequenceEqual(payload) && progress.Last == 100, "The redirected installer is saved only after verification.");
             check(requests.Any(u => u.Host == "release-assets.githubusercontent.com"), "The official GitHub asset redirect works.");
             check(await downloader.CachedAsync(view, "1.0.0", CancellationToken.None) is not null, "A cached download is reverified against the current official checksum.");
+            var betaReady = await downloader.DownloadAsync(beta, "1.0.0", progress, CancellationToken.None);
+            check(File.ReadAllBytes(betaReady.Path).SequenceEqual(payload) && requests.Any(u => u.AbsolutePath.Contains("/beta-v1.0.1/")), "Beta download follows official redirects and passes the checksum verification.");
             await File.WriteAllTextAsync(ready.Path, "MZcorrupted");
             check(await downloader.CachedAsync(view, "1.0.0", CancellationToken.None) is null && !File.Exists(ready.Path), "A corrupted cached installer is discarded.");
 

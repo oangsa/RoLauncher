@@ -217,6 +217,8 @@ pub struct Database {
     pub activity: Vec<Activity>,
     #[serde(default)]
     pub update_repository: String,
+    #[serde(default)]
+    pub include_beta_updates: bool,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RetiredLaunch {
@@ -244,6 +246,7 @@ pub struct Snapshot {
     pub compatibility: String,
     pub profiles: Vec<LaunchProfile>,
     pub update_repository: String,
+    pub include_beta_updates: bool,
 }
 
 /// The fifth retry is attempted; its failure ends the retry sequence.

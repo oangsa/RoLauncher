@@ -657,6 +657,9 @@ impl Engine {
                             let _ = self.update(&account.id, account.generation, |a| {
                                 attach_verified_player(a, identity)
                             });
+                            // Discover its log now; an empty scan during startup
+                            // must not leave a newly verified player waiting 30s.
+                            last_log_discovery = Instant::now() - Duration::from_secs(30);
                         } else if matches.len() > 1 {
                             let _=self.update(&account.id,account.generation,|a| { a.status=Status::NeedsAttention;a.last_error=Some("Multiple primary instances share this launch tracker; ownership is ambiguous".into()); });
                         } else if account.desired_running
@@ -906,6 +909,7 @@ fn snapshot(s: &State) -> Snapshot {
         compatibility: s.compatibility.clone(),
         profiles: s.database.profiles.clone(),
         update_repository: s.database.update_repository.clone(),
+        include_beta_updates: s.database.include_beta_updates,
     }
 }
 fn apply_failure(a: &mut Account, error: &Failure) {

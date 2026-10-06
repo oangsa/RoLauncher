@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+from release_files import checked_files
 
 root = Path(__file__).resolve().parent.parent
 version = re.search(r'^version = "(\d+\.\d+\.\d+)"', (root / 'Cargo.toml').read_text(), re.M)[1]
@@ -14,18 +15,8 @@ repo = os.environ['GITHUB_REPOSITORY']
 sha = os.environ['GITHUB_SHA']
 assert repo == 'oangsa/RoLauncher', 'Publish only from the official repository'
 assert os.environ.get('GITHUB_REF') == 'refs/heads/main', 'Publish only from main'
-prefix = f'rolauncher-{tag}'
 dist = root / 'dist'
-sums = dist / f'{prefix}-SHA256SUMS.txt'
-expected = {f'{prefix}-setup-x64.exe', f'{prefix}-windows-x64.zip', f'{prefix}-source.zip'}
-seen = set()
-for line in sums.read_text().splitlines():
-    digest, filename = line.split()
-    assert filename in expected and filename not in seen, 'Unexpected or duplicated release artifact'
-    assert hashlib.sha256((dist / filename).read_bytes()).hexdigest() == digest, 'Release checksum mismatch'
-    seen.add(filename)
-assert seen == expected, 'Release artifact missing'
-files = sorted(expected | {sums.name})
+files = checked_files(dist, version)
 notes = (root / f'docs/RELEASE-{version}.md').read_text(encoding='utf-8')
 assert notes.startswith(f'# RoLauncher {version}\n')
 headers = {'Authorization': 'Bearer ' + os.environ['GITHUB_TOKEN'], 'Accept': 'application/vnd.github+json',
@@ -66,16 +57,19 @@ else:
 upload = release['upload_url'].split('{')[0]
 assert upload.startswith(f'https://uploads.github.com/repos/{repo}/releases/'), 'Unexpected upload host'
 assets = {a['name']: a for a in call('/releases/' + str(release['id']) + '/assets')}
-for filename in files:
+for filename, source in sorted(files.items()):
     # Interrupted drafts can resume; published release assets are never modified.
     if filename in assets:
         call('/releases/assets/' + str(assets[filename]['id']), 'DELETE')
-    call(upload + '?name=' + filename, 'POST', binary=(dist / filename).read_bytes())
+    data = source if isinstance(source, bytes) else source.read_bytes()
+    call(upload + '?name=' + filename, 'POST', binary=data)
 uploaded = call('/releases/' + str(release['id']) + '/assets')
 assert {a['name'] for a in uploaded} == set(files), 'Incomplete or unexpected release assets'
 for asset in uploaded:
-    assert asset['size'] == (dist / asset['name']).stat().st_size, 'Incomplete uploaded asset'
+    source = files[asset['name']]
+    data = source if isinstance(source, bytes) else source.read_bytes()
+    assert asset['size'] == len(data), 'Incomplete uploaded asset'
     if asset.get('digest'):
-        assert asset['digest'] == 'sha256:' + hashlib.sha256((dist / asset['name']).read_bytes()).hexdigest()
+        assert asset['digest'] == 'sha256:' + hashlib.sha256(data).hexdigest()
 call('/releases/' + str(release['id']), 'PATCH', {'draft': False, 'make_latest': 'true'})
 print(f'Published https://github.com/{repo}/releases/tag/{tag}')

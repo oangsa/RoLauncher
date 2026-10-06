@@ -99,7 +99,7 @@
                 <Button Grid.Column="3" Content="Clear" Click="ClearFilters_Click" ToolTipService.ToolTip="Clear search and filters"/>
               </Grid>
               <StackPanel Orientation="Horizontal" Spacing="8">
-                <ComboBox x:Name="GroupFilter" MinWidth="160" PlaceholderText="All groups" SelectionChanged="Filters_Changed" AutomationProperties.Name="Filter accounts by group"/>
+                <ComboBox x:Name="GroupFilter" MinWidth="160" VerticalAlignment="Stretch" VerticalContentAlignment="Center" PlaceholderText="All groups" SelectionChanged="Filters_Changed" AutomationProperties.Name="Filter accounts by group"/>
                 <Button x:Name="BulkEditButton" Content="Edit selected" Click="BulkEdit_Click" IsEnabled="False"/>
                 <Button Content="Edit all accounts" Click="EditAll_Click"/>
                 <Button Content="Select visible" Click="SelectVisible_Click"/>
@@ -211,6 +211,8 @@
           </Border>
           <Border Style="{StaticResource Card}"><StackPanel Spacing="12">
             <TextBlock Text="Updates" Style="{StaticResource SectionTitle}"/>
+            <CheckBox x:Name="IncludeBetaUpdates" Content="Include beta updates" Checked="BetaUpdates_Changed" Unchecked="BetaUpdates_Changed"/>
+            <TextBlock Text="Beta versions include features that are still being tested. Turn this on to receive stable and beta releases." Style="{StaticResource Caption}"/>
             <TextBlock Text="RoLauncher checks GitHub automatically on startup and every six hours. Download an available update, then choose Relaunch to install it. Your accounts and settings are backed up, and Roblox clients stay open." Style="{StaticResource Caption}" TextWrapping="Wrap"/>
             <StackPanel Orientation="Horizontal" Spacing="8"><Button x:Name="CheckUpdatesButton" Content="Check updates" Click="CheckUpdates_Click"/><Button x:Name="UpdateDownloadButton" Content="Download" Click="UpdateAction_Click" IsEnabled="False"/><Button x:Name="UpdateReleaseNotesButton" Content="Release notes" Click="OpenUpdate_Click" IsEnabled="False"/></StackPanel>
             <TextBlock x:Name="UpdateStatus" Text="Updates are checked automatically." TextWrapping="Wrap" Style="{StaticResource Caption}"/>

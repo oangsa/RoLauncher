@@ -26,6 +26,13 @@ public sealed partial class MainWindow
     private void UpdateManagement(Snapshot snapshot)
     {
         CompatibilityText.Text = snapshot.Compatibility;
+        if (!_savingUpdateSettings)
+        {
+            _syncingUpdateSettings = true;
+            IncludeBetaUpdates.IsChecked = snapshot.IncludeBetaUpdates;
+            _syncingUpdateSettings = false;
+            _updateSettingsReady = true;
+        }
         var groups = _rows.Select(r => r.Account.Group).Distinct().OrderBy(g => g).ToArray();
         var fingerprint = JsonSerializer.Serialize(groups);
         if (fingerprint != _groupFingerprint)
