@@ -57,6 +57,7 @@ jobs:
       - name: Check version and release notes
         run: python scripts/check-release.py
       - name: Rust, desktop and WinUI tests
+        timeout-minutes: 10
         run: ./scripts/test.ps1
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
