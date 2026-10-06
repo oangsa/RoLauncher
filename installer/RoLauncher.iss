@@ -28,7 +28,12 @@ Compression=lzma2/normal
 SolidCompression=yes
 CloseApplications=no
 RestartApplications=no
+#ifdef TestInstaller
+; Fixture installation must not be blocked by the developer's running real app.
+AppMutex=Local\RoLauncherInstallerFixture
+#else
 AppMutex=Local\RoLauncherSupervisor,Local\RbxToolsSupervisor
+#endif
 OutputBaseFilename=rolauncher-v{#Version}-setup-x64
 #ifdef TestInstaller
 Uninstallable=no

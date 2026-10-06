@@ -95,6 +95,12 @@ fn expand_alias(value: &str, a: &Account, index: usize) -> String {
 }
 
 impl Engine {
+    pub fn set_beta_updates(&self, include_beta: bool) -> Result<(), String> {
+        self.transaction(|s| {
+            s.database.include_beta_updates = include_beta;
+            Ok(())
+        })
+    }
     pub fn set_update_repository(&self, repository: String) -> Result<(), String> {
         let repository = repository.trim().to_string();
         if !repository.is_empty() {

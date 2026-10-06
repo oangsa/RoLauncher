@@ -45,6 +45,7 @@ pub fn router(engine: Engine) -> Router {
         .route("/v1/updates", patch(update_repository))
         .route("/v1/updates/check", post(update_check))
         .route("/v1/updates/official/check", post(official_update_check))
+        .route("/v1/settings/updates", patch(update_settings))
         .route("/v1/login", post(browser_login))
         .route("/v1/accounts/{id}", patch(update).delete(remove))
         .route("/v1/accounts/{id}/repair", post(repair))
@@ -64,7 +65,7 @@ async fn browser_login(State(engine): State<Engine>) -> Result<StatusCode, ApiEr
     open_login(engine, None)
 }
 fn open_login(engine: Engine, expected: Option<String>) -> Result<StatusCode, ApiError> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     {
         let runtime = tokio::runtime::Handle::current();
         std::thread::Builder::new()
@@ -77,7 +78,7 @@ fn open_login(engine: Engine, expected: Option<String>) -> Result<StatusCode, Ap
             .map_err(|_| error("Unable to open browser sign-in".into()))?;
         Ok(StatusCode::ACCEPTED)
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = (engine, expected);
         Err(error("Browser sign-in requires Windows".into()))
@@ -101,15 +102,34 @@ async fn update_repository(
 async fn update_check(
     State(engine): State<Engine>,
 ) -> Result<Json<crate::updates::UpdateView>, ApiError> {
-    crate::updates::check(&engine.snapshot().update_repository)
+    let snapshot = engine.snapshot();
+    crate::updates::check(&snapshot.update_repository, snapshot.include_beta_updates)
         .await
         .map(Json)
         .map_err(error)
 }
-async fn official_update_check() -> Result<Json<crate::updates::UpdateView>, ApiError> {
-    crate::updates::check(crate::updates::DEFAULT_REPOSITORY)
-        .await
-        .map(Json)
+async fn official_update_check(
+    State(engine): State<Engine>,
+) -> Result<Json<crate::updates::UpdateView>, ApiError> {
+    crate::updates::check(
+        crate::updates::DEFAULT_REPOSITORY,
+        engine.snapshot().include_beta_updates,
+    )
+    .await
+    .map(Json)
+    .map_err(error)
+}
+#[derive(Deserialize)]
+struct UpdateSettings {
+    include_beta: bool,
+}
+async fn update_settings(
+    State(engine): State<Engine>,
+    Json(settings): Json<UpdateSettings>,
+) -> Result<StatusCode, ApiError> {
+    engine
+        .set_beta_updates(settings.include_beta)
+        .map(|_| StatusCode::NO_CONTENT)
         .map_err(error)
 }
 async fn profiles(State(engine): State<Engine>) -> Json<Vec<crate::model::LaunchProfile>> {
@@ -257,7 +277,7 @@ async fn import(
     Json(mut input): Json<Import>,
 ) -> Result<Json<ImportResult>, ApiError> {
     if input.cookies.is_empty() || input.cookies.len() > 50 {
-        return Err(error("Import 1–50 cookies per request".into()));
+        return Err(error("Import 1â€“50 cookies per request".into()));
     }
     let mut result = ImportResult {
         accounts: Vec::new(),
@@ -357,10 +377,66 @@ pub async fn serve_on(engine: Engine, listener: tokio::net::TcpListener) -> Resu
         .map_err(|_| "Local API stopped unexpectedly".into())
 }
 
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "linux")))]
 mod tests {
     use super::*;
     use tower::ServiceExt;
+    #[tokio::test]
+    async fn beta_update_preference_is_authenticated_and_persists() {
+        let path = std::env::temp_dir().join(format!("rbx-update-settings-{}", Uuid::new_v4()));
+        let engine = Engine::open(
+            crate::store::Store::new(path.clone()).unwrap(),
+            "fixture".into(),
+        )
+        .unwrap();
+        assert!(!engine.snapshot().include_beta_updates);
+        let app = router(engine.clone());
+        for authenticated in [false, true] {
+            let mut request = Request::builder()
+                .method("PATCH")
+                .uri("/v1/settings/updates")
+                .header("content-type", "application/json");
+            if authenticated {
+                request = request.header("authorization", format!("Bearer {}", engine.token()));
+            }
+            let response = app
+                .clone()
+                .oneshot(
+                    request
+                        .body(axum::body::Body::from(r#"{"include_beta":true}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                if authenticated {
+                    StatusCode::NO_CONTENT
+                } else {
+                    StatusCode::UNAUTHORIZED
+                }
+            );
+            assert_eq!(engine.snapshot().include_beta_updates, authenticated);
+        }
+        drop(app);
+        drop(engine);
+        let reopened = Engine::open(
+            crate::store::Store::new(path.clone()).unwrap(),
+            "fixture".into(),
+        )
+        .unwrap();
+        assert!(reopened.snapshot().include_beta_updates);
+        reopened.set_beta_updates(false).unwrap();
+        drop(reopened);
+        let stable = Engine::open(
+            crate::store::Store::new(path.clone()).unwrap(),
+            "fixture".into(),
+        )
+        .unwrap();
+        assert!(!stable.snapshot().include_beta_updates);
+        drop(stable);
+        std::fs::remove_dir_all(path).unwrap();
+    }
     #[tokio::test]
     async fn management_routes_require_authentication_and_bulk_commit_is_atomic() {
         let path = std::env::temp_dir().join(format!("rbx-management-api-{}", Uuid::new_v4()));

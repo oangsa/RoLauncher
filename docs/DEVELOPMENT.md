@@ -2,6 +2,8 @@
 
 ## Build and test
 
+For the Linux development port, see [Linux prerequisites, builds and parity acceptance](LINUX.md). Windows continues to use native WinUI and the checks below.
+
 Use Windows with Rust 1.99.0, .NET 8 SDK, Python 3.13, and Inno Setup 6.7+. For MSVC builds, install Visual Studio C++ Build Tools and the Windows SDK. Dependencies are pinned in the lockfiles.
 
 ```powershell

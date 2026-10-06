@@ -27,8 +27,9 @@ Default address: `http://127.0.0.1:38471`. Open Settings and click API token to 
 | GET / POST | `/v1/backups` | List encrypted backup filenames / create a backup |
 | POST | `/v1/backups/FILENAME/restore` | Restore validated backup while all accounts are stopped |
 | PATCH | `/v1/updates` | Legacy API discovery repository; blank uses the official repository. Does not change the desktop's official publisher. |
-| POST | `/v1/updates/check` | Discover the legacy configured public repository's stable release |
+| POST | `/v1/updates/check` | Discover the legacy configured public repository's release in the saved update channel |
 | POST | `/v1/updates/official/check` | Check the official publisher; used by automatic desktop checks |
+| PATCH | `/v1/settings/updates` | Save `{"include_beta":true}` to include beta releases, or `false` for stable releases only (default). The preference appears as `include_beta_updates` in snapshots. |
 | GET | `/v1/settings/discord` | Enabled/configured flags, recovery preference, delivery status, recent activity; no webhook URL |
 | PATCH | `/v1/settings/discord` | Optional `enabled`, `notify_recovery`, `webhook_url`; empty URL removes it (also set `enabled:false`) |
 | POST | `/v1/settings/discord/test` | Queue a test to the saved webhook, even with notifications off; HTTP 202 means queued |

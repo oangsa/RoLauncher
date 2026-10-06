@@ -43,6 +43,16 @@ public sealed partial class MainWindow
             Assert(UpdateNoticeButton.IsEnabled && (string)UpdateNoticeButton.Content == "Download" && (string)UpdateDownloadButton.Content == "Download",
                 "The banner and Settings share the Download action.");
             await CaptureAsync(directory, "update-available.png");
+            Assert(!IncludeBetaUpdates.IsChecked!.Value, "Stable updates are selected by default.");
+            IncludeBetaUpdates.IsChecked = true;
+            for (var i = 0; i < 100 && (_savingUpdateSettings || _checkingUpdate); i++) await Task.Delay(50);
+            Assert(!_savingUpdateSettings && !_checkingUpdate && _update?.Prerelease == true && UpdateNotice.Title.Contains("beta"), "Opting into beta saves the channel and displays a labeled beta update.");
+            await RefreshAsync();
+            Assert(IncludeBetaUpdates.IsChecked == true, "The saved beta channel survives a settings refresh.");
+            await CaptureAsync(directory, "beta-update-available.png");
+            IncludeBetaUpdates.IsChecked = false;
+            for (var i = 0; i < 100 && (_savingUpdateSettings || _checkingUpdate); i++) await Task.Delay(50);
+            Assert(_update?.Prerelease == false, "Turning beta updates off checks the stable channel again.");
             _downloadedUpdate = new("FIXTURE_NOT_EXECUTED", new string('0', 64), _update!.Version);
             UpdateActions();
             Assert((string)UpdateNoticeButton.Content == "Relaunch" && (string)UpdateDownloadButton.Content == "Relaunch",
@@ -53,6 +63,7 @@ public sealed partial class MainWindow
             _modalOpen = false; Feedback.IsOpen = false;
             _update = null; _downloadedUpdate = null; UpdateNotice.IsOpen = false; UpdateNotice.Visibility = Visibility.Collapsed; UpdateActions();
             Root.UpdateLayout();
+            Assert(Math.Abs(GroupFilter.ActualHeight - BulkEditButton.ActualHeight) < 0.5 && GroupFilter.ActualHeight > 0, "The group dropdown and adjacent buttons have equal rendered heights.");
             Assert(!Feedback.IsOpen, "No permanent Ready banner is shown at startup.");
             Tab_Click(SettingsTab, new RoutedEventArgs());
             await Task.Delay(150);

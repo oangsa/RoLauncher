@@ -17,6 +17,32 @@ public sealed partial class MainWindow
 #endif
     private DownloadedInstaller? _downloadedUpdate;
     private bool _checkingUpdate, _downloadingUpdate, _installingUpdate;
+    private bool _syncingUpdateSettings, _savingUpdateSettings, _updateSettingsReady;
+
+    private async void BetaUpdates_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_syncingUpdateSettings || !_updateSettingsReady || _savingUpdateSettings) return;
+        _savingUpdateSettings = true; UpdateActions();
+        var saved = false;
+        await GuardAsync(async () =>
+        {
+            await _api.SendAsync(HttpMethod.Patch, "settings/updates", new { IncludeBeta = IncludeBetaUpdates.IsChecked == true });
+            saved = true;
+        });
+        _savingUpdateSettings = false;
+        if (!saved) await RefreshAsync();
+        if (!_disposed)
+        {
+            if (saved)
+            {
+                _update = null; _downloadedUpdate = null;
+                UpdateNotice.IsOpen = false; UpdateNotice.Visibility = Visibility.Collapsed;
+                UpdateReleaseNotesButton.IsEnabled = false;
+            }
+            UpdateActions();
+            if (saved) await CheckForUpdateAsync(true);
+        }
+    }
 
     private void StartUpdateChecks()
     {
@@ -29,8 +55,9 @@ public sealed partial class MainWindow
 
     private async Task CheckForUpdateAsync(bool manual)
     {
-        if (_checkingUpdate || _downloadingUpdate || _installingUpdate || _disposed) return;
+        if (_checkingUpdate || _downloadingUpdate || _installingUpdate || _savingUpdateSettings || _disposed) return;
         _checkingUpdate = true; CheckUpdatesButton.IsEnabled = false;
+        UpdateActions();
         try
         {
             var result = (await _api.SendAsync(HttpMethod.Post, "updates/official/check"))!.Value;
@@ -44,7 +71,7 @@ public sealed partial class MainWindow
                 _downloadedUpdate = await _updater.CachedAsync(view, _config.Version, _updateLifetime.Token);
                 UpdateNotice.IsOpen = true;
                 UpdateNotice.Visibility = Visibility.Visible;
-                UpdateNotice.Title = $"RoLauncher {view.Version} is available";
+                UpdateNotice.Title = $"RoLauncher {view.Version}{(view.Prerelease ? " beta" : "")} is available";
                 SetUpdateMessage(_downloadedUpdate is null ? "Download the update, then relaunch when you’re ready." : "The update is downloaded and verified. Relaunch when you’re ready.");
             }
             else
@@ -77,9 +104,11 @@ public sealed partial class MainWindow
     private void SetUpdateMessage(string message) { UpdateStatus.Text = message; UpdateNotice.Message = message; }
     private void UpdateActions()
     {
+        CheckUpdatesButton.IsEnabled = !_checkingUpdate && !_downloadingUpdate && !_installingUpdate && !_savingUpdateSettings;
+        IncludeBetaUpdates.IsEnabled = !_checkingUpdate && !_downloadingUpdate && !_installingUpdate && !_savingUpdateSettings;
         var text = _installingUpdate ? "Installing…" : _downloadingUpdate ? "Cancel download" : _downloadedUpdate is not null ? "Relaunch" : "Download";
         UpdateDownloadButton.Content = UpdateNoticeButton.Content = text;
-        UpdateDownloadButton.IsEnabled = UpdateNoticeButton.IsEnabled = !_checkingUpdate && !_installingUpdate && (_update?.Available == true);
+        UpdateDownloadButton.IsEnabled = UpdateNoticeButton.IsEnabled = !_checkingUpdate && !_installingUpdate && !_savingUpdateSettings && (_update?.Available == true);
     }
 
     private async void UpdateAction_Click(object sender, RoutedEventArgs e)
@@ -137,7 +166,7 @@ public sealed partial class MainWindow
     private async void OpenUpdate_Click(object sender, RoutedEventArgs e)
     {
         if (_update is null) return;
-        await GuardAsync(async () => { if (!await Windows.System.Launcher.LaunchUriAsync(new Uri(_update.ReleaseUrl))) FeedbackMessage("Windows could not open the release notes.", InfoBarSeverity.Error); });
+        await GuardAsync(async () => { if (!await Windows.System.Launcher.LaunchUriAsync(new Uri(_update.ReleaseUrl))) FeedbackMessage("Could not open the release notes.", InfoBarSeverity.Error); });
     }
 
     private void DisposeUpdateResources()

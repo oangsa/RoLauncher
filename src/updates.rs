@@ -67,13 +67,26 @@ pub struct UpdateView {
     pub download_url: String,
     pub checksums_url: String,
     pub installer_url: String,
+    pub prerelease: bool,
 }
-fn parse_release(repo: &str, value: Release) -> Result<UpdateView, String> {
-    validate_repository(repo)?;
-    if value.draft || value.prerelease {
-        return Err("Only published stable releases are supported".into());
+fn release_version(value: &Release, include_beta: bool) -> Result<(u64, u64, u64), String> {
+    if value.draft || (value.prerelease && !include_beta) {
+        return Err("This release is excluded from the selected update channel".into());
     }
-    let number = version(&value.tag_name)?;
+    if value.prerelease {
+        version(
+            value
+                .tag_name
+                .strip_prefix("beta-v")
+                .ok_or("Unsupported beta release tag")?,
+        )
+    } else {
+        version(&value.tag_name)
+    }
+}
+fn parse_release(repo: &str, value: Release, include_beta: bool) -> Result<UpdateView, String> {
+    validate_repository(repo)?;
+    let number = release_version(&value, include_beta)?;
     let release_version = format!("{}.{}.{}", number.0, number.1, number.2);
     let asset = |suffix: &str| -> Result<String, String> {
         let name = format!("rolauncher-v{release_version}-{suffix}");
@@ -85,12 +98,15 @@ fn parse_release(repo: &str, value: Release) -> Result<UpdateView, String> {
             .assets
             .iter()
             .find(|a| a.name == name && a.browser_download_url == expected)
-            .ok_or("Release is missing a matching Windows package or checksum file")?;
+            .ok_or("Release is missing a matching platform package or checksum file")?;
         Ok(entry.browser_download_url.clone())
     };
-    let download_url = asset("windows-x64.zip")?;
+    let download_url = asset(package_suffix())?;
     let checksums_url = asset("SHA256SUMS.txt")?;
+    #[cfg(not(target_os = "linux"))]
     let installer_url = asset("setup-x64.exe")?;
+    #[cfg(target_os = "linux")]
+    let installer_url = String::new();
     Ok(UpdateView {
         available: number > version(env!("CARGO_PKG_VERSION"))?,
         version: release_version,
@@ -98,9 +114,32 @@ fn parse_release(repo: &str, value: Release) -> Result<UpdateView, String> {
         download_url,
         checksums_url,
         installer_url,
+        prerelease: value.prerelease,
     })
 }
-pub async fn check(repository: &str) -> Result<UpdateView, String> {
+fn package_suffix() -> &'static str {
+    if cfg!(target_os = "linux") {
+        "linux-x64.tar.gz"
+    } else {
+        "windows-x64.zip"
+    }
+}
+fn select_release(repo: &str, releases: Vec<Release>) -> Result<UpdateView, String> {
+    // Compare numeric versions rather than GitHub publication order. Prefer a stable
+    // release when both channels publish the same product version.
+    let release = releases
+        .into_iter()
+        .filter_map(|release| {
+            release_version(&release, true)
+                .ok()
+                .map(|number| (number, !release.prerelease, release))
+        })
+        .max_by_key(|(number, stable, _)| (*number, *stable))
+        .ok_or("No published release matches the selected update channel")?
+        .2;
+    parse_release(repo, release, true)
+}
+pub async fn check(repository: &str, include_beta: bool) -> Result<UpdateView, String> {
     let repository = repository_or_default(repository);
     validate_repository(repository)?;
     let client = reqwest::Client::builder()
@@ -109,9 +148,14 @@ pub async fn check(repository: &str) -> Result<UpdateView, String> {
         .user_agent(concat!("RoLauncher/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|_| "Unable to initialize update check")?;
+    let endpoint = if include_beta {
+        "releases?per_page=100"
+    } else {
+        "releases/latest"
+    };
     let response = client
         .get(format!(
-            "https://api.github.com/repos/{repository}/releases/latest"
+            "https://api.github.com/repos/{repository}/{endpoint}"
         ))
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2026-03-10")
@@ -137,15 +181,96 @@ pub async fn check(repository: &str) -> Result<UpdateView, String> {
         }
         bytes.extend_from_slice(&chunk);
     }
-    parse_release(
-        repository,
-        serde_json::from_slice(&bytes).map_err(|_| "Unsupported release response")?,
-    )
+    if include_beta {
+        select_release(
+            repository,
+            serde_json::from_slice(&bytes).map_err(|_| "Unsupported release response")?,
+        )
+    } else {
+        parse_release(
+            repository,
+            serde_json::from_slice(&bytes).map_err(|_| "Unsupported release response")?,
+            false,
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn fixture(tag: &str, prerelease: bool) -> Release {
+        let number = tag
+            .strip_prefix("beta-v")
+            .or_else(|| tag.strip_prefix('v'))
+            .unwrap_or(tag);
+        Release {
+            tag_name: tag.into(),
+            draft: false,
+            prerelease,
+            assets: [
+                "windows-x64.zip",
+                "linux-x64.tar.gz",
+                "setup-x64.exe",
+                "SHA256SUMS.txt",
+            ]
+            .into_iter()
+            .map(|suffix| {
+                let name = format!("rolauncher-v{number}-{suffix}");
+                Asset {
+                    browser_download_url: format!(
+                        "https://github.com/owner/repo/releases/download/{tag}/{name}"
+                    ),
+                    name,
+                }
+            })
+            .collect(),
+        }
+    }
+    #[test]
+    fn beta_updates_require_opt_in_and_exact_beta_asset_links() {
+        assert!(parse_release("owner/repo", fixture("beta-v1.10.0", true), false).is_err());
+        let beta = parse_release("owner/repo", fixture("beta-v1.10.0", true), true).unwrap();
+        assert!(beta.prerelease && beta.available);
+        assert_eq!(beta.version, "1.10.0");
+        assert!(beta.checksums_url.contains("/beta-v1.10.0/"));
+        assert!(parse_release("owner/repo", fixture("beta-v1.10.0", false), true).is_err());
+        assert!(parse_release("owner/repo", fixture("v1.10.0", true), true).is_err());
+        let mut wrong = fixture("beta-v1.10.0", true);
+        wrong.assets[0].browser_download_url = wrong.assets[0]
+            .browser_download_url
+            .replace("/beta-v", "/v");
+        wrong.assets[1].browser_download_url = wrong.assets[1]
+            .browser_download_url
+            .replace("/beta-v", "/v");
+        assert!(parse_release("owner/repo", wrong, true).is_err());
+    }
+    #[test]
+    fn beta_channel_selects_numeric_newest_and_prefers_stable_for_ties() {
+        let mut draft = fixture("beta-v99.0.0", true);
+        draft.draft = true;
+        let newest = select_release(
+            "owner/repo",
+            vec![
+                fixture("v1.9.9", false),
+                fixture("beta-v1.10.0", true),
+                draft,
+            ],
+        )
+        .unwrap();
+        assert_eq!(newest.version, "1.10.0");
+        assert!(newest.prerelease);
+        let stable = select_release(
+            "owner/repo",
+            vec![fixture("v1.10.0", false), fixture("beta-v1.10.0", true)],
+        )
+        .unwrap();
+        assert!(!stable.prerelease);
+        // A broken newest release must fail instead of offering an older download.
+        let mut missing = fixture("beta-v1.11.0", true);
+        missing.assets.clear();
+        assert!(select_release("owner/repo", vec![fixture("v1.10.0", false), missing]).is_err());
+        assert!(select_release("owner/repo", vec![]).is_err());
+    }
     #[test]
     fn repository_validation_cannot_escape_the_github_endpoint() {
         for value in [
@@ -163,26 +288,34 @@ mod tests {
     #[test]
     fn updates_compare_numeric_versions_and_require_matching_package_links() {
         let make = || {
-            Release { tag_name: "v1.10.0".into(), draft: false, prerelease: false, assets: ["windows-x64.zip", "SHA256SUMS.txt", "setup-x64.exe"].iter().map(|suffix| Asset { name: format!("rolauncher-v1.10.0-{suffix}"), browser_download_url: format!("https://github.com/owner/repo/releases/download/v1.10.0/rolauncher-v1.10.0-{suffix}") }).collect() }
+            Release { tag_name: "v1.10.0".into(), draft: false, prerelease: false, assets: ["windows-x64.zip", "linux-x64.tar.gz", "setup-x64.exe", "SHA256SUMS.txt"].iter().map(|suffix| Asset { name: format!("rolauncher-v1.10.0-{suffix}"), browser_download_url: format!("https://github.com/owner/repo/releases/download/v1.10.0/rolauncher-v1.10.0-{suffix}") }).collect() }
         };
-        let view = parse_release("owner/repo", make()).unwrap();
+        let view = parse_release("owner/repo", make(), false).unwrap();
         assert!(view.available);
         assert_eq!(view.version, "1.10.0");
+        #[cfg(not(target_os = "linux"))]
         assert!(
             view.installer_url
                 .ends_with("rolauncher-v1.10.0-setup-x64.exe")
         );
+        assert!(view.download_url.ends_with(package_suffix()));
+        #[cfg(target_os = "linux")]
+        assert!(view.installer_url.is_empty());
         assert_eq!(repository_or_default(""), DEFAULT_REPOSITORY);
         assert!(version("1.10.0").unwrap() > version("1.9.9").unwrap());
         assert!(version("1.1.0-beta").is_err());
         let mut bad = make();
-        bad.assets[0].browser_download_url = "https://evil.example/malware.zip".into();
-        assert!(parse_release("owner/repo", bad).is_err());
+        bad.assets
+            .iter_mut()
+            .find(|a| a.name.ends_with(package_suffix()))
+            .unwrap()
+            .browser_download_url = "https://evil.example/malware.zip".into();
+        assert!(parse_release("owner/repo", bad, false).is_err());
         let mut draft = make();
         draft.draft = true;
-        assert!(parse_release("owner/repo", draft).is_err());
+        assert!(parse_release("owner/repo", draft, true).is_err());
         let mut missing = make();
         missing.assets.pop();
-        assert!(parse_release("owner/repo", missing).is_err());
+        assert!(parse_release("owner/repo", missing, false).is_err());
     }
 }
