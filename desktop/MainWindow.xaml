@@ -181,7 +181,7 @@
           </StackPanel></Border>
           <Border Style="{StaticResource Card}"><StackPanel Spacing="12">
             <TextBlock Text="Backup and restore" Style="{StaticResource SectionTitle}"/>
-            <TextBlock Text="Ten encrypted local backups are kept. Restore works for this Windows user and leaves restored accounts stopped. Stop all accounts before restoring." Style="{StaticResource Caption}" TextWrapping="Wrap"/>
+            <TextBlock x:Name="BackupDescription" Text="Ten encrypted local backups are kept. Restore works for this Windows user and leaves restored accounts stopped. Stop all accounts before restoring." Style="{StaticResource Caption}" TextWrapping="Wrap"/>
             <ComboBox x:Name="BackupPicker" HorizontalAlignment="Stretch" PlaceholderText="Choose a local backup"/>
             <StackPanel Orientation="Horizontal" Spacing="8"><Button Content="Create backup" Click="Backup_Click"/><Button Content="Restore backup" Click="Restore_Click"/></StackPanel>
           </StackPanel></Border>

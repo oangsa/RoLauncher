@@ -1,14 +1,11 @@
 using System.Collections.ObjectModel;
 using System.Net.Http;
 using System.Text.Json;
-using Microsoft.UI;
-using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Windows.System;
-using WinRT.Interop;
 
 namespace RoLauncher.Desktop;
 
@@ -18,7 +15,7 @@ public sealed partial class MainWindow : Window
     private readonly Bootstrap _config;
     private readonly ObservableCollection<AccountRow> _rows = [];
     private readonly ObservableCollection<AccountRow> _visibleRows = [];
-    private readonly NativeTray _tray;
+    private readonly IDisposable _tray;
     private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromSeconds(1) };
     private readonly DispatcherTimer _feedbackTimer = new() { Interval = TimeSpan.FromSeconds(5) };
     private AccountRow? _editorRow;
@@ -40,20 +37,7 @@ public sealed partial class MainWindow : Window
         ChangelogText.Text = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "CHANGELOG.txt"));
         AccountList.ItemsSource = _visibleRows;
         RecoveryList.ItemsSource = _rows;
-        var hwnd = WindowNative.GetWindowHandle(this);
-        var appWindow = AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(hwnd));
-        appWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "RoLauncher.ico"));
-        var scale = NativeTray.Scale(hwnd);
-        var work = DisplayArea.GetFromWindowId(appWindow.Id, DisplayAreaFallback.Primary).WorkArea;
-        appWindow.Resize(new Windows.Graphics.SizeInt32(Math.Min((int)(1180 * scale), work.Width - 48),
-            Math.Min((int)(940 * scale), work.Height - 48)));
-        appWindow.Closing += (sender, e) =>
-        {
-            if (_exiting) return;
-            e.Cancel = true;
-            appWindow.Hide();
-        };
-        _tray = new(hwnd, () => { appWindow.Show(); Activate(); }, async () => await ExitAsync());
+        _tray = ConfigureDesktop();
         Closed += (_, _) => DisposeResources();
         _timer.Tick += async (_, _) => await RefreshAsync();
         _feedbackTimer.Tick += (_, _) => { _feedbackTimer.Stop(); Feedback.IsOpen = false; };
@@ -61,6 +45,8 @@ public sealed partial class MainWindow : Window
         _ = RefreshAsync();
 #if UI_SMOKE
         Root.Loaded += async (sender, e) => await SmokeAsync();
+#elif LINUX_UI_SMOKE
+        Root.Loaded += async (sender, e) => await LinuxSmokeAsync();
 #else
         Root.Loaded += (_, _) => StartUpdateChecks();
 #endif
@@ -218,7 +204,7 @@ public sealed partial class MainWindow : Window
         AccountDialog.XamlRoot = Root.XamlRoot;
         try
         {
-            await AccountDialog.ShowAsync();
+            await ShowAccountDialogAsync();
         }
         finally
         {
@@ -324,11 +310,10 @@ public sealed partial class MainWindow : Window
     }
     private void Root_KeyDown(object sender, KeyRoutedEventArgs e)
     {
-        var control = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control);
-        if (e.Key == VirtualKey.A && control.HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down) &&
-            !_modalOpen && Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(Root.XamlRoot) is not (TextBox or PasswordBox) && AccountsPage.Visibility == Visibility.Visible)
+        if (e.Key == VirtualKey.A && IsControlDown() &&
+            !_modalOpen && Root.XamlRoot is { } xamlRoot && Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(xamlRoot) is not (TextBox or PasswordBox) && AccountsPage.Visibility == Visibility.Visible)
         {
-            AccountList.SelectAll(); e.Handled = true;
+            SelectAllRows(); e.Handled = true;
         }
     }
     private async void Action_Click(object sender, RoutedEventArgs e)
@@ -403,7 +388,7 @@ public sealed partial class MainWindow : Window
     private async void File_Click(object sender, RoutedEventArgs e)
     {
         var picker = new Windows.Storage.Pickers.FileOpenPicker();
-        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+        InitializePicker(picker);
         picker.FileTypeFilter.Add(".txt");
         await GuardAsync(async () =>
         {

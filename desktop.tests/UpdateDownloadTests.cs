@@ -6,10 +6,11 @@ internal static class UpdateDownloadTests
 {
     public static async Task RunAsync(Action<bool, string> check)
     {
-        var name = "rolauncher-v1.0.1-setup-x64.exe";
+        var linux = OperatingSystem.IsLinux();
+        var name = "rolauncher-v1.0.1-" + (linux ? "linux-x64.tar.gz" : "setup-x64.exe");
         var prefix = UpdateDownloader.Publisher + "/releases/download/v1.0.1/";
         var view = new UpdateView(true, "1.0.1", UpdateDownloader.Publisher + "/releases/tag/v1.0.1",
-            prefix + "rolauncher-v1.0.1-windows-x64.zip", prefix + "rolauncher-v1.0.1-SHA256SUMS.txt", prefix + name);
+            prefix + (linux ? name : "rolauncher-v1.0.1-windows-x64.zip"), prefix + "rolauncher-v1.0.1-SHA256SUMS.txt", linux ? "" : prefix + name);
         check(UpdateDownloader.ValidateRelease(view, "1.0.0") == name, "A newer official installer is accepted.");
         void Rejected(Action action, string description)
         {
@@ -17,10 +18,11 @@ internal static class UpdateDownloadTests
         }
         Rejected(() => UpdateDownloader.ValidateRelease(view, "1.0.1"), "Same-version installs are rejected.");
         Rejected(() => UpdateDownloader.ValidateRelease(view, "2.0.0"), "Downgrades are rejected.");
-        Rejected(() => UpdateDownloader.ValidateRelease(view with { InstallerUrl = "https://evil.example/setup.exe" }, "1.0.0"), "Foreign installers are rejected.");
+        Rejected(() => UpdateDownloader.ValidateRelease(linux ? view with { DownloadUrl = "https://evil.example/package.tar.gz" }
+            : view with { InstallerUrl = "https://evil.example/setup.exe" }, "1.0.0"), "Foreign platform packages are rejected.");
         Rejected(() => UpdateDownloader.ValidateRelease(view with { Version = "1.0.1-beta" }, "1.0.0"), "Prerelease metadata is rejected.");
         check(!UpdateDownloader.AllowedRedirect(new("https://github.com.evil.example/a")) && !UpdateDownloader.AllowedRedirect(new("http://release-assets.githubusercontent.com/a")), "Redirects cannot escape GitHub or downgrade HTTPS.");
-        var payload = "MZisolated-installer-fixture"u8.ToArray();
+        var payload = linux ? new byte[] { 0x1f, 0x8b, 0x08, 0x00, 1, 2, 3 } : "MZisolated-installer-fixture"u8.ToArray();
         var hash = Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant();
         Rejected(() => UpdateDownloader.ReadChecksum($"{hash}  {name}\n{hash}  {name}", name), "Duplicate checksum entries are rejected.");
         Rejected(() => UpdateDownloader.ReadChecksum($"bad  {name}", name), "Malformed installer digests are rejected.");
@@ -28,6 +30,12 @@ internal static class UpdateDownloadTests
         var root = Path.Combine(Path.GetTempPath(), "rolauncher-update-tests-" + Guid.NewGuid().ToString("N"));
         try
         {
+            Directory.CreateDirectory(root);
+            var wrongPlatform = linux ? "MZwindows-fixture"u8.ToArray() : new byte[] { 0x1f, 0x8b, 0x08, 1, 2, 3 };
+            var wrongPath = Path.Combine(root, "wrong-platform");
+            await File.WriteAllBytesAsync(wrongPath, wrongPlatform);
+            try { await UpdateDownloader.VerifyAsync(new(wrongPath, Convert.ToHexString(SHA256.HashData(wrongPlatform)), "1.0.1")); check(false, "Wrong-platform file rejected."); }
+            catch (InvalidDataException) { check(true, "A matching checksum cannot authorize the wrong platform's file."); }
             var requests = new List<Uri>();
             using var client = new HttpClient(new Fixture(request =>
             {

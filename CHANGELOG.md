@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.0] — 2026-10-06
+
+- Add a Linux development port for Sober with shared WinUI views rendered by Uno.
+- Keep native WinUI on Windows; add Linux credential, sign-in, process and desktop adapters.
+- Linux support remains preview until the Ubuntu/Arch, GNOME/KDE parity matrix passes.
+
 ## [1.0.0] — 2026-10-06
 
 - Renamed the product and Windows app to RoLauncher, retaining existing accounts and encrypted backups.

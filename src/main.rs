@@ -1,21 +1,25 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 fn main() {
     if let Err(error) = run() {
         rolauncher::ui::message(&error);
     }
 }
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 fn run() -> Result<(), String> {
     use rolauncher::{engine::Engine, platform, store::Store};
     let mut args = std::env::args().skip(1);
     let mut port = 38471;
     let mut headless = false;
+    #[cfg(windows)]
     let local_app_data = std::path::PathBuf::from(
         std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA unavailable")?,
     );
+    #[cfg(windows)]
     let mut directory = rolauncher::store::default_directory(&local_app_data);
+    #[cfg(target_os = "linux")]
+    let mut directory = platform::data_directory()?;
     let mut diagnostic = false;
     let mut restore_backup = None;
     while let Some(arg) = args.next() {
@@ -43,9 +47,11 @@ fn run() -> Result<(), String> {
             }
         }
     }
+    #[cfg(target_os = "linux")]
+    platform::initialize(&directory)?;
     if diagnostic {
         let players = platform::players();
-        let report = serde_json::json!({"platform":"Windows","memory_access":"none","metadata_available":players.is_ok(),"identified_player_count":players.as_ref().map(|p|p.len()).unwrap_or(0),"live_account_tests":"not performed"});
+        let report = serde_json::json!({"platform":std::env::consts::OS,"memory_access":"none","metadata_available":players.is_ok(),"identified_player_count":players.as_ref().map(|p|p.len()).unwrap_or(0),"live_account_tests":"not performed"});
         std::fs::create_dir_all(&directory).map_err(|_| "Cannot create diagnostics directory")?;
         std::fs::write(
             directory.join("compatibility.json"),
@@ -66,10 +72,16 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
     let multi = platform::MultiInstanceGuard::acquire();
+    #[cfg(windows)]
     let compatibility = if multi.is_ok() {
         "OS multi-instance mutex acquired; Roblox launch, mapping and log compatibility require live validation".into()
     } else {
         multi.as_ref().err().unwrap().clone()
+    };
+    #[cfg(target_os = "linux")]
+    let compatibility = match &multi {
+        Ok(_) => "Linux / Sober: isolated Flatpak launch homes, process metadata and existing logs; live compatibility and UI parity require validation".into(),
+        Err(error) => error.clone(),
     };
     let engine = Engine::open(Store::new(directory)?, compatibility)?;
     engine.set_launch_allowed(multi.is_ok());
@@ -108,7 +120,7 @@ fn run() -> Result<(), String> {
     drop(multi);
     ui_result
 }
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 fn main() {
-    eprintln!("RoLauncher requires Windows 10/11 x64");
+    eprintln!("RoLauncher requires Windows 10/11 x64 or Linux x64");
 }

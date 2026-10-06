@@ -1,0 +1,28 @@
+<Project Sdk="Uno.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-desktop</TargetFramework>
+    <RootNamespace>RoLauncher.Desktop</RootNamespace>
+    <AssemblyName>RoLauncher.Desktop</AssemblyName>
+    <RuntimeIdentifier>linux-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <IsUnoHead>true</IsUnoHead>
+    <UnoFeatures>SkiaRenderer</UnoFeatures>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <NuGetAudit>false</NuGetAudit>
+    <PublishTrimmed>false</PublishTrimmed>
+    <DefineConstants Condition="'$(UiSmoke)' == 'true'">$(DefineConstants);LINUX_UI_SMOKE</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Windows remains a native WinUI project. These are the same views and handlers. -->
+    <ApplicationDefinition Include="../desktop/App.xaml" Link="App.xaml" />
+    <Page Include="../desktop/MainWindow.xaml" Link="MainWindow.xaml" />
+    <Compile Include="../desktop/Usings.cs;../desktop/Bootstrap.cs;../desktop/ApiClient.cs;../desktop/Models.cs;../desktop/StatusConverter.cs;../desktop/AccountFilter.cs;../desktop/EditorDraft.cs;../desktop/BulkDraft.cs;../desktop/MainWindow.xaml.cs;../desktop/MainWindow.Management.cs;../desktop/MainWindow.Updates.cs;../desktop/UpdateDownloader.cs" Link="%(Filename)%(Extension)" />
+    <Content Include="../desktop/CHANGELOG.txt" Link="CHANGELOG.txt" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../assets/RoLauncher.ico" Link="RoLauncher.ico" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../assets/RoLauncher.png" Link="RoLauncher.png" CopyToOutputDirectory="PreserveNewest" />
+    <EmbeddedResource Include="../scripts/apply-update-linux.py" LogicalName="RoLauncher.ApplyUpdate.Linux.py" />
+  </ItemGroup>
+</Project>

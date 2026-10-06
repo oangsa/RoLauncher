@@ -64,7 +64,7 @@ async fn browser_login(State(engine): State<Engine>) -> Result<StatusCode, ApiEr
     open_login(engine, None)
 }
 fn open_login(engine: Engine, expected: Option<String>) -> Result<StatusCode, ApiError> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     {
         let runtime = tokio::runtime::Handle::current();
         std::thread::Builder::new()
@@ -77,7 +77,7 @@ fn open_login(engine: Engine, expected: Option<String>) -> Result<StatusCode, Ap
             .map_err(|_| error("Unable to open browser sign-in".into()))?;
         Ok(StatusCode::ACCEPTED)
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = (engine, expected);
         Err(error("Browser sign-in requires Windows".into()))
@@ -257,7 +257,7 @@ async fn import(
     Json(mut input): Json<Import>,
 ) -> Result<Json<ImportResult>, ApiError> {
     if input.cookies.is_empty() || input.cookies.len() > 50 {
-        return Err(error("Import 1–50 cookies per request".into()));
+        return Err(error("Import 1â€“50 cookies per request".into()));
     }
     let mut result = ImportResult {
         accounts: Vec::new(),
@@ -357,7 +357,7 @@ pub async fn serve_on(engine: Engine, listener: tokio::net::TcpListener) -> Resu
         .map_err(|_| "Local API stopped unexpectedly".into())
 }
 
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "linux")))]
 mod tests {
     use super::*;
     use tower::ServiceExt;

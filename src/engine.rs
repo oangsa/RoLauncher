@@ -600,7 +600,7 @@ impl Engine {
                 Err(e)
             } else {
                 *state = next;
-                platform::launch(&uri)
+                platform::launch_for(&uri, &account.id)
             }
         };
         if let Err(message) = launched {
@@ -961,7 +961,7 @@ fn apply_failure(a: &mut Account, error: &Failure) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn discord_persists_encrypted_settings_and_records_only_committed_incidents() {
         let (engine, path) = fixture(1);
@@ -1033,7 +1033,7 @@ mod tests {
         drop(engine);
         std::fs::remove_dir_all(path).unwrap();
     }
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn switching_rejoin_off_cancels_backoff_and_on_resumes_only_that_pause() {
         let (engine, path) = fixture(1);
@@ -1091,7 +1091,7 @@ mod tests {
         drop(engine);
         std::fs::remove_dir_all(path).unwrap();
     }
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn generic_kicks_wait_for_grace_and_reconnection_stop_or_disable_prevent_replacement() {
         let (engine, path) = fixture(1);
@@ -1120,7 +1120,7 @@ mod tests {
         drop(engine);
         std::fs::remove_dir_all(path).unwrap();
     }
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn connection_failure_preserves_target_grace_and_stop() {
         let (engine, path) = fixture(1);
@@ -1204,7 +1204,7 @@ mod tests {
         attach_verified_player(&mut account, identity);
         assert_eq!(account.status, Status::Stopped);
     }
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn bulk_settings_are_atomic_preserve_omissions_and_expand_aliases() {
         let (engine, path) = fixture(3);
@@ -1285,7 +1285,7 @@ mod tests {
         drop(engine);
         std::fs::remove_dir_all(path).unwrap();
     }
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn profiles_capture_each_account_and_import_validates_membership_atomically() {
         let (engine, path) = fixture(2);
@@ -1393,7 +1393,7 @@ mod tests {
             }
         }
     }
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn retry_now_retains_failures_and_respects_rate_limits_and_attention() {
         let (engine, path) = fixture(1);
@@ -1416,7 +1416,7 @@ mod tests {
         drop(engine);
         std::fs::remove_dir_all(path).unwrap();
     }
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn history_persists_deduplicates_and_support_reports_allowlist_fields() {
         let (engine, path) = fixture(1);
@@ -1474,7 +1474,7 @@ mod tests {
         drop(engine);
         std::fs::remove_dir_all(path).unwrap();
     }
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn repair_rejects_wrong_or_removed_account_and_retains_settings() {
         let (engine, path) = fixture(2);
@@ -1533,7 +1533,7 @@ mod tests {
         drop(engine);
         std::fs::remove_dir_all(path).unwrap();
     }
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn encrypted_backups_rotate_restore_stopped_and_recover_corrupt_database() {
         let (engine, path) = fixture(1);
@@ -1604,7 +1604,7 @@ mod tests {
             .unwrap();
         (engine, path)
     }
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn fifty_accounts_stop_start_idempotence_and_stale_signals() {
         let (engine, path) = fixture(50);
@@ -1643,7 +1643,7 @@ mod tests {
         drop(engine);
         std::fs::remove_dir_all(path).unwrap();
     }
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn stop_cancels_backoff_and_retains_late_launch_ownership() {
         let (engine, path) = fixture(1);
@@ -1664,7 +1664,7 @@ mod tests {
         drop(engine);
         std::fs::remove_dir_all(path).unwrap();
     }
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn save_failure_rolls_back_state() {
         let (engine, path) = fixture(1);
@@ -1674,7 +1674,7 @@ mod tests {
         drop(engine);
         std::fs::remove_dir_all(path).unwrap();
     }
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn reconnect_clears_disconnect_without_relaunch() {
         let (engine, path) = fixture(1);

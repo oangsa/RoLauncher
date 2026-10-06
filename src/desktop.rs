@@ -1,4 +1,4 @@
-//! WinUI is a separate native desktop process; the Rust supervisor retains account ownership.
+//! The desktop is a separate process; the Rust supervisor retains account ownership.
 use crate::engine::Engine;
 use std::{io::Write, process::Command};
 
@@ -8,21 +8,27 @@ pub fn run(engine: Engine, _runtime: tokio::runtime::Handle, port: u16) -> Resul
         .parent()
         .ok_or("Cannot locate the application folder")?
         .to_path_buf();
+    #[cfg(windows)]
     let shell = root.join("desktop").join("RoLauncher.Desktop.exe");
+    #[cfg(target_os = "linux")]
+    let shell = root.join("desktop").join("RoLauncher.Desktop");
     run_shell(engine, port, &shell)
 }
 fn run_shell(engine: Engine, port: u16, shell: &std::path::Path) -> Result<(), String> {
+    #[cfg(windows)]
     use std::os::windows::process::CommandExt;
     if !shell.is_file() {
-        return Err("WinUI desktop files are missing. Extract the entire release ZIP, or run scripts/build.ps1 to build the desktop shell.".into());
+        return Err("Desktop files are missing. Extract the entire release package, or run the platform build script.".into());
     }
-    let mut child = Command::new(shell)
-        .creation_flags(0x08000000) // CREATE_NO_WINDOW: no console during startup.
+    let mut command = Command::new(shell);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000); // CREATE_NO_WINDOW: no console during startup.
+    let mut child = command
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .map_err(|_| "Unable to start the WinUI desktop shell")?;
+        .map_err(|_| "Unable to start the desktop shell")?;
     let bootstrap = zeroize::Zeroizing::new(
         serde_json::json!({
             "port": port, "token": engine.token(), "version": env!("CARGO_PKG_VERSION"),
@@ -46,11 +52,11 @@ fn run_shell(engine: Engine, port: u16, shell: &std::path::Path) -> Result<(), S
     if status.success() {
         Ok(())
     } else {
-        Err("The WinUI desktop shell closed unexpectedly".into())
+        Err("The desktop shell closed unexpectedly".into())
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
     #[test]

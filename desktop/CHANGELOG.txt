@@ -1,3 +1,7 @@
+1.1.0 — Linux development preview
+
+Shared Windows layouts on Linux through Uno, with Sober integration. Windows remains native WinUI. Linux visual and live-player parity are awaiting validation.
+
 1.0.0 — RoLauncher: saved sessions and dependable recovery
 
 • Renamed to RoLauncher, including the desktop, tray, notifications, exports and release packages. Existing saved accounts and encrypted backups remain supported.

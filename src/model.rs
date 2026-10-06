@@ -122,7 +122,7 @@ impl Target {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProcessIdentity {
     pub pid: u32,
-    /// Windows FILETIME ticks. Serialized as text to preserve integer precision in JS.
+    /// Windows FILETIME or Linux boot ID/start ticks; text preserves integer precision.
     pub creation_time: String,
     pub tracker: String,
     pub generation: Uuid,

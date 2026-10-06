@@ -85,12 +85,15 @@ fn parse_release(repo: &str, value: Release) -> Result<UpdateView, String> {
             .assets
             .iter()
             .find(|a| a.name == name && a.browser_download_url == expected)
-            .ok_or("Release is missing a matching Windows package or checksum file")?;
+            .ok_or("Release is missing a matching platform package or checksum file")?;
         Ok(entry.browser_download_url.clone())
     };
-    let download_url = asset("windows-x64.zip")?;
+    let download_url = asset(package_suffix())?;
     let checksums_url = asset("SHA256SUMS.txt")?;
+    #[cfg(not(target_os = "linux"))]
     let installer_url = asset("setup-x64.exe")?;
+    #[cfg(target_os = "linux")]
+    let installer_url = String::new();
     Ok(UpdateView {
         available: number > version(env!("CARGO_PKG_VERSION"))?,
         version: release_version,
@@ -99,6 +102,13 @@ fn parse_release(repo: &str, value: Release) -> Result<UpdateView, String> {
         checksums_url,
         installer_url,
     })
+}
+fn package_suffix() -> &'static str {
+    if cfg!(target_os = "linux") {
+        "linux-x64.tar.gz"
+    } else {
+        "windows-x64.zip"
+    }
 }
 pub async fn check(repository: &str) -> Result<UpdateView, String> {
     let repository = repository_or_default(repository);
@@ -163,20 +173,28 @@ mod tests {
     #[test]
     fn updates_compare_numeric_versions_and_require_matching_package_links() {
         let make = || {
-            Release { tag_name: "v1.10.0".into(), draft: false, prerelease: false, assets: ["windows-x64.zip", "SHA256SUMS.txt", "setup-x64.exe"].iter().map(|suffix| Asset { name: format!("rolauncher-v1.10.0-{suffix}"), browser_download_url: format!("https://github.com/owner/repo/releases/download/v1.10.0/rolauncher-v1.10.0-{suffix}") }).collect() }
+            Release { tag_name: "v1.10.0".into(), draft: false, prerelease: false, assets: ["windows-x64.zip", "linux-x64.tar.gz", "setup-x64.exe", "SHA256SUMS.txt"].iter().map(|suffix| Asset { name: format!("rolauncher-v1.10.0-{suffix}"), browser_download_url: format!("https://github.com/owner/repo/releases/download/v1.10.0/rolauncher-v1.10.0-{suffix}") }).collect() }
         };
         let view = parse_release("owner/repo", make()).unwrap();
         assert!(view.available);
         assert_eq!(view.version, "1.10.0");
+        #[cfg(not(target_os = "linux"))]
         assert!(
             view.installer_url
                 .ends_with("rolauncher-v1.10.0-setup-x64.exe")
         );
+        assert!(view.download_url.ends_with(package_suffix()));
+        #[cfg(target_os = "linux")]
+        assert!(view.installer_url.is_empty());
         assert_eq!(repository_or_default(""), DEFAULT_REPOSITORY);
         assert!(version("1.10.0").unwrap() > version("1.9.9").unwrap());
         assert!(version("1.1.0-beta").is_err());
         let mut bad = make();
-        bad.assets[0].browser_download_url = "https://evil.example/malware.zip".into();
+        bad.assets
+            .iter_mut()
+            .find(|a| a.name.ends_with(package_suffix()))
+            .unwrap()
+            .browser_download_url = "https://evil.example/malware.zip".into();
         assert!(parse_release("owner/repo", bad).is_err());
         let mut draft = make();
         draft.draft = true;

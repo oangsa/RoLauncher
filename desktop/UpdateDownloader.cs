@@ -8,7 +8,7 @@ namespace RoLauncher.Desktop;
 
 public sealed record DownloadedInstaller(string Path, string Sha256, string Version);
 
-/// Downloads only the official publisher's installer; never forwards local API credentials.
+/// Downloads only the official publisher's platform package; never forwards local API credentials.
 public sealed class UpdateDownloader : IDisposable
 {
     public const string Publisher = "https://github.com/oangsa/RoLauncher";
@@ -31,9 +31,10 @@ public sealed class UpdateDownloader : IDisposable
             !Version.TryParse(view.Version, out var target) || !Version.TryParse(installedVersion, out var installed) ||
             !view.Available || target <= installed)
             throw new InvalidDataException("The update must be a newer stable version.");
-        var name = $"rolauncher-v{view.Version}-setup-x64.exe";
+        var name = $"rolauncher-v{view.Version}-" + (OperatingSystem.IsLinux() ? "linux-x64.tar.gz" : "setup-x64.exe");
         var prefix = $"{Publisher}/releases/download/v{view.Version}/";
-        if (view.InstallerUrl != prefix + name || view.ChecksumsUrl != prefix + $"rolauncher-v{view.Version}-SHA256SUMS.txt" ||
+        var downloadUrl = OperatingSystem.IsLinux() ? view.DownloadUrl : view.InstallerUrl;
+        if (downloadUrl != prefix + name || view.ChecksumsUrl != prefix + $"rolauncher-v{view.Version}-SHA256SUMS.txt" ||
             view.ReleaseUrl != $"{Publisher}/releases/tag/v{view.Version}")
             throw new InvalidDataException("Automatic installation is supported only for official RoLauncher releases.");
         return name;
@@ -107,8 +108,10 @@ public sealed class UpdateDownloader : IDisposable
     public static async Task VerifyAsync(DownloadedInstaller installer, CancellationToken cancellation = default)
     {
         await using var stream = File.OpenRead(installer.Path);
-        if (stream.Length < 2 || stream.Length > MaximumInstallerBytes || stream.ReadByte() != 'M' || stream.ReadByte() != 'Z')
-            throw new InvalidDataException("The downloaded file is not a Windows installer.");
+        var linux = OperatingSystem.IsLinux();
+        if (stream.Length < 2 || stream.Length > MaximumInstallerBytes ||
+            stream.ReadByte() != (linux ? 0x1f : 'M') || stream.ReadByte() != (linux ? 0x8b : 'Z'))
+            throw new InvalidDataException(linux ? "The downloaded file is not a Linux package." : "The downloaded file is not a Windows installer.");
         stream.Position = 0;
         var actual = Convert.ToHexString(await SHA256.HashDataAsync(stream, cancellation));
         if (!string.Equals(actual, installer.Sha256, StringComparison.OrdinalIgnoreCase))
@@ -135,7 +138,7 @@ public sealed class UpdateDownloader : IDisposable
         var partial = destination + "." + Guid.NewGuid().ToString("N") + ".partial";
         try
         {
-            using var response = await OpenAsync(view.InstallerUrl, cancellation);
+            using var response = await OpenAsync(OperatingSystem.IsLinux() ? view.DownloadUrl : view.InstallerUrl, cancellation);
             var total = response.Content.Headers.ContentLength;
             if (total > MaximumInstallerBytes) throw new InvalidDataException("The installer download is too large.");
             await using (var input = await response.Content.ReadAsStreamAsync(cancellation))

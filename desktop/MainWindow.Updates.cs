@@ -137,7 +137,7 @@ public sealed partial class MainWindow
     private async void OpenUpdate_Click(object sender, RoutedEventArgs e)
     {
         if (_update is null) return;
-        await GuardAsync(async () => { if (!await Windows.System.Launcher.LaunchUriAsync(new Uri(_update.ReleaseUrl))) FeedbackMessage("Windows could not open the release notes.", InfoBarSeverity.Error); });
+        await GuardAsync(async () => { if (!await Windows.System.Launcher.LaunchUriAsync(new Uri(_update.ReleaseUrl))) FeedbackMessage("Could not open the release notes.", InfoBarSeverity.Error); });
     }
 
     private void DisposeUpdateResources()
