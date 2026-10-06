@@ -43,7 +43,7 @@ jobs:
       - name: Test isolated installer and update handoff
         run: ./scripts/test-installer.ps1
       - name: Package executable installer, portable app and corresponding source
-        run: ./scripts/package.ps1
+        run: ./scripts/package.ps1 -UseCurrentVersion
       - name: Verify packaged files and published desktop
         run: python scripts/verify-package.py --smoke-shell
       - uses: actions/upload-artifact@v4
@@ -110,7 +110,7 @@ jobs:
       - name: Package normal Linux shell
         shell: bash
         run: |
-          bash scripts/build-linux.sh
+          bash scripts/build-linux.sh --use-current-version
           version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
           python3 scripts/package-linux.py --directory "target/linux/rolauncher-v$version"
           xvfb-run -a -s '-screen 0 1280x1024x24' python3 scripts/verify-linux-package.py --directory "target/linux/rolauncher-v$version" --smoke-shell

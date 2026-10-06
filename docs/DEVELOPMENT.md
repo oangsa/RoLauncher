@@ -27,13 +27,17 @@ Recommended branch protection: require PRs, **Branch flow**, and **Windows check
 
 ## Releases
 
-Bump once per release with `python scripts/prepare-release.py KIND`:
+Choose the upcoming version from the latest published GitHub stable release with `python scripts/prepare-release.py KIND`. This defaults to a local `MAJOR.MINOR.PATCH-dev.<12 random hex digits>` preview. Use `--base 1.3.0` for an explicitly verified offline baseline.
 
 | KIND | Version change |
 | --- | --- |
 | `feature` | Next MINOR, PATCH reset to zero |
 | `fix` | Next PATCH |
 | `major` | Next MAJOR, MINOR/PATCH reset to zero |
+
+Local `scripts/build.ps1`, `scripts/build-linux.sh`, and `scripts/package.ps1` refresh the random identity once per build/package while keeping the same upcoming numeric target. Cargo, the lockfile, README, runtime strings, desktop informational version, installer label, source and filenames share that identity. Direct Cargo/desktop builds reuse the current identity; run `python scripts/versioning.py` first for a new local build. `-UseCurrentVersion` (or Linux `--use-current-version`) preserves the identity during checks, nested builds and CI.
+
+For an intentional stable release, run `python scripts/prepare-release.py KIND --stable`, review the consolidated notes, then package with `scripts/package.ps1 -UseCurrentVersion`. Publishing scripts reject local dev identities. Stable versions use the numeric rules below and bump once for the full release, not for local iterations.
 
 Follow [AGENTS.md](../AGENTS.md), including explicitly requested versions. Finish the generated release notes and changelogs, then run `python scripts/check-release.py`. Documentation-only edits do not require a new app release.
 

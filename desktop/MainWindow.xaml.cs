@@ -18,6 +18,7 @@ public sealed partial class MainWindow : Window
     private readonly IDisposable _tray;
     private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromSeconds(1) };
     private readonly DispatcherTimer _feedbackTimer = new() { Interval = TimeSpan.FromSeconds(5) };
+    private ContentDialog _accountDialog = null!;
     private AccountRow? _editorRow;
     private EditorDraft? _editorOriginal;
     private bool _modalOpen, _saving, _editorRecovery;
@@ -30,12 +31,18 @@ public sealed partial class MainWindow : Window
     public MainWindow(Bootstrap config)
     {
         InitializeComponent();
+        // Linux detaches inline dialogs; keep them alive for subsequent opens.
+        _accountDialog = AccountDialog;
+        _presetLookupDialog = PresetLookupDialog;
         _api = new(config);
         _config = config;
         Title = $"RoLauncher {config.Version}";
         VersionLabel.Text = $"v{config.Version}";
         AccountList.ItemsSource = _visibleRows;
-        RecoveryList.ItemsSource = _rows;
+        PresetAccounts.ItemsSource = _presetVisibleRows;
+        InitializeTheme();
+        Root.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler(Workspace_PointerPressed), true);
+
         _tray = ConfigureDesktop();
         Closed += (_, _) => DisposeResources();
         _timer.Tick += async (_, _) => await RefreshAsync();
@@ -100,11 +107,13 @@ public sealed partial class MainWindow : Window
             finally { _updating = false; }
             ApplyFilters();
             UpdateManagement(snapshot);
+            ApplyPresetFilters();
+            UpdateGameNames(snapshot);
             if (RecoveryPage.Visibility == Visibility.Visible) await RefreshHistoryAsync();
-            if (SettingsPage.Visibility == Visibility.Visible) await RefreshBackupsAsync();
+            if (BackupsPage.Visibility == Visibility.Visible) await RefreshBackupsAsync();
             if (_editorRow is not null && !_rows.Contains(_editorRow))
             {
-                AccountDialog.IsPrimaryButtonEnabled = false;
+                _accountDialog.IsPrimaryButtonEnabled = false;
                 EditorError.Message = "This account was removed. Close this dialog to continue.";
                 EditorError.IsOpen = true;
             }
@@ -115,6 +124,8 @@ public sealed partial class MainWindow : Window
             DiscordEnabled.IsChecked = discord.Enabled;
             DiscordRecovery.IsChecked = discord.NotifyRecovery;
             DiscordStatus.Text = $"{(discord.Configured ? "Webhook saved" : "No webhook configured")} · {discord.DeliveryStatus}";
+            // The API returns only the configured flag; never put the saved secret into the UI.
+            WebhookInput.PlaceholderText = discord.Configured ? "●●●●●●●●●●●●●●●●" : "Paste a Discord webhook URL";
             var fingerprint = JsonSerializer.Serialize(discord.Recent);
             if (fingerprint != _activityFingerprint)
             {
@@ -173,11 +184,31 @@ public sealed partial class MainWindow : Window
         StartButton.IsEnabled = StopButton.IsEnabled = RestartButton.IsEnabled = RemoveButton.IsEnabled = selected.Length != 0;
         BulkEditButton.IsEnabled = selected.Length != 0;
         AccountCount.Text = $"{_visibleRows.Count} of {_rows.Count} accounts · {selected.Length} selected · Ctrl+A to select visible";
-        var enabled = selected.Count(r => r.Account.AutoRecovery);
-        RejoinCheck.IsEnabled = selected.Length != 0;
-        RejoinCheck.IsChecked = enabled == 0 ? false : enabled == selected.Length ? true : null;
-        SelectionSummary.Text = selected.Length == 0 ? "Select accounts on the Accounts page to change their settings."
-            : $"{selected.Length} selected · Automatic rejoin is on for {enabled}.";
+        UpdatePresetControls();
+    }
+    private void Workspace_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (e.GetCurrentPoint(Root).Properties.IsLeftButtonPressed && e.OriginalSource is DependencyObject source)
+            ClearSelectionFrom(source);
+    }
+    private void ClearSelectionFrom(DependencyObject source)
+    {
+        if (_modalOpen) return;
+        for (var node = source; node is not null; node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node))
+        {
+            if (node is ListViewItem or ButtonBase or TextBox or PasswordBox or ComboBox) return;
+            if (node == Root) break;
+        }
+        AccountList.SelectedItems.Clear();
+    }
+    private async void RowAction_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { DataContext: AccountRow row, Tag: string action } button)
+        {
+            button.IsEnabled = false;
+            try { await RunActionAsync(action, [row]); }
+            finally { button.IsEnabled = true; }
+        }
     }
     private async void RowDetails_Click(object sender, RoutedEventArgs e)
     {
@@ -190,20 +221,22 @@ public sealed partial class MainWindow : Window
         _editorRow = row;
         _editorOriginal = EditorDraft.From(row.Account);
         DialogFields.DataContext = row;
-        DialogGame.ItemsSource = _gameProfiles;
+        DialogGame.ItemsSource = _gameProfiles.Cast<object>().Prepend("Custom destination").ToArray();
         DialogGame.SelectedItem = null;
         AliasInput.Text = _editorOriginal.Alias; PlaceInput.Text = _editorOriginal.Place;
         JobInput.Text = _editorOriginal.Job; PrivateInput.Text = _editorOriginal.Private;
-        DialogGame.SelectedItem = _gameProfiles.FirstOrDefault(p => p.Target == row.Account.Target);
+        DialogGame.SelectedItem = (object?)_gameProfiles.FirstOrDefault(p => p.Target == row.Account.Target) ?? "Custom destination";
         DialogRejoin.IsChecked = row.Account.AutoRecovery;
         DialogGroup.Text = row.Account.Group;
         DialogFallback.SelectedIndex = PolicyIndex(row.Account.FallbackPolicy);
         DialogClearTarget.IsChecked = false;
+        SetEditorEnabled(true);
         _editorGroup = row.Account.Group; _editorPolicy = row.Account.FallbackPolicy;
         _editorRecovery = row.Account.AutoRecovery;
         EditorError.IsOpen = false;
-        AccountDialog.IsPrimaryButtonEnabled = true;
-        AccountDialog.XamlRoot = Root.XamlRoot;
+        _accountDialog.IsPrimaryButtonEnabled = true;
+        _accountDialog.XamlRoot = Root.XamlRoot;
+        ApplyDialogTheme(_accountDialog);
         try
         {
             await ShowAccountDialogAsync();
@@ -231,7 +264,11 @@ public sealed partial class MainWindow : Window
         var draft = new EditorDraft { Alias = AliasInput.Text, Place = PlaceInput.Text, Job = JobInput.Text, Private = PrivateInput.Text };
         var patch = new Dictionary<string, object?>();
         if (draft.Alias != _editorOriginal.Alias) patch["alias"] = draft.Alias;
-        if (DialogClearTarget.IsChecked == true) patch["clear_target"] = true;
+        if (DialogGame.SelectedItem is GameProfile profile)
+        {
+            if (profile.Target != _editorRow.Account.Target) patch["target"] = profile.Target;
+        }
+        else if (DialogClearTarget.IsChecked == true) patch["clear_target"] = true;
         else if (draft.Place != _editorOriginal.Place || draft.Job != _editorOriginal.Job || draft.Private != _editorOriginal.Private)
         {
             if (!draft.TryTarget(out var target, out var error))
@@ -244,7 +281,7 @@ public sealed partial class MainWindow : Window
         if (patch.Count == 0) return true;
         _saving = true;
         SetEditorEnabled(false);
-        AccountDialog.IsPrimaryButtonEnabled = false;
+        _accountDialog.IsPrimaryButtonEnabled = false;
         var saved = false;
         try
         {
@@ -261,14 +298,17 @@ public sealed partial class MainWindow : Window
         finally
         {
             _saving = false; SetEditorEnabled(true);
-            AccountDialog.IsPrimaryButtonEnabled = _editorRow is not null && _rows.Contains(_editorRow);
+            _accountDialog.IsPrimaryButtonEnabled = _editorRow is not null && _rows.Contains(_editorRow);
         }
     }
     private void SetEditorEnabled(bool enabled)
     {
-        AliasInput.IsEnabled = PlaceInput.IsEnabled = JobInput.IsEnabled = PrivateInput.IsEnabled = enabled;
+        AliasInput.IsEnabled = enabled;
+        var custom = DialogGame.SelectedItem is not GameProfile;
+        PlaceInput.IsEnabled = JobInput.IsEnabled = PrivateInput.IsEnabled = enabled && custom;
         DialogRejoin.IsEnabled = enabled;
-        DialogGame.IsEnabled = DialogGroup.IsEnabled = DialogFallback.IsEnabled = DialogClearTarget.IsEnabled = enabled;
+        DialogGame.IsEnabled = DialogGroup.IsEnabled = DialogFallback.IsEnabled = enabled;
+        DialogClearTarget.IsEnabled = enabled && custom;
     }
     private async void RowDelete_Click(object sender, RoutedEventArgs e)
     {
@@ -285,7 +325,7 @@ public sealed partial class MainWindow : Window
                 XamlRoot = Root.XamlRoot, Title = accounts.Length == 1 ? "Delete account?" : $"Delete {accounts.Length} accounts?",
                 Content = accounts.Length == 1 ? $"Remove {accounts[0].Alias} ({accounts[0].Username}) from RoLauncher? Stop the account before deleting it."
                     : "Remove the selected accounts from RoLauncher? Stop them before deleting. Running accounts cannot be removed.",
-                PrimaryButtonText = "Delete", CloseButtonText = "Cancel", DefaultButton = ContentDialogButton.Close, RequestedTheme = ElementTheme.Light
+                PrimaryButtonText = "Delete", CloseButtonText = "Cancel", DefaultButton = ContentDialogButton.Close, RequestedTheme = Root.ActualTheme
             };
             ApplyDialogTheme(dialog);
             if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
@@ -295,26 +335,54 @@ public sealed partial class MainWindow : Window
     }
     private void ApplyDialogTheme(ContentDialog dialog)
     {
-        // Popup dialogs created in code need the same monochrome aliases as the page.
-        foreach (var resource in Root.Resources) dialog.Resources[resource.Key] = resource.Value;
+        dialog.RequestedTheme = Root.ActualTheme;
+        // WinUI's default-action visual state forcibly replaces that button's style.
+        if (dialog.DefaultButton == ContentDialogButton.Close)
+        {
+            dialog.DefaultButton = ContentDialogButton.None;
+            dialog.Opened += (_, _) => DialogControl<Button>(dialog, "CloseButton")?.Focus(FocusState.Programmatic);
+        }
+        dialog.PrimaryButtonStyle = (Style)Application.Current.Resources[dialog.PrimaryButtonText is "Delete" or "Remove" ? "DangerButtonStyle" : "PrimaryActionButtonStyle"];
+        dialog.CloseButtonStyle = (Style)Application.Current.Resources["ActionButtonStyle"];
+        if (dialog.PrimaryButtonText is "Delete" or "Remove")
+            dialog.Opened += (_, _) =>
+            {
+                if (DialogControl<Button>(dialog, "PrimaryButton") is { } button) DangerControl_Loaded(button, new RoutedEventArgs());
+            };
+
     }
 
     private void Tab_Click(object sender, RoutedEventArgs e)
     {
         var page = int.Parse((string)((ToggleButton)sender).Tag);
-        AccountsTab.IsChecked = page == 0; SettingsTab.IsChecked = page == 1; GamesTab.IsChecked = page == 4;
-        AccountsPage.Visibility = page == 0 ? Visibility.Visible : Visibility.Collapsed;
-        SettingsPage.Visibility = page == 1 ? Visibility.Visible : Visibility.Collapsed;
-        GamesPage.Visibility = page == 4 ? Visibility.Visible : Visibility.Collapsed;
-        RecoveryTab.IsChecked = page == 3;
-        RecoveryPage.Visibility = page == 3 ? Visibility.Visible : Visibility.Collapsed;
+        var destinations = new (ToggleButton Tab, FrameworkElement Page, int Id)[]
+        {
+            (AccountsTab, AccountsPage, 0), (SettingsTab, SettingsPage, 1),
+            (RecoveryTab, RecoveryPage, 3), (GamesTab, GamesPage, 4),
+            (PresetsTab, PresetsPage, 6),
+            (DiscordTab, DiscordPage, 7), (BackupsTab, BackupsPage, 8),
+            (UpdatesTab, UpdatesPage, 9), (SupportTab, SupportPage, 10)
+        };
+        foreach (var destination in destinations)
+        {
+            destination.Tab.IsChecked = page == destination.Id;
+            destination.Tab.FontWeight = page == destination.Id ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal;
+            destination.Page.Visibility = page == destination.Id ? Visibility.Visible : Visibility.Collapsed;
+        }
+        UpdateSelectionSettings();
+        PageContent.MinWidth = 0;
         PageScroll.UpdateLayout();
         PageScroll.ChangeView(0, 0, null, true);
         DispatcherQueue.TryEnqueue(() => PageScroll.ChangeView(0, 0, null, true));
         if (page == 3) _ = GuardAsync(RefreshHistoryAsync);
+        if (page == 8) _ = GuardAsync(RefreshBackupsAsync);
     }
     private void SelectAll_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs e)
     {
+        if (_presetLookupDraftIds is not null && Root.XamlRoot is { } lookupRoot && Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(lookupRoot) is not (TextBox or PasswordBox))
+        {
+            PresetSelectVisible_Click(PresetAccounts, new RoutedEventArgs()); e.Handled = true; return;
+        }
         if (!_modalOpen && Root.XamlRoot is { } xamlRoot && Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(xamlRoot) is not (TextBox or PasswordBox) && AccountsPage.Visibility == Visibility.Visible)
         {
             SelectAllRows(); e.Handled = true;
@@ -343,31 +411,15 @@ public sealed partial class MainWindow : Window
                 }
                 catch (ApiException ex) { errors.Add($"{row.Alias}: {ex.Message}"); }
             }
-            FeedbackMessage($"Applied to {success}/{selected.Length} selected accounts. {string.Join(" ", errors)}", errors.Count == 0 ? InfoBarSeverity.Success : InfoBarSeverity.Warning);
+            FeedbackMessage($"Applied to {success}/{selected.Length} accounts. {string.Join(" ", errors)}", errors.Count == 0 ? InfoBarSeverity.Success : InfoBarSeverity.Warning);
             await RefreshAsync();
         });
     }
-    private async void Rejoin_Click(object sender, RoutedEventArgs e)
-    {
-        var enabled = RejoinCheck.IsChecked != false;
-        var selected = Selected();
-        await GuardAsync(async () =>
-        {
-            var errors = new List<string>(); var success = 0;
-            foreach (var row in selected)
-            {
-                try { await _api.SendAsync(HttpMethod.Patch, $"accounts/{Uri.EscapeDataString(row.Id)}", new { auto_recovery = enabled }); success++; }
-                catch (ApiException ex) { errors.Add($"{row.Alias}: {ex.Message}"); }
-            }
-            FeedbackMessage($"Rejoin updated for {success}/{selected.Length} accounts. {string.Join(" ", errors)}", errors.Count == 0 ? InfoBarSeverity.Success : InfoBarSeverity.Warning);
-        });
-        await RefreshAsync();
-    }
     private async void Import_Click(object sender, RoutedEventArgs e)
     {
-        var cookie = CookieInput.Password;
-        CookieInput.Password = "";
-        await ImportAsync([cookie]);
+        var cookies = CookieBatch.Parse(CookieInput.Text);
+        CookieInput.Text = "";
+        await ImportAsync(cookies);
     }
     private async Task ImportAsync(string[] cookies)
     {
@@ -398,9 +450,7 @@ public sealed partial class MainWindow : Window
         {
             var file = await picker.PickSingleFileAsync();
             if (file is null) return;
-            var lines = await File.ReadAllLinesAsync(file.Path);
-            await ImportAsync(lines.Where(s => !string.IsNullOrWhiteSpace(s)).ToArray());
-            Array.Clear(lines);
+            await ImportAsync(CookieBatch.Parse(await File.ReadAllTextAsync(file.Path)));
         });
     }
     private async void Login_Click(object sender, RoutedEventArgs e)
@@ -448,7 +498,7 @@ public sealed partial class MainWindow : Window
         content.Children.Add(token);
         try
         {
-            var dialog = new ContentDialog { XamlRoot = Root.XamlRoot, Title = "Local API token", Content = content, CloseButtonText = "Done", RequestedTheme = ElementTheme.Light };
+            var dialog = new ContentDialog { XamlRoot = Root.XamlRoot, Title = "Local API token", Content = content, CloseButtonText = "Done", RequestedTheme = Root.ActualTheme };
             ApplyDialogTheme(dialog);
             await GuardAsync(async () => await dialog.ShowAsync());
         }

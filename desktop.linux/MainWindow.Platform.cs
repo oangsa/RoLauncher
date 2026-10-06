@@ -9,7 +9,8 @@ public sealed partial class MainWindow
     {
         // Uno initially lays an inline ContentDialog out as page content. Remove it
         // from the visual tree; ShowAsync attaches it to its own popup when needed.
-        Root.Children.Remove(AccountDialog);
+        Root.Children.Remove(_accountDialog);
+        Root.Children.Remove(_presetLookupDialog);
         BackupDescription.Text = BackupDescription.Text.Replace("Windows user", "Linux user", StringComparison.Ordinal);
         AppWindow.Resize(new Windows.Graphics.SizeInt32 { Width = 1180, Height = 940 });
         var window = new X11Visibility(this);
@@ -31,7 +32,7 @@ public sealed partial class MainWindow
 
     // Uno's Linux pickers use the session's XDG desktop portal (GNOME or KDE).
     private static void InitializePicker(object picker) { }
-    private async Task ShowAccountDialogAsync() => await AccountDialog.ShowAsync();
+    private async Task ShowAccountDialogAsync() => await _accountDialog.ShowAsync();
     private void SelectAllRows()
     {
         foreach (var row in _visibleRows)

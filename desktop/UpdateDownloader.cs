@@ -27,9 +27,11 @@ public sealed class UpdateDownloader : IDisposable
 
     public static string ValidateRelease(UpdateView view, string installedVersion)
     {
+        var current = Regex.Match(installedVersion, @"^((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))(-dev\.[0-9a-f]{12})?$");
+        var development = current.Success && current.Groups[5].Success;
         if (!Regex.IsMatch(view.Version ?? "", @"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$") ||
-            !Version.TryParse(view.Version, out var target) || !Version.TryParse(installedVersion, out var installed) ||
-            !view.Available || target <= installed)
+            !Version.TryParse(view.Version, out var target) || !current.Success || !Version.TryParse(current.Groups[1].Value, out var installed) ||
+            !view.Available || target < installed || (target == installed && !development))
             throw new InvalidDataException("The update must be a newer version.");
         var name = $"rolauncher-v{view.Version}-" + (OperatingSystem.IsLinux() ? "linux-x64.tar.gz" : "setup-x64.exe");
         var tag = (view.Prerelease ? "beta-v" : "v") + view.Version;

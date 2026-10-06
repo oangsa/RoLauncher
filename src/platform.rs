@@ -466,31 +466,93 @@ mod imp {
             }
         }
     }
-    /// Must be acquired and dropped on the native UI thread that owns the mutex.
-    pub struct MultiInstanceGuard(Handle);
+    /// Keep acquisition and release on one owner thread, including delayed acquisition.
+    pub struct MultiInstanceGuard {
+        ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        stop: std::sync::mpsc::Sender<()>,
+        worker: Option<std::thread::JoinHandle<()>>,
+    }
     impl MultiInstanceGuard {
         pub fn acquire() -> Result<Self, String> {
-            let h = unsafe {
-                CreateMutexW(std::ptr::null(), 1, wide("ROBLOX_singletonMutex").as_ptr())
+            Self::acquire_named("ROBLOX_singletonMutex")
+        }
+        pub fn launch_gate(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+            self.ready.clone()
+        }
+        fn acquire_named(name: &str) -> Result<Self, String> {
+            use std::sync::{
+                Arc,
+                atomic::{AtomicBool, Ordering},
+                mpsc,
             };
-            if h.is_null() {
-                return Err(last_error("Multi-instance coordination unavailable"));
+            let ready = Arc::new(AtomicBool::new(false));
+            let worker_ready = ready.clone();
+            let name = name.to_owned();
+            let (stop, stopped) = mpsc::channel();
+            let (started, startup) = mpsc::sync_channel(1);
+            let worker = std::thread::Builder::new()
+                .name("roblox-coordination".into())
+                .spawn(move || {
+                    let h = unsafe { CreateMutexW(std::ptr::null(), 1, wide(&name).as_ptr()) };
+                    if h.is_null() {
+                        let _ = started
+                            .send(Err(last_error("Multi-instance coordination unavailable")));
+                        return;
+                    }
+                    let existing = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+                    let handle = Handle(h);
+                    let wait = if existing {
+                        unsafe { WaitForSingleObject(h, 0) }
+                    } else {
+                        WAIT_OBJECT_0
+                    };
+                    let mut owned = matches!(wait, WAIT_OBJECT_0 | WAIT_ABANDONED);
+                    if !owned && wait != WAIT_TIMEOUT {
+                        let _ = started
+                            .send(Err(last_error("Multi-instance coordination wait failed")));
+                        return;
+                    }
+                    worker_ready.store(owned, Ordering::Release);
+                    let _ = started.send(Ok(()));
+                    while let Err(mpsc::RecvTimeoutError::Timeout) =
+                        stopped.recv_timeout(std::time::Duration::from_millis(100))
+                    {
+                        if !owned {
+                            match unsafe { WaitForSingleObject(handle.0, 0) } {
+                                WAIT_OBJECT_0 | WAIT_ABANDONED => {
+                                    owned = true;
+                                    worker_ready.store(true, Ordering::Release);
+                                }
+                                WAIT_TIMEOUT => {}
+                                _ => break,
+                            }
+                        }
+                    }
+                    worker_ready.store(false, Ordering::Release);
+                    if owned {
+                        unsafe {
+                            ReleaseMutex(handle.0);
+                        }
+                    }
+                })
+                .map_err(|_| "Unable to start Roblox coordination worker")?;
+            let guard = Self {
+                ready,
+                stop,
+                worker: Some(worker),
+            };
+            match startup.recv() {
+                Ok(Ok(())) => Ok(guard),
+                Ok(Err(error)) => Err(error),
+                Err(_) => Err("Roblox coordination worker stopped during initialization".into()),
             }
-            let existing = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
-            let handle = Handle(h);
-            if existing {
-                let wait = unsafe { WaitForSingleObject(h, 0) };
-                if wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED {
-                    return Err("Roblox singleton is already owned. Close clients yourself and restart the tool to initialize coordination".into());
-                }
-            }
-            Ok(Self(handle))
         }
     }
     impl Drop for MultiInstanceGuard {
         fn drop(&mut self) {
-            unsafe {
-                ReleaseMutex(self.0.0);
+            let _ = self.stop.send(());
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
             }
         }
     }
@@ -498,6 +560,80 @@ mod imp {
     mod close_tests {
         use super::*;
         use std::os::windows::io::AsRawHandle;
+        use std::sync::atomic::Ordering;
+
+        fn wait_ready(guard: &MultiInstanceGuard) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while !guard.ready.load(Ordering::Acquire) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "coordination did not recover"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+
+        #[test]
+        fn coordination_recovers_after_existing_owner_releases_and_releases_on_drop() {
+            let name = format!("RoLauncher-test-{}", Uuid::new_v4());
+            let existing =
+                Handle(unsafe { CreateMutexW(std::ptr::null(), 1, wide(&name).as_ptr()) });
+            assert!(!existing.0.is_null());
+            let guard = MultiInstanceGuard::acquire_named(&name).unwrap();
+            assert!(!guard.ready.load(Ordering::Acquire));
+            assert_ne!(unsafe { ReleaseMutex(existing.0) }, 0);
+            wait_ready(&guard);
+            assert_eq!(unsafe { WaitForSingleObject(existing.0, 0) }, WAIT_TIMEOUT);
+            let gate = guard.launch_gate();
+            drop(guard);
+            assert!(!gate.load(Ordering::Acquire));
+            assert_eq!(unsafe { WaitForSingleObject(existing.0, 0) }, WAIT_OBJECT_0);
+            assert_ne!(unsafe { ReleaseMutex(existing.0) }, 0);
+        }
+
+        #[test]
+        fn pending_coordination_can_shut_down_without_releasing_another_owner() {
+            let name = format!("RoLauncher-test-{}", Uuid::new_v4());
+            let existing =
+                Handle(unsafe { CreateMutexW(std::ptr::null(), 1, wide(&name).as_ptr()) });
+            assert!(!existing.0.is_null());
+            let guard = MultiInstanceGuard::acquire_named(&name).unwrap();
+            assert!(!guard.ready.load(Ordering::Acquire));
+            drop(guard);
+            assert_ne!(unsafe { ReleaseMutex(existing.0) }, 0);
+        }
+
+        #[test]
+        fn coordination_recovers_an_abandoned_mutex() {
+            let name = format!("RoLauncher-test-{}", Uuid::new_v4());
+            let name_for_owner = name.clone();
+            let (created, started) = std::sync::mpsc::channel();
+            let (exit, stopped) = std::sync::mpsc::channel();
+            let owner = std::thread::spawn(move || {
+                let handle = Handle(unsafe {
+                    CreateMutexW(std::ptr::null(), 1, wide(&name_for_owner).as_ptr())
+                });
+                assert!(!handle.0.is_null());
+                created.send(()).unwrap();
+                stopped.recv().unwrap();
+                // Exit without ReleaseMutex to exercise WAIT_ABANDONED.
+            });
+            started.recv().unwrap();
+            let guard = MultiInstanceGuard::acquire_named(&name).unwrap();
+            assert!(!guard.ready.load(Ordering::Acquire));
+            exit.send(()).unwrap();
+            owner.join().unwrap();
+            wait_ready(&guard);
+        }
+
+        #[test]
+        fn coordination_acquires_a_new_mutex_immediately() {
+            let guard =
+                MultiInstanceGuard::acquire_named(&format!("RoLauncher-test-{}", Uuid::new_v4()))
+                    .unwrap();
+            assert!(guard.ready.load(Ordering::Acquire));
+        }
+
         #[test]
         fn an_exited_process_is_successfully_closed_even_when_terminate_returns_five() {
             let mut child = std::process::Command::new("cmd.exe")

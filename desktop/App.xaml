@@ -8,18 +8,40 @@
       </ResourceDictionary.MergedDictionaries>
       <ResourceDictionary.ThemeDictionaries>
         <ResourceDictionary x:Key="Light">
-          <Color x:Key="SystemAccentColor">#18181B</Color>
-          <SolidColorBrush x:Key="AccentFillColorDefaultBrush" Color="#18181B"/>
-          <SolidColorBrush x:Key="AccentFillColorSecondaryBrush" Color="#323235"/>
-          <SolidColorBrush x:Key="AccentFillColorTertiaryBrush" Color="#454548"/>
-          <SolidColorBrush x:Key="AccentTextFillColorPrimaryBrush" Color="#18181B"/>
+          <SolidColorBrush x:Key="DangerBrush" Color="#B91C1C"/>
+          <SolidColorBrush x:Key="WorkspaceBrush" Color="#F7F7F8"/>
+          <SolidColorBrush x:Key="CardBrush" Color="White"/>
+          <SolidColorBrush x:Key="LineBrush" Color="#E4E4E7"/>
+          <SolidColorBrush x:Key="InkBrush" Color="#18181B"/>
+          <SolidColorBrush x:Key="MutedBrush" Color="#71717A"/>
+                              <SolidColorBrush x:Key="SidebarBrush" Color="#EEEEF0"/>
+          <SolidColorBrush x:Key="TableHeaderBrush" Color="#F5F5F6"/>
           <SolidColorBrush x:Key="AccentButtonBackground" Color="#18181B"/>
-          <SolidColorBrush x:Key="AccentButtonBackgroundPointerOver" Color="#323235"/>
-          <SolidColorBrush x:Key="AccentButtonBackgroundPressed" Color="#454548"/>
           <SolidColorBrush x:Key="AccentButtonForeground" Color="White"/>
+          <SolidColorBrush x:Key="AccentButtonBackgroundPointerOver" Color="#18181B"/>
+          <SolidColorBrush x:Key="AccentButtonBackgroundPressed" Color="#18181B"/>
+          <SolidColorBrush x:Key="AccentButtonBorderBrushPointerOver" Color="#18181B"/>
+          <SolidColorBrush x:Key="AccentButtonBorderBrushPressed" Color="#18181B"/>
           <SolidColorBrush x:Key="AccentButtonForegroundPointerOver" Color="White"/>
           <SolidColorBrush x:Key="AccentButtonForegroundPressed" Color="White"/>
-          <SolidColorBrush x:Key="TextControlBorderBrushFocused" Color="#18181B"/>
+        </ResourceDictionary>
+        <ResourceDictionary x:Key="Dark">
+          <SolidColorBrush x:Key="DangerBrush" Color="#FF9494"/>
+          <SolidColorBrush x:Key="WorkspaceBrush" Color="#18181B"/>
+          <SolidColorBrush x:Key="CardBrush" Color="#242427"/>
+          <SolidColorBrush x:Key="LineBrush" Color="#3F3F46"/>
+          <SolidColorBrush x:Key="InkBrush" Color="#FAFAFA"/>
+          <SolidColorBrush x:Key="MutedBrush" Color="#A1A1AA"/>
+                              <SolidColorBrush x:Key="SidebarBrush" Color="#202023"/>
+          <SolidColorBrush x:Key="TableHeaderBrush" Color="#303034"/>
+          <SolidColorBrush x:Key="AccentButtonBackground" Color="#D4D4D8"/>
+          <SolidColorBrush x:Key="AccentButtonForeground" Color="#18181B"/>
+          <SolidColorBrush x:Key="AccentButtonBackgroundPointerOver" Color="#D4D4D8"/>
+          <SolidColorBrush x:Key="AccentButtonBackgroundPressed" Color="#D4D4D8"/>
+          <SolidColorBrush x:Key="AccentButtonBorderBrushPointerOver" Color="#D4D4D8"/>
+          <SolidColorBrush x:Key="AccentButtonBorderBrushPressed" Color="#D4D4D8"/>
+          <SolidColorBrush x:Key="AccentButtonForegroundPointerOver" Color="#18181B"/>
+          <SolidColorBrush x:Key="AccentButtonForegroundPressed" Color="#18181B"/>
         </ResourceDictionary>
       </ResourceDictionary.ThemeDictionaries>
       <CornerRadius x:Key="ControlCornerRadius">8</CornerRadius>
@@ -27,14 +49,9 @@
       <local:StatusConverter x:Key="StatusBackground" Background="True"/>
       <local:StatusConverter x:Key="StatusForeground"/>
       <CornerRadius x:Key="OverlayCornerRadius">12</CornerRadius>
-      <SolidColorBrush x:Key="WorkspaceBrush" Color="#F7F7F8"/>
-      <SolidColorBrush x:Key="CardBrush" Color="White"/>
-      <SolidColorBrush x:Key="LineBrush" Color="#E4E4E7"/>
-      <SolidColorBrush x:Key="InkBrush" Color="#18181B"/>
-      <SolidColorBrush x:Key="MutedBrush" Color="#71717A"/>
       <Style x:Key="Card" TargetType="Border">
-        <Setter Property="Background" Value="{StaticResource CardBrush}"/>
-        <Setter Property="BorderBrush" Value="{StaticResource LineBrush}"/>
+        <Setter Property="Background" Value="{ThemeResource CardBrush}"/>
+        <Setter Property="BorderBrush" Value="{ThemeResource LineBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="CornerRadius" Value="12"/>
         <Setter Property="Padding" Value="20"/>
@@ -42,12 +59,25 @@
       <Style x:Key="SectionTitle" TargetType="TextBlock">
         <Setter Property="FontSize" Value="18"/>
         <Setter Property="FontWeight" Value="SemiBold"/>
-        <Setter Property="Foreground" Value="{StaticResource InkBrush}"/>
+        <Setter Property="Foreground" Value="{ThemeResource InkBrush}"/>
       </Style>
       <Style x:Key="Caption" TargetType="TextBlock">
         <Setter Property="FontSize" Value="12"/>
-        <Setter Property="Foreground" Value="{StaticResource MutedBrush}"/>
+        <Setter Property="Foreground" Value="{ThemeResource MutedBrush}"/>
         <Setter Property="TextWrapping" Value="Wrap"/>
+      </Style>
+      <Style x:Key="ActionButtonStyle" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
+        <Setter Property="Height" Value="40"/>
+        <Setter Property="Padding" Value="16,8"/>
+        <Setter Property="CornerRadius" Value="8"/>
+      </Style>
+      <Style x:Key="PrimaryActionButtonStyle" TargetType="Button" BasedOn="{StaticResource AccentButtonStyle}">
+        <Setter Property="Height" Value="40"/>
+        <Setter Property="Padding" Value="16,8"/>
+        <Setter Property="CornerRadius" Value="8"/>
+      </Style>
+      <Style x:Key="DangerButtonStyle" TargetType="Button" BasedOn="{StaticResource ActionButtonStyle}">
+        <Setter Property="Foreground" Value="{ThemeResource DangerBrush}"/>
       </Style>
       <Style TargetType="Button">
         <Setter Property="Padding" Value="16,9"/>

@@ -16,6 +16,8 @@
     <DefineConstants Condition="'$(UiSmoke)' == 'true'">$(DefineConstants);LINUX_UI_SMOKE</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../desktop/MainWindow.Appearance.cs" Link="MainWindow.Appearance.cs" />
+    <Compile Include="../desktop/CookieBatch.cs" Link="CookieBatch.cs" />
     <Compile Include="../desktop/MainWindow.Workspace.cs" Link="MainWindow.Workspace.cs" />
     <!-- Windows remains a native WinUI project. These are the same views and handlers. -->
     <ApplicationDefinition Include="../desktop/App.xaml" Link="App.xaml" />
@@ -26,4 +28,5 @@
     <Content Include="../assets/RoLauncher.png" Link="RoLauncher.png" CopyToOutputDirectory="PreserveNewest" />
     <EmbeddedResource Include="../scripts/apply-update-linux.py" LogicalName="RoLauncher.ApplyUpdate.Linux.py" />
   </ItemGroup>
+  <ItemGroup><EmbeddedResource Include="../desktop/CHANGELOG.txt" LogicalName="RoLauncher.Changelog" /></ItemGroup>
 </Project>

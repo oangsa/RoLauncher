@@ -10,7 +10,6 @@ public partial class App : Application
 
     public App()
     {
-        RequestedTheme = ApplicationTheme.Light;
         Uno.UI.FeatureConfiguration.TextBox.UseOverlayOnSkia = false;
         InitializeComponent();
     }

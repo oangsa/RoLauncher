@@ -22,7 +22,8 @@ public sealed record Snapshot(Account[] Accounts, bool NetworkSuspended, string 
 public sealed record UpdateView(bool Available, string Version, string ReleaseUrl, string DownloadUrl, string ChecksumsUrl, string InstallerUrl = "", bool Prerelease = false);
 public sealed record Activity(DateTimeOffset Timestamp, string AccountId, ulong? PlaceId, string Status, uint Failures, string Message)
 {
-    public string Summary => $"{Timestamp.ToLocalTime():g} · {(AccountId.Length == 0 ? "RoLauncher" : $"Account {AccountId}")} · {Status.Replace('_', ' ')} · {Message}";
+    public string? AccountLabel { get; init; }
+    public string Summary => $"{Timestamp.ToLocalTime():g} · {AccountLabel ?? (AccountId.Length == 0 ? "RoLauncher" : $"Account {AccountId}")} · {Status.Replace('_', ' ')} · {Message}";
 }
 public sealed record Notice(DateTimeOffset Timestamp, string Account, string Title, string Message, ulong? PlaceId);
 public sealed record DiscordView(bool Enabled, bool Configured, bool NotifyRecovery, string DeliveryStatus, Notice[] Recent);
@@ -45,7 +46,14 @@ public sealed class AccountRow(Account account) : INotifyPropertyChanged
         "stopped" => "Stopped", "queued" => "Queued", "launching" => "Launching",
         "running" => "Running", "reconnecting" => "Reconnecting", "backoff" => "Backoff", _ => "Unknown"
     };
-    public string Destination => Account.Target is null ? "Set target" : Account.Target.PlaceId.ToString();
+    private string? _gameName;
+    public string Destination => Account.Target is null ? "Choose a game" : _gameName ?? $"Place {Account.Target.PlaceId}";
+    public void SetGameName(string? name)
+    {
+        if (_gameName == name) return;
+        _gameName = name;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Destination)));
+    }
     public string DestinationKind => Account.Target?.PrivateServerLink is not null ? "Private server" : Account.Target?.JobId is not null ? "Specific server" : "Public server";
     public string Failures => Account.Failures.ToString();
     public string RecoveryAttempts => $"{Account.Failures}/5 consecutive failed attempts";
@@ -53,6 +61,7 @@ public sealed class AccountRow(Account account) : INotifyPropertyChanged
     public string Error => (Account.LastError ?? "—").Replace("recovery", "rejoin").Replace("Recovery", "Rejoin");
     public void Update(Account account)
     {
+        if (Account.Target?.PlaceId != account.Target?.PlaceId) _gameName = null;
         Account = account;
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));
     }
