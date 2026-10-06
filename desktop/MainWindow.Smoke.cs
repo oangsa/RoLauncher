@@ -80,12 +80,12 @@ public sealed partial class MainWindow
             Assert(UpdateNoticeButton.IsEnabled && (string)UpdateNoticeButton.Content == "Download" && (string)UpdateDownloadButton.Content == "Download",
                 "The banner and Settings share the Download action.");
             await CaptureAsync(directory, "update-available.png");
-            AssertUpdateButtonCentered();
+            AssertUpdateButtonLayout();
             _downloadingUpdate = true;
             UpdateActions();
             SetUpdateMessage("Downloading the update… 40%");
             await CaptureAsync(directory, "update-downloading.png");
-            AssertUpdateButtonCentered();
+            AssertUpdateButtonLayout();
             _downloadingUpdate = false;
             UpdateActions();
             Assert(!IncludeBetaUpdates.IsChecked!.Value, "Stable updates are selected by default.");
@@ -103,7 +103,7 @@ public sealed partial class MainWindow
             Assert((string)UpdateNoticeButton.Content == "Relaunch" && (string)UpdateDownloadButton.Content == "Relaunch",
                 "A verified ready installer changes both actions to Relaunch.");
             await CaptureAsync(directory, "update-ready.png");
-            AssertUpdateButtonCentered();
+            AssertUpdateButtonLayout();
             _modalOpen = true;
             await ApplyDownloadedUpdateAsync();
             Assert(!_installingUpdate && !_exiting, "An open editor blocks relaunch without closing the app.");
@@ -547,13 +547,26 @@ public sealed partial class MainWindow
         Close();
     }
 
-    private void AssertUpdateButtonCentered()
+    private void AssertUpdateButtonLayout()
     {
         Root.UpdateLayout();
         var position = UpdateNoticeButton.TransformToVisual(UpdateNotice).TransformPoint(new Windows.Foundation.Point());
-        Assert(UpdateNoticeButton.ActualHeight > 0 &&
-            Math.Abs(position.Y + UpdateNoticeButton.ActualHeight / 2 - UpdateNotice.ActualHeight / 2) < 1,
-            $"The update action is vertically centered in the banner (top {position.Y}, button {UpdateNoticeButton.ActualHeight}, banner {UpdateNotice.ActualHeight}).");
+        var message = FindVisualText(UpdateNotice, UpdateNotice.Message);
+        Assert(message is not null && message.ActualHeight > 0, "The update banner message is visible.");
+        var messagePosition = message!.TransformToVisual(UpdateNotice).TransformPoint(new Windows.Foundation.Point());
+        var stacked = position.Y >= messagePosition.Y + message.ActualHeight - 1;
+        Assert(UpdateNoticeButton.ActualHeight > 0 && position.X >= 0 && position.Y >= 0 &&
+            position.X + UpdateNoticeButton.ActualWidth <= UpdateNotice.ActualWidth + 1 &&
+            position.Y + UpdateNoticeButton.ActualHeight <= UpdateNotice.ActualHeight + 1 &&
+            (stacked || Math.Abs(position.Y + UpdateNoticeButton.ActualHeight / 2 - UpdateNotice.ActualHeight / 2) < 1),
+            $"The update action fits below wrapped content or is centered beside it (top {position.Y}, button {UpdateNoticeButton.ActualHeight}, banner {UpdateNotice.ActualHeight}).");
+    }
+    private static TextBlock? FindVisualText(DependencyObject root, string text)
+    {
+        if (root is TextBlock block && block.Text == text) return block;
+        for (var i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+            if (FindVisualText(VisualTreeHelper.GetChild(root, i), text) is { } match) return match;
+        return null;
     }
     private static void Assert(bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }
     private static T? FindVisual<T>(DependencyObject root, string? name = null) where T : FrameworkElement
