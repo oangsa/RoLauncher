@@ -26,7 +26,7 @@ public sealed partial class MainWindow
                 for (var i = 0; i < 100 && _refreshing; i++) await Task.Delay(50);
                 var snapshot = await _api.GetAsync<Snapshot>("status");
                 Assert(snapshot.Accounts.Length == 0, "Bridge fixture has no real accounts.");
-                Assert(_config.Version == GetType().Assembly.GetName().Version!.ToString(3), "Runtime version comes from Rust and matches the shell release.");
+                Assert(_config.Version == GetType().Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false).Cast<System.Reflection.AssemblyInformationalVersionAttribute>().Single().InformationalVersion.Split('+')[0], "Runtime version comes from Rust and matches the shell release.");
                 File.WriteAllText(Path.Combine(directory, "result.txt"), "WinUI bridge passed: inherited pipe bootstrap, authenticated Rust API and clean desktop exit.");
                 _exiting = true;
                 Close();
@@ -37,18 +37,55 @@ public sealed partial class MainWindow
             _timer.Stop();
             for (var i = 0; i < 100 && _refreshing; i++) await Task.Delay(50);
             Assert(!_refreshing, "Initial account and settings refresh finishes before layout measurements.");
+            Root.UpdateLayout();
+            var cookiePosition = CookieInput.TransformToVisual(AccountsPage).TransformPoint(new Windows.Foundation.Point());
+            var loginPosition = LoginButton.TransformToVisual(AccountsPage).TransformPoint(new Windows.Foundation.Point());
+            Assert(loginPosition.Y > cookiePosition.Y && CookieInput.AcceptsReturn && CookieInput.ActualWidth > 200, "Multiline cookie input has a separate action row.");
+            CookieInput.Text = " fixture-cookie-a\r\n\nfixture-cookie-b\nfixture-cookie-a ";
+            Import_Click(ImportButton, new RoutedEventArgs());
+            for (var i = 0; i < 100 && !ImportButton.IsEnabled; i++) await Task.Delay(50);
+            Assert(CookieInput.Text.Length == 0 && await _api.GetAsync<int>("test/import-count") == 2, "Cookie paste imports each distinct nonblank line and clears the field.");
+            Tab_Click(RecoveryTab, new RoutedEventArgs()); await RefreshAsync();
+            Assert(TotalMetric.Text == "3" && RunningMetric.Text == "1" && RejoiningMetric.Text == "1" && AttentionMetric.Text == "1", "Dashboard counts actual account states.");
+            Assert(RecoveryList.ItemsSource is AccountRow[] { Length: 1 } attention && attention[0].Id == "2", "Dashboard attention queue excludes healthy accounts and automatic retries.");
+            Assert(CoverageBar.Value > 66 && CoverageBar.Value < 67, "Coverage requires both automatic rejoin and a destination.");
+            var meters = _statusMeters.Select(m => m.Bar).ToArray();
+            var statusRows = StatusBreakdown.Children.ToArray();
+            await RefreshAsync(); await RefreshAsync();
+            Assert(_statusMeters.Select(m => m.Bar).SequenceEqual(meters) && StatusBreakdown.Children.SequenceEqual(statusRows), "Unchanged polls retain status controls instead of restarting their fill animations.");
+            Assert(meters[0].Value == 1 && meters[4].Value == 0 && meters.All(m => m.Maximum == 3), "Retained meters reflect the current account distribution.");
+            Assert(VisualStateManager.GoToState(PresetsTab, "PointerOver", false), "Sidebar unchecked hover state exists.");
+            Assert(VisualStateManager.GoToState(RecoveryTab, "CheckedPointerOver", false), "Sidebar checked hover state exists.");
+            Root.UpdateLayout();
+            var hoverBorder = FindVisual<ContentPresenter>(PresetsTab, "ContentPresenter");
+            var checkedHoverBorder = FindVisual<ContentPresenter>(RecoveryTab, "ContentPresenter");
+            Assert(hoverBorder?.Background is SolidColorBrush hoverFill && hoverFill.Color.A == 0 &&
+                hoverBorder.BorderBrush is SolidColorBrush hoverStroke && hoverStroke.Color.A == 0 &&
+                checkedHoverBorder?.Background is SolidColorBrush checkedFill && checkedFill.Color.A == 0 &&
+                checkedHoverBorder.BorderBrush is SolidColorBrush checkedStroke && checkedStroke.Color.A == 0,
+                "Selected and unselected sidebar hover states have transparent fill and border.");
+            await CaptureAsync(directory, "sidebar-hover.png");
+            VisualStateManager.GoToState(PresetsTab, "Normal", false);
+            VisualStateManager.GoToState(RecoveryTab, "Checked", false);
+            await CaptureAsync(directory, "dashboard.png");
+            UpdateWorkspace(new Snapshot([], true, "fixture"));
+            Assert(TotalMetric.Text == "0" && CoverageMetric.Text == "—" && CoverageBar.Value == 0 && AttentionEmpty.Visibility == Visibility.Visible && NetworkSummary.Text.Contains("unavailable"), "Empty dashboard and suspended network have explicit states.");
+            Assert(meters.All(m => m.Value == 0 && m.Maximum == 1), "Existing meters update for an empty snapshot.");
+            await RefreshAsync();
+            Assert(meters[0].Value == 1 && meters[2].Value == 1 && meters[3].Value == 1 && meters.All(m => m.Maximum == 3), "Existing meters update when account counts change.");
+            Tab_Click(AccountsTab, new RoutedEventArgs());
             await CheckForUpdateAsync(false);
             Assert(_update?.Available == true && UpdateNotice.IsOpen && UpdateNotice.Visibility == Visibility.Visible,
                 "A newer official release appears in the persistent update banner.");
             Assert(UpdateNoticeButton.IsEnabled && (string)UpdateNoticeButton.Content == "Download" && (string)UpdateDownloadButton.Content == "Download",
                 "The banner and Settings share the Download action.");
             await CaptureAsync(directory, "update-available.png");
-            AssertUpdateButtonCentered();
+            AssertUpdateButtonLayout();
             _downloadingUpdate = true;
             UpdateActions();
             SetUpdateMessage("Downloading the update… 40%");
             await CaptureAsync(directory, "update-downloading.png");
-            AssertUpdateButtonCentered();
+            AssertUpdateButtonLayout();
             _downloadingUpdate = false;
             UpdateActions();
             Assert(!IncludeBetaUpdates.IsChecked!.Value, "Stable updates are selected by default.");
@@ -66,7 +103,7 @@ public sealed partial class MainWindow
             Assert((string)UpdateNoticeButton.Content == "Relaunch" && (string)UpdateDownloadButton.Content == "Relaunch",
                 "A verified ready installer changes both actions to Relaunch.");
             await CaptureAsync(directory, "update-ready.png");
-            AssertUpdateButtonCentered();
+            AssertUpdateButtonLayout();
             _modalOpen = true;
             await ApplyDownloadedUpdateAsync();
             Assert(!_installingUpdate && !_exiting, "An open editor blocks relaunch without closing the app.");
@@ -83,7 +120,7 @@ public sealed partial class MainWindow
             await Task.Delay(150);
             Assert(Feedback.IsOpen && Feedback.Message == "Test queued. Check recent activity for delivery status.", "Send test displays the toast.");
             var toastPosition = Feedback.TransformToVisual(Root).TransformPoint(new Windows.Foundation.Point());
-            Assert(toastPosition.Y == 12 && Math.Abs(toastPosition.X + Feedback.ActualWidth / 2 - (Root.ActualWidth + 152) / 2) < 1,
+            Assert(toastPosition.Y == 12 && Math.Abs(toastPosition.X + Feedback.ActualWidth / 2 - (Root.ActualWidth + 224) / 2) < 1,
                 "Toast overlays the top center of the window.");
             Assert(SettingsPage.ActualHeight == pageHeight, "Toast does not move or resize page content.");
             await CaptureAsync(directory, "toast.png");
@@ -131,7 +168,7 @@ public sealed partial class MainWindow
             await Task.Delay(500);
             Assert(_modalOpen && _editorRow!.Id == "0", "Row details open a modal independent of selection.");
             AliasInput.Text = "Studio account";
-            await CaptureAsync(directory, "account-modal.png", AccountDialog);
+            await CaptureAsync(directory, "account-modal.png", _accountDialog);
             PlaceInput.Text = "incomplete";
             InvokeDialogButton("PrimaryButton");
             await Task.Delay(500);
@@ -183,19 +220,67 @@ public sealed partial class MainWindow
             await CaptureAsync(directory, "accounts.png");
             AccountList.SelectAll();
             Assert(Selected().Length == 3, "Bulk selection selects visible accounts.");
-            Assert(RejoinCheck.IsChecked is null, "Mixed rejoin selection is shown.");
             Tab_Click(SettingsTab, new RoutedEventArgs());
             await Task.Delay(500);
             await CaptureAsync(directory, "settings.png");
-            RejoinCheck.IsChecked = false;
-            Rejoin_Click(RejoinCheck, new RoutedEventArgs());
-            await Task.Delay(350);
+            foreach (var tab in new[] { SettingsTab, PresetsTab, BackupsTab, DiscordTab, UpdatesTab, SupportTab })
+            {
+                Tab_Click(tab, new RoutedEventArgs()); await Task.Delay(150);
+                Assert(tab.IsChecked == true && AccountsPage.Visibility == Visibility.Collapsed,
+                    "Each sidebar destination selects its own focused page.");
+                await CaptureAsync(directory, $"navigation-{tab.Name}.png");
+            }
+            Assert(SupportPage.Visibility == Visibility.Visible && SettingsPage.Visibility == Visibility.Collapsed,
+                "Support and integrations is a dedicated page.");
+            Assert(WebhookInput.Password == "" && WebhookInput.PlaceholderText.StartsWith("●"),
+                "Saved webhook displays dots without putting a secret or sentinel in the editable value.");
+            Tab_Click(AccountsTab, new RoutedEventArgs());
+            var rejoinEdit = ShowBulkAsync(Selected()); await Task.Delay(350);
+            Assert(_bulkForm!.Rejoin.IsChecked is null, "Bulk account settings show mixed rejoin values.");
+            _bulkForm.RejoinApply.IsChecked = true; _bulkForm.Rejoin.IsChecked = false;
+            InvokeDialogButton("PrimaryButton"); await rejoinEdit.WaitAsync(TimeSpan.FromSeconds(5));
             state = await _api.GetAsync<Snapshot>("status");
-            Assert(state.Accounts.All(a => !a.AutoRecovery), "Bulk rejoin changes every selected account.");
+            Assert(state.Accounts.All(a => !a.AutoRecovery), "Bulk account settings disable rejoin for every selected account.");
             Action_Click(StopButton, new RoutedEventArgs());
             await Task.Delay(350);
             commands = await _api.GetAsync<string[]>("test/commands");
             Assert(commands.Count(c => c.EndsWith("/stop")) == 4, "Stop applies to every selected account.");
+            Tab_Click(AccountsTab, new RoutedEventArgs());
+            await Task.Delay(250);
+            Assert(_rows[0].Destination == "Fixture game", "Account destinations resolve a game name without requiring a saved game profile.");
+            var rowContainer = (ListViewItem)AccountList.ContainerFromItem(_rows[0]);
+            var quickStart = FindVisual<Button>(rowContainer, "RowStartButton")!;
+            var quickStop = FindVisual<Button>(rowContainer, "RowStopButton")!;
+            var quickRestart = FindVisual<Button>(rowContainer, "RowRestartButton")!;
+            Assert(quickStart is not null && quickStop is not null && quickRestart is not null, "Every row exposes three lifecycle quick actions.");
+            Root.UpdateLayout();
+            var rowDelete = FindVisual<Button>(rowContainer, "RowDetailsButton")!;
+            var tableEdge = rowDelete.TransformToVisual(AccountTable).TransformPoint(new Windows.Foundation.Point(rowDelete.ActualWidth, 0));
+            Assert(tableEdge.X <= AccountTable.ActualWidth, "Row actions fit inside the account table.");
+            AccountTableScroll.ChangeView(AccountTableScroll.ScrollableWidth, null, null, true);
+            await Task.Delay(150);
+            Root.UpdateLayout();
+            var actionEdge = rowDelete.TransformToVisual(AccountTableScroll).TransformPoint(new Windows.Foundation.Point(rowDelete.ActualWidth, 0));
+            Assert(actionEdge.X <= AccountTableScroll.ActualWidth + 1, "Horizontal scrolling makes row actions visible in a narrow viewport.");
+            AccountTableScroll.ChangeView(0, null, null, true);
+            var selectionBefore = Selected().Select(r => r.Id).ToArray();
+            ClearSelectionFrom(quickStart!);
+            Assert(Selected().Select(r => r.Id).SequenceEqual(selectionBefore), "Clicking a row action preserves bulk selection.");
+            foreach (var button in new[] { quickStart!, quickStop!, quickRestart! })
+            {
+                var before = (await _api.GetAsync<string[]>("test/commands")).Length;
+                RowAction_Click(button, new RoutedEventArgs());
+                await Task.Delay(350);
+                var after = await _api.GetAsync<string[]>("test/commands");
+                Assert(after.Skip(before).SequenceEqual(new[] { $"/v1/accounts/0/{button.Tag}" }), "A quick action targets only its own account despite a multi-account selection.");
+            }
+            ClearSelectionFrom(AccountCount);
+            Assert(Selected().Length == 0 && !StartButton.IsEnabled && !StopButton.IsEnabled && !RestartButton.IsEnabled, "Clicking noninteractive workspace space clears selection and disables bulk actions.");
+            RowAction_Click(quickStart!, new RoutedEventArgs());
+            await Task.Delay(350);
+            Assert((await _api.GetAsync<string[]>("test/commands")).Last() == "/v1/accounts/0/start", "Row quick actions work with no bulk selection.");
+            SelectVisible_Click(AccountList, new RoutedEventArgs());
+            await CaptureAsync(directory, "account-quick-actions.png");
             Login_Click(LoginButton, new RoutedEventArgs());
             await Task.Delay(150);
             commands = await _api.GetAsync<string[]>("test/commands");
@@ -223,8 +308,23 @@ public sealed partial class MainWindow
             modal = ShowAccountAsync(_rows[0]); await Task.Delay(300);
             DialogGame.SelectedItem = _gameProfiles[0];
             Assert(PlaceInput.Text == "123", "Saved games populate account destinations.");
+            Assert(!PlaceInput.IsEnabled && !JobInput.IsEnabled && !PrivateInput.IsEnabled && !DialogClearTarget.IsEnabled,
+                "Saved game selection locks duplicate destination controls.");
+            await CaptureAsync(directory, "account-saved-game.png", _accountDialog);
+            DialogGame.SelectedItem = "Custom destination";
+            Assert(PlaceInput.IsEnabled && JobInput.IsEnabled && PrivateInput.IsEnabled && DialogClearTarget.IsEnabled,
+                "Explicit Custom destination restores manual editing.");
+            DialogGame.SelectedItem = _gameProfiles[0];
+            // Saving a preset must use its target, regardless of stale manual field contents.
+            PlaceInput.Text = "";
             InvokeDialogButton("PrimaryButton"); await modal.WaitAsync(TimeSpan.FromSeconds(5));
             Assert(_rows[0].Account.Target!.PlaceId == 123, "Account save applies a saved game.");
+            modal = ShowAccountAsync(_rows[0]); await Task.Delay(300);
+            Assert(DialogGame.SelectedItem is GameProfile && !PlaceInput.IsEnabled,
+                "Reopening an account detects its saved destination and keeps it locked.");
+            DialogGame.SelectedItem = "Custom destination"; PlaceInput.Text = "456";
+            InvokeDialogButton("PrimaryButton"); await modal.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert(_rows[0].Account.Target!.PlaceId == 456, "Custom destination saves manually entered target values.");
             CloseBehavior.SelectedIndex = 1; await Task.Delay(300);
             Assert(!_closeToTray && !(await _api.GetAsync<Snapshot>("status")).CloseToTray, "Close preference saves through the API.");
             CloseBehavior.SelectedIndex = 0; await Task.Delay(300);
@@ -261,6 +361,9 @@ public sealed partial class MainWindow
             _bulkForm!.GroupApply.IsChecked = true; _bulkForm.Group.Text = "All accounts";
             InvokeDialogButton("PrimaryButton"); await bulk.WaitAsync(TimeSpan.FromSeconds(5));
             Assert(_rows.All(r => r.Account.Group == "All accounts"), "Edit all accounts updates the complete saved account set.");
+            var teamLookup = ShowPresetLookupAsync(); await Task.Delay(350);
+            PresetSelectVisible_Click(PresetAccounts, new RoutedEventArgs());
+            InvokeDialogButton("PrimaryButton"); await teamLookup;
             ProfileName.Text = "Startup team"; await SaveProfileAsync(false);
             Assert(_profiles.Length == 1 && _profiles[0].Entries.Length == 3, "Save selected creates a profile with per-account settings.");
             ProfilePicker.SelectedItem = _profiles[0];
@@ -269,7 +372,7 @@ public sealed partial class MainWindow
             await CaptureAsync(directory, "profile-review.png", OpenDialog());
             InvokeDialogButton("PrimaryButton"); await apply.WaitAsync(TimeSpan.FromSeconds(5));
             Assert(_rows.All(r => r.Account.Group == "All accounts"), "Reviewed profile restores each saved configuration.");
-            Tab_Click(SettingsTab, new RoutedEventArgs()); await RefreshAsync();
+            Tab_Click(BackupsTab, new RoutedEventArgs()); await RefreshAsync();
             Backup_Click(BackupPicker, new RoutedEventArgs()); await Task.Delay(350);
             Assert(BackupPicker.Items.Count > 0, "Create backup refreshes the backup picker.");
             await CaptureAsync(directory, "profiles-settings.png");
@@ -280,12 +383,137 @@ public sealed partial class MainWindow
             HistoryAccount.SelectedItem = HistoryAccount.Items.OfType<ComboBoxItem>().First(i => (i.Tag as string) == "0"); await Task.Delay(250);
             Assert(HistoryList.ItemsSource is Activity[] { Length: 0 }, "History can filter by account.");
             HistoryAccount.SelectedIndex = 0;
+            AccountList.SelectedItems.Clear();
+            Tab_Click(AccountsTab, new RoutedEventArgs());
+            modal = ShowAccountAsync(_rows[1]); await Task.Delay(350);
+            DialogRejoin.IsChecked = true;
+            InvokeDialogButton("CloseButton"); await modal.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert(!_rows[1].Account.AutoRecovery, "Cancel discards individual rejoin changes.");
+            modal = ShowAccountAsync(_rows[1]); await Task.Delay(350);
+            DialogRejoin.IsChecked = true;
+            await CaptureAsync(directory, "account-rejoin-settings.png", _accountDialog);
+            InvokeDialogButton("PrimaryButton"); await modal.WaitAsync(TimeSpan.FromSeconds(5));
+            state = await _api.GetAsync<Snapshot>("status");
+            Assert(state.Accounts.Single(a => a.Id == "1").AutoRecovery && Selected().Length == 0,
+                "Account settings save rejoin without requiring table selection.");
+            Tab_Click(PresetsTab, new RoutedEventArgs());
+            var resetLookup = ShowPresetLookupAsync(); await Task.Delay(350);
+            PresetClear_Click(PresetAccounts, new RoutedEventArgs());
+            InvokeDialogButton("PrimaryButton"); await resetLookup;
+            Assert(FindVisual<ListView>(PresetsPage, "PresetAccounts") is null, "Preset page keeps its account table inside the lookup modal.");
+            var lookup = ShowPresetLookupAsync(); await Task.Delay(350);
+            Assert(_modalOpen && FindVisual<Grid>(OpenDialog(), "PresetTableHeader") is not null, "Choose accounts opens a lookup modal.");
+            PresetAccounts.SelectedItems.Add(_rows[0]);
+            PresetSearch.Text = "sample_1"; await Task.Delay(100);
+            Assert(_presetVisibleRows.Count == 1 && PresetLookupIds.Count == 1 && PresetLookupSummary.Text.Contains("hidden") && PresetSelected().Length == 0,
+                "Lookup selection survives filters and remains a draft until confirmed.");
+            PresetSelectVisible_Click(PresetAccounts, new RoutedEventArgs());
+            Assert(PresetLookupIds.Count == 2, "Select visible adds matches without losing hidden choices.");
+            PresetStatus.SelectedIndex = 1; await Task.Delay(100);
+            Assert(_presetVisibleRows.Count == 0 && PresetLookupEmpty.Visibility == Visibility.Visible, "Lookup status filter combines with the search and displays no results.");
+            PresetClearFilters_Click(_presetLookupDialog, new RoutedEventArgs()); await Task.Delay(100);
+            Assert(_presetVisibleRows.Count == _rows.Count, "Clear filters restores the complete lookup table.");
+            PresetRejoin.SelectedIndex = 2; await Task.Delay(100);
+            Assert(_presetVisibleRows.All(row => !row.Account.AutoRecovery), "Lookup rejoin filter selects only accounts with rejoin off.");
+            PresetClearFilters_Click(_presetLookupDialog, new RoutedEventArgs()); await Task.Delay(100);
+            Assert(PresetTableHeader.ColumnDefinitions.Count == 6 && FindVisual<Grid>(PresetAccounts, "PresetAccountRow") is { } lookupRow && lookupRow.ColumnDefinitions.Count == 6,
+                "Modal lookup renders six account columns.");
+            await CaptureAsync(directory, "preset-account-lookup.png", _presetLookupDialog);
+            InvokeDialogButton("CloseButton"); await lookup;
+            Assert(PresetSelected().Length == 0, "Cancel discards all draft account choices.");
+            lookup = ShowPresetLookupAsync(); await Task.Delay(350);
+            Assert(PresetAccounts.SelectedItems.Count == 0, "Reopening a cancelled lookup restores the saved selection.");
+            PresetAccounts.SelectedItems.Add(_rows[0]);
+            InvokeDialogButton("PrimaryButton"); await lookup;
+            Assert(PresetSelected().Length == 1, "Use selected accounts commits lookup choices.");
+            lookup = ShowPresetLookupAsync(); await Task.Delay(350);
+            PresetClear_Click(PresetAccounts, new RoutedEventArgs());
+            Assert(PresetLookupIds.Count == 0, "Clear selection clears the modal draft.");
+            InvokeDialogButton("CloseButton"); await lookup;
+            Assert(PresetSelected().Length == 1, "Cancel preserves previously confirmed choices.");
+            ProfileName.Text = "Single account";
+            Assert(SavePresetButton.IsEnabled, "Preset creation needs only local selection and a name.");
+            await SaveProfileAsync(false);
+            Assert(_profiles.Single(p => p.Name == "Single account").Entries.Length == 1, "Preset saves only locally chosen accounts.");
+            ProfilePicker.SelectedItem = _profiles.Single(p => p.Name == "Single account");
+            Root.UpdateLayout();
+            Assert(Math.Abs(LaunchPresetButton.ActualHeight - ApplyPresetButton.ActualHeight) < 0.5 && Math.Abs(SavePresetButton.ActualHeight - PresetEditButton.ActualHeight) < 0.5, "Preset primary and secondary buttons have consistent heights.");
+            await CaptureAsync(directory, "presets-redesigned.png");
+            PageScroll.ChangeView(null, 10000, null, true); await Task.Delay(150);
+            await CaptureAsync(directory, "presets-minimal.png");
+            foreach (var theme in new[] { 1, 2 })
+            {
+                ThemePicker.SelectedIndex = theme;
+                var reviewDialog = CreatePresetReview((LaunchProfile)ProfilePicker.SelectedItem, "start");
+                var reviewTask = reviewDialog.ShowAsync(); await Task.Delay(350);
+                var applyButton = FindVisual<Button>(reviewDialog, "PrimaryButton")!;
+                var cancelButton = FindVisual<Button>(reviewDialog, "CloseButton")!;
+                Assert(reviewDialog.PrimaryButtonStyle != reviewDialog.CloseButtonStyle && applyButton.Background is SolidColorBrush applyInk && cancelButton.Background is SolidColorBrush cancelInk && applyInk.Color != cancelInk.Color, "Apply and Cancel render with distinct backgrounds in both themes.");
+                await CaptureAsync(directory, $"preset-review-{(theme == 1 ? "light" : "dark")}.png", reviewDialog);
+                InvokeDialogButton("CloseButton"); await reviewTask;
+            }
+
+            Tab_Click(SettingsTab, new RoutedEventArgs());
+            ThemePicker.SelectedIndex = 2; await Task.Delay(200);
+            Assert(Root.ActualTheme == ElementTheme.Dark, "Dark theme applies immediately.");
+            Assert(ThemePath is not null && File.ReadAllText(ThemePath) == "Dark", "Theme preference persists in the isolated data directory.");
+            foreach (var tab in new[] { SettingsTab, AccountsTab })
+            {
+                Assert(tab.Focus(FocusState.Keyboard), "Sidebar tab accepts keyboard focus.");
+                foreach (var visualState in tab.IsChecked == true
+                    ? new[] { "Checked", "CheckedPointerOver", "CheckedPressed" }
+                    : new[] { "Normal", "PointerOver", "Pressed" })
+                {
+                    Assert(VisualStateManager.GoToState(tab, visualState, false), $"Sidebar state {visualState} exists.");
+                    Root.UpdateLayout();
+                    var presenter = FindVisual<ContentPresenter>(tab, "ContentPresenter")!;
+                    Assert(presenter.Foreground is SolidColorBrush ink && ink.Color.R > 200 && ink.Color.G > 200 && ink.Color.B > 200,
+                        $"Dark sidebar {tab.Name} {visualState} stays light while keyboard focused.");
+                    await CaptureAsync(directory, $"sidebar-dark-{tab.Name}-{visualState}.png");
+                }
+                VisualStateManager.GoToState(tab, tab.IsChecked == true ? "Checked" : "Normal", false);
+            }
+            ThemePicker.Focus(FocusState.Programmatic);
+            var themedGame = EditGameAsync(null); await Task.Delay(300);
+            Assert(_gameDialog!.RequestedTheme == ElementTheme.Dark && _gameDialog.PrimaryButtonStyle is not null, "Dialogs follow theme and emphasize Save.");
+            await CaptureAsync(directory, "game-editor-dark.png", _gameDialog);
+            InvokeDialogButton("CloseButton"); await themedGame;
+            ThemePicker.SelectedIndex = 1; await Task.Delay(200);
+            Assert(Root.ActualTheme == ElementTheme.Light, "Light theme applies immediately.");
+            await CaptureAsync(directory, "appearance-light.png");
+            ThemePicker.SelectedIndex = 0; await Task.Delay(200);
+            Assert(Root.RequestedTheme == ElementTheme.Default, "System theme follows device preference.");
             Tab_Click(AccountsTab, new RoutedEventArgs());
             var hwnd = WindowNative.GetWindowHandle(this);
             var scale = NativeTray.Scale(hwnd);
+            AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(hwnd)).Resize(new Windows.Graphics.SizeInt32((int)(1700 * scale), (int)(940 * scale)));
+            await Task.Delay(350);
+            Assert(Math.Abs(AccountTable.ActualWidth - Math.Max(820, AccountTableScroll.ActualWidth)) < 2,
+                $"Account table fills the available viewport while retaining its scrollable minimum (table {AccountTable.ActualWidth}, viewport {AccountTableScroll.ActualWidth}).");
+            await CaptureAsync(directory, "accounts-wide.png");
             AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(hwnd)).Resize(new Windows.Graphics.SizeInt32((int)(1020 * scale), (int)(780 * scale)));
             await Task.Delay(350);
+            foreach (var tab in new[] { AccountsTab, GamesTab, RecoveryTab, PresetsTab, SettingsTab, DiscordTab, BackupsTab, UpdatesTab, SupportTab })
+            {
+                Tab_Click(tab, new RoutedEventArgs()); await Task.Delay(80); Root.UpdateLayout();
+                var available = PageScroll.ActualWidth - PageScroll.Padding.Left - PageScroll.Padding.Right;
+                Assert(PageContent.ActualWidth <= available + 1, $"Page {tab.Name} fits the minimum window width.");
+                await CaptureAsync(directory, $"minimum-{tab.Name}.png");
+                if (tab == PresetsTab)
+                {
+                    var minimumLookup = ShowPresetLookupAsync(); await Task.Delay(350);
+                    Assert(((FrameworkElement)OpenDialog()).ActualWidth <= Root.ActualWidth && ((FrameworkElement)OpenDialog()).ActualHeight <= Root.ActualHeight,
+                        "Account lookup modal fits the minimum window size.");
+                    await CaptureAsync(directory, "preset-lookup-minimum.png", _presetLookupDialog);
+                    InvokeDialogButton("CloseButton"); await minimumLookup;
+                }
+            }
+            Tab_Click(AccountsTab, new RoutedEventArgs());
             await CaptureAsync(directory, "accounts-small.png");
+            Tab_Click(RecoveryTab, new RoutedEventArgs()); await RefreshAsync();
+            await CaptureAsync(directory, "dashboard-small.png");
+            Assert(RecoveryPage.ActualWidth <= PageScroll.ActualWidth - PageScroll.Padding.Left - PageScroll.Padding.Right + 1 && StatusBreakdown.ActualWidth > 0, "Dashboard chart fits the smaller window.");
+            Tab_Click(AccountsTab, new RoutedEventArgs());
             FeedbackMessage("Test queued. Check recent activity for delivery status.");
             await CaptureAsync(directory, "toast-small.png");
             Assert(Feedback.ActualWidth <= 640 && Feedback.IsOpen, "Toast remains compact in a smaller window.");
@@ -306,10 +534,10 @@ public sealed partial class MainWindow
             var rowToRemove = _rows[1];
             modal = ShowAccountAsync(rowToRemove);
             await Task.Delay(500);
-            await CaptureAsync(directory, "account-modal-small.png", AccountDialog);
+            await CaptureAsync(directory, "account-modal-small.png", _accountDialog);
             await _api.SendAsync(System.Net.Http.HttpMethod.Delete, $"accounts/{rowToRemove.Id}");
             await RefreshAsync();
-            Assert(!AccountDialog.IsPrimaryButtonEnabled && EditorError.IsOpen, "External removal disables stale modal save.");
+            Assert(!_accountDialog.IsPrimaryButtonEnabled && EditorError.IsOpen, "External removal disables stale modal save.");
             InvokeDialogButton("CloseButton");
             await modal.WaitAsync(TimeSpan.FromSeconds(5));
             AccountList.SelectedItems.Clear();
@@ -326,13 +554,26 @@ public sealed partial class MainWindow
         Close();
     }
 
-    private void AssertUpdateButtonCentered()
+    private void AssertUpdateButtonLayout()
     {
         Root.UpdateLayout();
         var position = UpdateNoticeButton.TransformToVisual(UpdateNotice).TransformPoint(new Windows.Foundation.Point());
-        Assert(UpdateNoticeButton.ActualHeight > 0 &&
-            Math.Abs(position.Y + UpdateNoticeButton.ActualHeight / 2 - UpdateNotice.ActualHeight / 2) < 1,
-            $"The update action is vertically centered in the banner (top {position.Y}, button {UpdateNoticeButton.ActualHeight}, banner {UpdateNotice.ActualHeight}).");
+        var message = FindVisualText(UpdateNotice, UpdateNotice.Message);
+        Assert(message is not null && message.ActualHeight > 0, "The update banner message is visible.");
+        var messagePosition = message!.TransformToVisual(UpdateNotice).TransformPoint(new Windows.Foundation.Point());
+        var stacked = position.Y >= messagePosition.Y + message.ActualHeight - 1;
+        Assert(UpdateNoticeButton.ActualHeight > 0 && position.X >= 0 && position.Y >= 0 &&
+            position.X + UpdateNoticeButton.ActualWidth <= UpdateNotice.ActualWidth + 1 &&
+            position.Y + UpdateNoticeButton.ActualHeight <= UpdateNotice.ActualHeight + 1 &&
+            (stacked || Math.Abs(position.Y + UpdateNoticeButton.ActualHeight / 2 - UpdateNotice.ActualHeight / 2) < 1),
+            $"The update action fits below wrapped content or is centered beside it (top {position.Y}, button {UpdateNoticeButton.ActualHeight}, banner {UpdateNotice.ActualHeight}).");
+    }
+    private static TextBlock? FindVisualText(DependencyObject root, string text)
+    {
+        if (root is TextBlock block && block.Text == text) return block;
+        for (var i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+            if (FindVisualText(VisualTreeHelper.GetChild(root, i), text) is { } match) return match;
+        return null;
     }
     private static void Assert(bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }
     private static T? FindVisual<T>(DependencyObject root, string? name = null) where T : FrameworkElement

@@ -35,7 +35,7 @@ struct Inner {
     wake: Notify,
     events: broadcast::Sender<Snapshot>,
     shutdown: AtomicBool,
-    launch_allowed: AtomicBool,
+    launch_allowed: Arc<AtomicBool>,
     discord: crate::discord::Discord,
 }
 #[derive(Clone)]
@@ -44,6 +44,10 @@ pub struct Engine(Arc<Inner>);
 const OWNERSHIP_TIMEOUT_ERROR: &str = "Launch tracker has no verified instance. Recovery paused; use Stop, then Start after checking the client";
 const CLOSE_BLOCKED_PREFIX: &str = "Managed client close blocked: ";
 const REJOIN_DISABLED: &str = "Automatic rejoin disabled; use Start to launch manually";
+#[cfg(windows)]
+const LAUNCH_COORDINATION_ERROR: &str = "Roblox launch coordination is not ready. Close existing Roblox clients yourself, wait a moment, then try Start again. If this persists, check Support and integrations for the coordination error";
+#[cfg(not(windows))]
+const LAUNCH_COORDINATION_ERROR: &str = "Multi-instance initialization failed. Check Support and integrations, resolve the reported issue, then restart RoLauncher";
 
 fn recovery_due(account: &Account, now: chrono::DateTime<Utc>) -> bool {
     account.desired_running
@@ -106,6 +110,13 @@ pub struct AccountPatch {
 
 impl Engine {
     pub fn open(store: Store, compatibility: String) -> Result<Self, String> {
+        Self::open_with_launch_gate(store, compatibility, Arc::new(AtomicBool::new(true)))
+    }
+    pub fn open_with_launch_gate(
+        store: Store,
+        compatibility: String,
+        launch_allowed: Arc<AtomicBool>,
+    ) -> Result<Self, String> {
         let mut database = store.load()?;
         let token = if database.encrypted_api_token.is_empty() {
             let token = zeroize::Zeroizing::new(format!(
@@ -151,7 +162,7 @@ impl Engine {
             wake: Notify::new(),
             events,
             shutdown: AtomicBool::new(false),
-            launch_allowed: AtomicBool::new(true),
+            launch_allowed,
             discord,
         })))
     }
@@ -366,7 +377,7 @@ impl Engine {
                 let op = Operation { id:Uuid::new_v4(), account_id:id.into(), state:"completed".into(), error:None }; s.operations.insert(op.id,op.clone()); return Ok(op);
             }
             if action != "stop" { existing.target.as_ref().ok_or("Set a launch target first")?.validate()?; }
-            if action!="stop" && !self.0.launch_allowed.load(Ordering::Acquire){return Err("Multi-instance initialization failed. Close clients yourself and restart RoLauncher before launching".into());}
+            if action!="stop" && !self.0.launch_allowed.load(Ordering::Acquire){return Err(LAUNCH_COORDINATION_ERROR.into());}
             if action != "stop" && s.database.retired_launches.iter().any(|r|r.account_id==id && r.deadline>Utc::now()) { return Err("A cancelled launch is still being observed; wait up to 90 seconds before starting again".into()); }
             if action == "restart" && matches!(existing.status,Status::Launching|Status::Queued) { return Err("A launch is already pending; Stop it before restarting".into()); }
             if let Some(previous) = existing.operation_id.and_then(|id|s.operations.get_mut(&id)) && previous.state == "queued" { previous.state = "cancelled".into(); }
@@ -499,7 +510,11 @@ impl Engine {
     }
     async fn launch_one(&self, account: Account) {
         if !self.0.launch_allowed.load(Ordering::Acquire) {
-            self.failure(&account.id,account.generation,Failure::new(FailureKind::Unsupported,"Multi-instance initialization failed; close clients yourself and restart the tool"));
+            self.failure(
+                &account.id,
+                account.generation,
+                Failure::new(FailureKind::Unsupported, LAUNCH_COORDINATION_ERROR),
+            );
             return;
         }
         let target = match account.effective_target() {
@@ -967,6 +982,23 @@ fn apply_failure(a: &mut Account, error: &Failure) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn start_recovers_when_launch_coordination_becomes_ready() {
+        let (engine, path) = fixture(1);
+        let gate = engine.0.launch_allowed.clone();
+        gate.store(false, Ordering::Release);
+        assert_eq!(
+            engine.command("1", "start").unwrap_err(),
+            LAUNCH_COORDINATION_ERROR
+        );
+        assert!(!engine.snapshot().accounts[0].desired_running);
+        assert!(engine.command("1", "stop").is_ok());
+        gate.store(true, Ordering::Release);
+        assert!(engine.command("1", "start").is_ok());
+        assert!(engine.snapshot().accounts[0].desired_running);
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+    }
     #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn discord_persists_encrypted_settings_and_records_only_committed_incidents() {

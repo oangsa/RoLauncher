@@ -1,6 +1,9 @@
 using RoLauncher.Desktop;
 using System.Text.Json;
 
+if (!CookieBatch.Parse(" first\r\n\r\nsecond\nfirst\rthird ").SequenceEqual(new[] { "first", "second", "third" }) || CookieBatch.Parse(" \r\n").Length != 0)
+    throw new Exception("Cookie batches must trim lines, ignore blanks, and deduplicate without changing cookie contents.");
+
 int passed = 0;
 void Check(bool condition, string name)
 {
@@ -32,6 +35,17 @@ Check(draft.TryTarget(out _, out _), "Share server links are supported.");
 draft.Private = "https://www.roblox.com/share?code=ABC&type=Experience";
 Check(!draft.TryTarget(out _, out _), "Non-server shares are rejected.");
 var row = new AccountRow(account);
+Check(row.Destination == "Place 1818", "Account game label falls back to the place number.");
+row.SetGameName("Sample experience");
+Check(row.Destination == "Sample experience", "Account game label uses resolved metadata.");
+row.Update(account with { Status = "stopped" });
+Check(row.Destination == "Sample experience", "Status polling retains resolved game metadata.");
+row.Update(account with { Target = new Target(999, null, null) });
+Check(row.Destination == "Place 999", "Changing a destination discards the previous game's label.");
+row.Update(account with { Target = null });
+Check(row.Destination == "Choose a game", "An account without a destination prompts game selection.");
+row.Update(account);
+
 Check(AccountFilter.Matches(account, " MY ACCOUNT ", "", ""), "Search ignores case and surrounding whitespace.");
 Check(AccountFilter.Matches(account, "@SAMP", "running", "on"), "Search matches username with status and rejoin filters.");
 Check(!AccountFilter.Matches(account, "missing", "", ""), "Unmatched names are excluded.");

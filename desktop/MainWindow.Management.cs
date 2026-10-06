@@ -70,6 +70,7 @@ public sealed partial class MainWindow
         var id = (HistoryAccount.SelectedItem as ComboBoxItem)?.Tag as string;
         var history = await _api.GetAsync<Activity[]>(id is null ? "activity" : $"activity?account_id={Uri.EscapeDataString(id)}");
         if (id != ((HistoryAccount.SelectedItem as ComboBoxItem)?.Tag as string)) return;
+        history = history.Select(a => a with { AccountLabel = _rows.FirstOrDefault(r => r.Id == a.AccountId) is { } row ? $"{row.Alias} ({row.Username})" : null }).ToArray();
         var json = JsonSerializer.Serialize(history);
         UpdateTrend(history);
         if (json == _activityJson) return;
@@ -97,7 +98,7 @@ public sealed partial class MainWindow
     }
     private void SelectVisible_Click(object sender, RoutedEventArgs e) => SelectAllRows();
     private void SelectAllSaved_Click(object sender, RoutedEventArgs e) { ClearFilters_Click(sender, e); SelectAllRows(); }
-    private async void BulkEdit_Click(object sender, RoutedEventArgs e) => await GuardAsync(() => ShowBulkAsync(Selected()));
+    private async void BulkEdit_Click(object sender, RoutedEventArgs e) => await GuardAsync(() => ShowBulkAsync(PresetsPage.Visibility == Visibility.Visible ? PresetSelected() : Selected()));
     private async void EditAll_Click(object sender, RoutedEventArgs e) => await GuardAsync(() => ShowBulkAsync(_rows.ToArray()));
     private sealed class BulkForm
     {
@@ -141,7 +142,12 @@ public sealed partial class MainWindow
         var content = new StackPanel { Spacing = 10 };
         content.Children.Add(new TextBlock { Text = $"{rows.Length} accounts. Only checked Apply settings change. Destination replaces Place ID, Job ID and private link together, on the next launch.", TextWrapping = TextWrapping.Wrap });
         content.Children.Add(new Expander { Header = "Included accounts", HorizontalAlignment = HorizontalAlignment.Stretch, Content = new ScrollViewer { MaxHeight = 160, Content = new TextBlock { Text = string.Join("\n", rows.Select(r => $"{r.Alias} · @{r.Account.Username} · {r.Id}")), TextWrapping = TextWrapping.Wrap } } });
-        foreach (var element in new UIElement[] { form.AliasApply, form.Alias, form.TargetApply, form.ClearTarget, form.Game, form.Place, form.Job, form.Private, form.RejoinApply, form.Rejoin, form.GroupApply, form.Group, form.FallbackApply, form.Fallback, form.Error }) content.Children.Add(element);
+        foreach (var element in new UIElement[] { form.AliasApply, form.Alias, form.TargetApply, form.ClearTarget, form.Game, form.Place, form.Job, form.Private, form.RejoinApply, form.Rejoin, form.GroupApply, form.Group, form.FallbackApply, form.Fallback, form.Error })
+        {
+            content.Children.Add(element);
+            if (element == form.Rejoin)
+                content.Children.Add(new TextBlock { Text = "Check Apply automatic rejoin, then choose on or off for all included accounts. Turning it off keeps clients open. Changes apply when you save.", TextWrapping = TextWrapping.Wrap, Style = (Style)Application.Current.Resources["Caption"] });
+        }
         void EnableFields()
         {
             form.Alias.IsEnabled = form.AliasApply.IsChecked == true;
@@ -155,7 +161,7 @@ public sealed partial class MainWindow
             check.Checked += (_, _) => EnableFields(); check.Unchecked += (_, _) => EnableFields();
         }
         EnableFields();
-        var dialog = new ContentDialog { XamlRoot = Root.XamlRoot, Title = $"Edit {rows.Length} accounts", Content = new ScrollViewer { Content = content, MaxHeight = 520, VerticalScrollBarVisibility = ScrollBarVisibility.Auto }, PrimaryButtonText = "Apply changes", CloseButtonText = "Cancel", RequestedTheme = ElementTheme.Light };
+        var dialog = new ContentDialog { XamlRoot = Root.XamlRoot, Title = $"Edit {rows.Length} accounts", Content = new ScrollViewer { Content = content, MaxHeight = 520, VerticalScrollBarVisibility = ScrollBarVisibility.Auto }, PrimaryButtonText = "Apply changes", CloseButtonText = "Cancel", RequestedTheme = Root.ActualTheme };
         ApplyDialogTheme(dialog); _bulkDialog = dialog;
         dialog.Closing += (_, args) => args.Cancel = _saving;
         dialog.PrimaryButtonClick += async (_, args) =>
@@ -195,13 +201,13 @@ public sealed partial class MainWindow
     private async void ReplaceProfile_Click(object sender, RoutedEventArgs e) => await SaveProfileAsync(true);
     private async Task SaveProfileAsync(bool replace)
     {
-        var rows = Selected(); var profile = ProfilePicker.SelectedItem as LaunchProfile;
-        if (rows.Length == 0 || replace && profile is null) { FeedbackMessage("Select accounts and, when replacing, a profile first."); return; }
-        if (replace && !await ConfirmAsync("Replace profile?", $"Replace {profile!.Name} with the current settings of {rows.Length} selected accounts?", "Replace")) return;
+        var rows = PresetSelected(); var profile = ProfilePicker.SelectedItem as LaunchProfile;
+        if (rows.Length == 0 || replace && profile is null) { FeedbackMessage("Choose accounts in Create a preset and a saved preset when replacing."); return; }
+        if (replace && !await ConfirmAsync("Replace preset?", $"Replace {profile!.Name} with the current settings of {rows.Length} chosen accounts?", "Replace")) return;
         await GuardAsync(async () =>
         {
             await _api.SendAsync(HttpMethod.Post, "profiles", new { name = replace && string.IsNullOrWhiteSpace(ProfileName.Text) ? profile!.Name : ProfileName.Text, account_ids = rows.Select(r => r.Id).ToArray(), id = replace ? profile!.Id : null });
-            FeedbackMessage("Launch profile saved.", InfoBarSeverity.Success); await RefreshAsync();
+            FeedbackMessage("Preset saved.", InfoBarSeverity.Success); await RefreshAsync();
         });
     }
     private async Task<bool> ConfirmAsync(string title, string text, string action)
@@ -210,7 +216,7 @@ public sealed partial class MainWindow
         _modalOpen = true;
         try
         {
-            var dialog = new ContentDialog { XamlRoot = Root.XamlRoot, Title = title, Content = new ScrollViewer { Content = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap }, MaxHeight = 450 }, PrimaryButtonText = action, CloseButtonText = "Cancel", DefaultButton = ContentDialogButton.Close, RequestedTheme = ElementTheme.Light };
+            var dialog = new ContentDialog { XamlRoot = Root.XamlRoot, Title = title, Content = new ScrollViewer { Content = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap }, MaxHeight = 450 }, PrimaryButtonText = action, CloseButtonText = "Cancel", DefaultButton = ContentDialogButton.Close, RequestedTheme = Root.ActualTheme };
             ApplyDialogTheme(dialog); return await dialog.ShowAsync() == ContentDialogResult.Primary;
         }
         finally { _modalOpen = false; }
@@ -219,9 +225,8 @@ public sealed partial class MainWindow
     private async void ApplyProfile_Click(object sender, RoutedEventArgs e) => await ProfileActionAsync("apply");
     private async Task ProfileActionAsync(string action)
     {
-        if (ProfilePicker.SelectedItem is not LaunchProfile profile) { FeedbackMessage("Choose a profile first."); return; }
-        var review = string.Join("\n", profile.Entries.Select(e => $"{e.Alias} · account {e.AccountId} · Place {e.Target?.PlaceId} · {(e.Target?.PrivateServerLink is not null ? "Private server" : e.Target?.JobId is not null ? "Specific server" : "Public server")} · Rejoin {(e.AutoRecovery ? "on" : "off")} · {e.FallbackPolicy.Replace('_', ' ')} · Group {e.Group}"));
-        if (!await ConfirmAsync(profile.Name, $"{review}\n\nSaved settings replace these accounts’ current settings. Clients already running stay open; changed destinations apply on the next launch.", action == "start" ? "Apply and start" : "Apply settings")) return;
+        if (ProfilePicker.SelectedItem is not LaunchProfile profile) { FeedbackMessage("Choose a saved preset first."); return; }
+        if (!await ReviewPresetAsync(profile, action)) return;
         await GuardAsync(async () =>
         {
             var result = await _api.SendAsync(HttpMethod.Post, $"profiles/{profile.Id}/{action}");

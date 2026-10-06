@@ -31,4 +31,5 @@
   <Target Name="PublishXamlResources" BeforeTargets="ComputeFilesToPublish" AfterTargets="Build">
     <ItemGroup><ResolvedFileToPublish Include="$(TargetDir)$(TargetName).pri"><RelativePath>$(TargetName).pri</RelativePath><CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory></ResolvedFileToPublish></ItemGroup>
   </Target>
+  <ItemGroup><EmbeddedResource Include="CHANGELOG.txt" LogicalName="RoLauncher.Changelog" /></ItemGroup>
 </Project>

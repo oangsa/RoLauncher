@@ -15,6 +15,7 @@ accounts = [dict(id=str(i), username=f"sample_{i}", alias=name,
         ("Main account", "running", None), ("Test account", "backoff", "Waiting for automatic rejoin"),
         ("Build account", "needs_attention", "Session expired; sign in again")])]
 commands = []
+imported_cookies = []
 profiles = []
 game_profiles = []
 close_to_tray = True
@@ -45,13 +46,18 @@ class Fixture(BaseHTTPRequestHandler):
                 recent=[dict(timestamp="2026-10-05T09:20:00+07:00", account="Test account (@sample_1)",
                     title="Automatic rejoin scheduled", message="Waiting for the next retry. Your other accounts are still monitored.", place_id=1818)]))
         elif self.path == "/v1/test/commands": self.reply(commands)
+        elif self.path == "/v1/test/import-count": self.reply(len(imported_cookies))
         else: self.reply({}, 404)
     def do_POST(self):
         commands.append(self.path)
         data = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         body = json.loads(data) if data else None
+        if self.path == "/v1/accounts":
+            assert body["cookies"] in (["fixture-cookie-a"], ["fixture-cookie-b"])
+            imported_cookies.extend(body["cookies"])
+            self.reply(dict(accounts=[{}], errors=[])); return
         if self.path == "/v1/updates/official/check":
-            major, minor, patch = map(int, version.split('.'))
+            major, minor, patch = map(int, version.split('-')[0].split('.'))
             newer = f"{major}.{minor}.{patch + 1}"
             tag = ("beta-v" if include_beta_updates else "v") + newer
             prefix = f"https://github.com/oangsa/RoLauncher/releases/download/{tag}/rolauncher-v{newer}"
@@ -126,7 +132,7 @@ output = root / "target" / "ui-preview"
 output.mkdir(parents=True, exist_ok=True)
 (output / "result.txt").unlink(missing_ok=True)
 version = next(line.split('"')[1] for line in (root / "Cargo.toml").read_text().splitlines() if line.startswith("version = "))
-config = dict(port=server.server_port, token="TEST_ONLY_" + "x" * 48, version=version, parent_id=os.getpid())
+config = dict(port=server.server_port, token="TEST_ONLY_" + "x" * 48, version=version, parent_id=os.getpid(), data_directory=str(output / "fixture-data"))
 env = os.environ | {"ROLAUNCHER_UI_SMOKE_DIR": str(output)}
 exe = root / "target" / "ui-smoke" / "RoLauncher.Desktop.exe"
 try:

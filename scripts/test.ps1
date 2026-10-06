@@ -3,6 +3,10 @@ $taskRoot = Split-Path -Parent $PSScriptRoot
 Push-Location -LiteralPath $taskRoot
 try {
     . "$PSScriptRoot\environment.ps1"
+    & python "$PSScriptRoot\test-versioning.py"
+    if ($LASTEXITCODE -ne 0) { throw 'Versioning checks failed' }
+    & python "$PSScriptRoot\test-publish-beta.py"
+    if ($LASTEXITCODE -ne 0) { throw 'Beta publication checks failed' }
     & cargo test --locked
     if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
     & cargo fmt --check

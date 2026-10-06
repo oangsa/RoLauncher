@@ -12,6 +12,8 @@ internal static class UpdateDownloadTests
         var view = new UpdateView(true, "1.0.1", UpdateDownloader.Publisher + "/releases/tag/v1.0.1",
             prefix + (linux ? name : "rolauncher-v1.0.1-windows-x64.zip"), prefix + "rolauncher-v1.0.1-SHA256SUMS.txt", linux ? "" : prefix + name);
         check(UpdateDownloader.ValidateRelease(view, "1.0.0") == name, "A newer official installer is accepted.");
+        check(UpdateDownloader.ValidateRelease(view, "1.0.1-dev.123456abcdef") == name, "Final stable release replaces a development build of the same target.");
+        check(UpdateDownloader.ValidateRelease(view, "1.0.0-dev.123456abcdef") == name, "A newer stable release replaces a development build.");
         void Rejected(Action action, string description)
         {
             try { action(); check(false, description); } catch (InvalidDataException) { check(true, description); }

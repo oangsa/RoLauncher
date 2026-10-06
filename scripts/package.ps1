@@ -1,10 +1,15 @@
-param([string]$OutputRootDirectory = 'dist')
+param([string]$OutputRootDirectory = 'dist', [switch]$UseCurrentVersion)
 $ErrorActionPreference = 'Stop'
 $taskRoot = Split-Path -Parent $PSScriptRoot
 Push-Location -LiteralPath $taskRoot
 try {
+    . "$PSScriptRoot\environment.ps1"
+    if (-not $UseCurrentVersion) {
+        & python "$PSScriptRoot\versioning.py"
+        if ($LASTEXITCODE -ne 0) { throw 'Development version stamping failed' }
+    }
     $taskManifest = Get-Content -LiteralPath 'Cargo.toml' -Raw
-    $taskVersion = [regex]::Match($taskManifest, '(?m)^version = "(\d+\.\d+\.\d+)"').Groups[1].Value
+    $taskVersion = [regex]::Match($taskManifest, '(?m)^version = "(\d+\.\d+\.\d+(?:-dev\.[0-9a-f]{12})?)"').Groups[1].Value
     if (-not $taskVersion) { throw 'Cannot determine release version' }
     $taskName = "rolauncher-v$taskVersion"
     $taskOutput = if ([IO.Path]::IsPathRooted($OutputRootDirectory)) { [IO.Path]::GetFullPath($OutputRootDirectory) } else { [IO.Path]::GetFullPath((Join-Path $taskRoot $OutputRootDirectory)) }
@@ -17,7 +22,7 @@ try {
     }
     $taskDistribution = Join-Path $taskOutput $taskName
     if (Test-Path -LiteralPath $taskDistribution) { throw "Distribution directory already exists: $taskDistribution" }
-    & "$PSScriptRoot\build.ps1" -OutputDirectory $taskDistribution
+    & "$PSScriptRoot\build.ps1" -UseCurrentVersion -OutputDirectory $taskDistribution
     Copy-Item -LiteralPath 'AGENTS.md' -Destination $taskDistribution
     Compress-Archive -LiteralPath $taskDistribution -DestinationPath $taskBinaryZip
     $taskSource = Join-Path $taskRoot ('target\source-package-' + [guid]::NewGuid().ToString())

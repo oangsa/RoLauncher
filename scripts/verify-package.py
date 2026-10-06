@@ -9,10 +9,11 @@ import subprocess
 import threading
 import time
 import zipfile
+from versioning import core
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 root = Path(__file__).resolve().parent.parent
-version = re.search(r'^version = "(\d+\.\d+\.\d+)"', (root / "Cargo.toml").read_text(encoding="utf-8"), re.M)[1]
+version = re.search(r'^version = "(\d+\.\d+\.\d+(?:-dev\.[0-9a-f]{12})?)"', (root / "Cargo.toml").read_text(encoding="utf-8"), re.M)[1]
 name = f"rolauncher-v{version}"
 dist = root / "dist"
 parser = argparse.ArgumentParser()
@@ -34,7 +35,7 @@ with zipfile.ZipFile(dist / f"{name}-source.zip") as source:
                      "src/updates.rs", "desktop/MainWindow.Management.cs", "desktop/MainWindow.Workspace.cs",
                      "desktop/MainWindow.xaml", "desktop/MainWindow.xaml.cs", "desktop/BulkDraft.cs",
                      "scripts/sober-isolation/options.json", "desktop.linux/MainWindow.Smoke.cs",
-                     f"docs/RELEASE-{version}.md", "docs/VALIDATION.md", "docs/API.md", "docs/USAGE.md",
+                     f"docs/RELEASE-{core(version)}.md", "docs/VALIDATION.md", "docs/API.md", "docs/USAGE.md",
                      "docs/DEVELOPMENT.md", "docs/PERFORMANCE.md", "desktop/packages.lock.json",
                      "desktop.tests/packages.lock.json", "desktop/RoLauncher.Desktop.csproj",
                      "desktop.tests/RoLauncher.Desktop.Tests.csproj", "src/store.rs", "src/platform.rs",

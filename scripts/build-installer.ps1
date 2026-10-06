@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 $taskRoot = Split-Path -Parent $PSScriptRoot
 Push-Location -LiteralPath $taskRoot
 try {
-    $taskVersion = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version = "(\d+\.\d+\.\d+)"').Groups[1].Value
+    $taskVersion = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version = "(\d+\.\d+\.\d+(?:-dev\.[0-9a-f]{12})?)"').Groups[1].Value
     if (-not $taskVersion) { throw 'Cannot determine installer version' }
     $taskPayload = (Resolve-Path -LiteralPath $DistributionDirectory).Path
     if (-not (Test-Path -LiteralPath (Join-Path $taskPayload 'RoLauncher.exe'))) { throw 'Installer payload is missing RoLauncher.exe' }
@@ -16,7 +16,7 @@ try {
         Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
     if (-not $taskCompiler) { $taskCompiler = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source }
     if (-not $taskCompiler) { throw 'Inno Setup compiler not found. Install Inno Setup 6.7+ or put ISCC.exe on PATH.' }
-    $taskParts = $taskVersion.Split('.')
+    $taskParts = ($taskVersion.Split('-')[0]).Split('.')
     $taskArgs = @('/Qp', "/DVersion=$taskVersion", "/DVersionMajor=$($taskParts[0])", "/DVersionMinor=$($taskParts[1])",
         "/DVersionPatch=$($taskParts[2])", "/DPayload=$taskPayload", "/O$taskOutput")
     if ($TestInstaller) { $taskArgs += '/DTestInstaller=1' }
