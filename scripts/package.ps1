@@ -25,7 +25,7 @@ try {
     foreach ($taskItem in @('Cargo.toml','Cargo.lock','build.rs','README.md','CHANGELOG.md','AGENTS.md','LICENSE','THIRD_PARTY_NOTICES.md','.gitignore','.gitattributes','.github','assets','installer','src','examples','scripts','docs','licenses')) {
         Copy-Item -LiteralPath $taskItem -Destination $taskSource -Recurse
     }
-    foreach ($taskProject in @('desktop','desktop.tests')) {
+    foreach ($taskProject in @('desktop','desktop.tests','desktop.linux')) {
         $taskProjectSource = Join-Path $taskSource $taskProject
         New-Item -ItemType Directory -Path $taskProjectSource | Out-Null
         Get-ChildItem -LiteralPath $taskProject -File | Copy-Item -Destination $taskProjectSource

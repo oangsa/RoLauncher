@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+"""Optional PATH adapter to test private runtime isolation with the 1.1.0 beta.
+
+Forwards unrelated Flatpak commands. Never prints arguments or launch output.
+Set ROLAUNCHER_REAL_FLATPAK to the installed Flatpak's absolute executable path.
+"""
+import json
+import os
+from pathlib import Path
+import sys
+
+SOBER = 'org.vinegarhq.Sober'
+
+def main():
+    real = os.environ.get('ROLAUNCHER_REAL_FLATPAK', '')
+    if not os.path.isabs(real) or Path(real).resolve() == Path(__file__).resolve():
+        sys.exit('Set ROLAUNCHER_REAL_FLATPAK to the installed Flatpak executable.')
+    args = sys.argv[1:]
+    if args[:2] == ['run', SOBER]:
+        home = Path(os.environ.get('HOME', ''))
+        if (not home.is_absolute() or home.parent.name != 'sober-instances'
+                or not home.name.isascii() or not home.name.isdigit()
+                or any(c in str(home) for c in ':\n\r')):
+            sys.exit('Isolated Sober launch requires a RoLauncher per-account home.')
+        options = json.loads(Path(__file__).with_name('options.json').read_text())
+        options.append(f'--filesystem={home}')
+        data = home / '.var/app' / SOBER
+        for variable, suffix in [('XDG_DATA_HOME', 'data'), ('XDG_CONFIG_HOME', 'config'),
+                                 ('XDG_CACHE_HOME', 'cache'), ('XDG_STATE_HOME', '.local/state')]:
+            options.append(f'--env={variable}={data / suffix}')
+        args = ['run', *options, *args[1:]]
+    os.execv(real, [real, *args])
+
+if __name__ == '__main__':
+    main()

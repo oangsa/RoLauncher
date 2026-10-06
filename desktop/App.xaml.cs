@@ -53,5 +53,3 @@ public partial class App : Microsoft.UI.Xaml.Application
         _window?.DispatcherQueue.TryEnqueue(() => _window.SupervisorExited());
     }
 }
-
-public sealed record Bootstrap(int Port, string Token, string Version, int ParentId, string DataDirectory = "");

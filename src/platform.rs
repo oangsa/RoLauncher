@@ -1,4 +1,5 @@
 use crate::model::ProcessIdentity;
+#[cfg(not(target_os = "linux"))]
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -17,6 +18,12 @@ impl Player {
             generation,
         }
     }
+}
+
+/// Windows uses the installed protocol; Linux isolates Sober by saved account.
+#[cfg(not(target_os = "linux"))]
+pub fn launch_for(uri: &str, _account_id: &str) -> Result<(), String> {
+    launch(uri)
 }
 
 pub fn tracker_from_command_line(cmd: &str) -> Option<String> {
@@ -508,7 +515,13 @@ mod imp {
 #[cfg(windows)]
 pub use imp::*;
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+#[path = "platform_linux.rs"]
+mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::*;
+
+#[cfg(not(any(windows, target_os = "linux")))]
 mod imp {
     use super::*;
     pub fn players() -> Result<Vec<Player>, String> {
@@ -541,7 +554,7 @@ mod imp {
         std::fs::rename(temp, dest).map_err(|_| "Unable to save database".into())
     }
 }
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 pub use imp::*;
 
 #[cfg(test)]

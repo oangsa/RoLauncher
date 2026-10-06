@@ -67,6 +67,8 @@ Use `--data-dir FOLDER` for a custom data folder. Older `.rbxbackup` files remai
 
 Updates are checked at startup and every six hours. Press **Download**, then **Relaunch**. RoLauncher verifies the installer, backs up data, installs, and reopens. Roblox clients stay open. Settings also offers a manual update check.
 
+Version 1.2.0 adds **Include beta updates** in Settings. It defaults to off; enabling it checks both stable and beta releases and labels beta updates in the banner. The preference is saved for automatic checks. Published 1.0.0 and 1.1.0 builds check stable releases only, so use their existing update check to install stable 1.2.0 before opting into future betas.
+
 For Discord alerts, create a webhook in a regular text channel. Paste it in Settings, choose **Save webhook**, enable notifications, and press **Send test**. Delivery is best effort; **Recent activity** shows local alerts too.
 
 ## Troubleshooting

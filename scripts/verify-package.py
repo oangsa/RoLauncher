@@ -41,6 +41,20 @@ with zipfile.ZipFile(dist / f"{name}-source.zip") as source:
                      "desktop/MainWindow.Updates.cs", "desktop/UpdateDownloader.cs", "desktop/UpdateHandoff.cs", "CHANGELOG.md"]:
         assert filename in paths, filename
         assert source.read(paths[filename]) == (root / filename).read_bytes(), filename
+    for filename in ["desktop.linux/RoLauncher.Linux.csproj", "desktop.linux/packages.lock.json",
+                     "desktop.linux/MainWindow.Platform.cs", "desktop/Bootstrap.cs", "desktop/MainWindow.Platform.cs",
+                     "src/platform_linux.rs", "src/login_linux.rs", "src/ui_linux.rs", "docs/LINUX.md",
+                     "scripts/build-linux.sh", "scripts/package-linux.py", "scripts/login-linux.py",
+                     "scripts/message-linux.py", "scripts/apply-update-linux.py", "scripts/install-linux.py",
+                     "scripts/test-linux-update.py", "scripts/ui-smoke-linux.py", "scripts/verify-linux-package.py",
+                     "scripts/publish-beta.py", "scripts/test-publish-beta.py", ".github/workflows/beta-release.yml", ".github/workflows/linux.yml"]:
+        assert filename in paths, filename
+        assert source.read(paths[filename]) == (root / filename).read_bytes(), filename
+    for file in (root / "desktop.linux").iterdir():
+        if file.is_file():
+            filename = "desktop.linux/" + file.name
+            assert filename in paths, filename
+            assert source.read(paths[filename]) == file.read_bytes(), filename
     assert not any("/bin/" in p or "/obj/" in p or ".tools/" in p for p in paths)
     assert f'version = "{version}"'.encode() in source.read(paths["Cargo.toml"])
     assert re.search(r'name = "rolauncher"\s+version = "' + re.escape(version) + '"', source.read(paths["Cargo.lock"]).decode())

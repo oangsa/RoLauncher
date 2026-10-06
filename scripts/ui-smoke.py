@@ -17,6 +17,7 @@ accounts = [dict(id=str(i), username=f"sample_{i}", alias=name,
 commands = []
 profiles = []
 backups = []
+include_beta_updates = False
 activity = [dict(timestamp="2026-10-05T09:20:00+07:00", account_id="1", place_id=1818, status="backoff", failures=1, message="Retry scheduled; inspect the next retry time")]
 
 class Fixture(BaseHTTPRequestHandler):
@@ -30,7 +31,7 @@ class Fixture(BaseHTTPRequestHandler):
         self.wfile.write(data)
     def do_GET(self):
         if self.path == "/v1/status":
-            self.reply(dict(accounts=accounts, profiles=profiles, update_repository="", network_suspended=False, compatibility="UI fixture · real-client validation remains outstanding"))
+            self.reply(dict(accounts=accounts, profiles=profiles, update_repository="", include_beta_updates=include_beta_updates, network_suspended=False, compatibility="UI fixture · real-client validation remains outstanding"))
         elif self.path == "/v1/profiles": self.reply(profiles)
         elif self.path == "/v1/backups": self.reply(backups)
         elif self.path.startswith("/v1/activity"):
@@ -49,9 +50,10 @@ class Fixture(BaseHTTPRequestHandler):
         if self.path == "/v1/updates/official/check":
             major, minor, patch = map(int, version.split('.'))
             newer = f"{major}.{minor}.{patch + 1}"
-            prefix = f"https://github.com/oangsa/RoLauncher/releases/download/v{newer}/rolauncher-v{newer}"
+            tag = ("beta-v" if include_beta_updates else "v") + newer
+            prefix = f"https://github.com/oangsa/RoLauncher/releases/download/{tag}/rolauncher-v{newer}"
             self.reply(dict(available=True, version=newer,
-                release_url=f"https://github.com/oangsa/RoLauncher/releases/tag/v{newer}",
+                prerelease=include_beta_updates, release_url=f"https://github.com/oangsa/RoLauncher/releases/tag/{tag}",
                 download_url=prefix + "-windows-x64.zip", checksums_url=prefix + "-SHA256SUMS.txt", installer_url=prefix + "-setup-x64.exe"))
             return
         if self.path == "/v1/profiles":
@@ -74,7 +76,11 @@ class Fixture(BaseHTTPRequestHandler):
             account.update(status="stopped", process=None)
         self.reply({}, 202)
     def do_PATCH(self):
+        global include_beta_updates
         patch = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+        if self.path == "/v1/settings/updates":
+            include_beta_updates = patch["include_beta"]
+            self.reply({}); return
         if self.path == "/v1/accounts/bulk":
             ids = patch["account_ids"]
             selected = [next((a for a in accounts if a["id"] == i), None) for i in ids]

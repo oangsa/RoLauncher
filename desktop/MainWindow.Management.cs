@@ -2,7 +2,6 @@ using System.Net.Http;
 using System.Text.Json;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using WinRT.Interop;
 
 namespace RoLauncher.Desktop;
 
@@ -27,6 +26,13 @@ public sealed partial class MainWindow
     private void UpdateManagement(Snapshot snapshot)
     {
         CompatibilityText.Text = snapshot.Compatibility;
+        if (!_savingUpdateSettings)
+        {
+            _syncingUpdateSettings = true;
+            IncludeBetaUpdates.IsChecked = snapshot.IncludeBetaUpdates;
+            _syncingUpdateSettings = false;
+            _updateSettingsReady = true;
+        }
         var groups = _rows.Select(r => r.Account.Group).Distinct().OrderBy(g => g).ToArray();
         var fingerprint = JsonSerializer.Serialize(groups);
         if (fingerprint != _groupFingerprint)
@@ -87,8 +93,8 @@ public sealed partial class MainWindow
         BackupPicker.ItemsSource = names;
         BackupPicker.SelectedItem = names.Contains(selected) ? selected : names.FirstOrDefault();
     }
-    private void SelectVisible_Click(object sender, RoutedEventArgs e) => AccountList.SelectAll();
-    private void SelectAllSaved_Click(object sender, RoutedEventArgs e) { ClearFilters_Click(sender, e); AccountList.SelectAll(); }
+    private void SelectVisible_Click(object sender, RoutedEventArgs e) => SelectAllRows();
+    private void SelectAllSaved_Click(object sender, RoutedEventArgs e) { ClearFilters_Click(sender, e); SelectAllRows(); }
     private async void BulkEdit_Click(object sender, RoutedEventArgs e) => await GuardAsync(() => ShowBulkAsync(Selected()));
     private async void EditAll_Click(object sender, RoutedEventArgs e) => await GuardAsync(() => ShowBulkAsync(_rows.ToArray()));
     private sealed class BulkForm
@@ -227,7 +233,7 @@ public sealed partial class MainWindow
     {
         var picker = new Windows.Storage.Pickers.FileSavePicker { SuggestedFileName = name };
         picker.FileTypeChoices.Add("JSON", new List<string> { ".json" });
-        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+        InitializePicker(picker);
         var file = await picker.PickSaveFileAsync(); if (file is null) return;
         await File.WriteAllTextAsync(file.Path, JsonSerializer.Serialize(value, new JsonSerializerOptions(ApiClient.JsonOptions) { WriteIndented = true }));
         FeedbackMessage("Export saved.", InfoBarSeverity.Success);
@@ -241,7 +247,7 @@ public sealed partial class MainWindow
     private async void ImportProfiles_Click(object sender, RoutedEventArgs e) => await GuardAsync(async () =>
     {
         var picker = new Windows.Storage.Pickers.FileOpenPicker(); picker.FileTypeFilter.Add(".json");
-        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+        InitializePicker(picker);
         var file = await picker.PickSingleFileAsync(); if (file is null) return;
         if (new FileInfo(file.Path).Length > 1024 * 1024) { FeedbackMessage("Profile file is too large.", InfoBarSeverity.Error); return; }
         LaunchProfile[]? profiles;
