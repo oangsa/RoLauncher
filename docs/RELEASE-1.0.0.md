@@ -1,19 +1,22 @@
 # RoLauncher 1.0.0
 
-First public installer release on 2026-10-06 under the RoLauncher name at the explicitly requested version 1.0.0. The Windows entry point is `RoLauncher.exe`, with `RoLauncher.Desktop` companion files. Application UI, tray actions, browser sign-in, Discord identity, user agents, exports, project names, documentation and update package matching use the new brand and the selected launch-arrow icon. Packages are named `rolauncher-v1.0.0-*`; earlier local release artifacts are preserved.
+First public installer release · 2026-10-06 · Windows x64
 
-New installs use `%LOCALAPPDATA%\RoLauncher`. Existing `%LOCALAPPDATA%\RbxTools` data is reused when the new folder has no accounts database, including when an update download has created a cache there, so accounts, profiles, history and encrypted backups remain available without credential copying. New `.rolbackup` files and existing `.rbxbackup` files are supported. Both old and new application coordination locks are held to prevent simultaneous supervision by the two brands.
+## What's new
 
-Saved sessions and dependable recovery is the major product milestone. The release adds account groups, saved launch profiles and an atomic shared editor for selected or all accounts. The shared editor covers every editable per-account setting: aliases (including per-account patterns), Place/Job/private destinations, rejoin, group and fallback. Apply controls preserve omitted/mixed values; Cancel, invalid input, removed accounts and failed persistence cannot partially save the batch.
+- RoLauncher name and selected launch-arrow icon.
+- Per-user `.exe` installer, shortcuts, and uninstall support.
+- Automatic update checks: **Download → Relaunch** backs up data, installs, and reopens. Roblox stays open.
+- Account groups, saved launch profiles, and batch editing.
+- Recovery dashboard, fallback policies, activity history, and encrypted backups.
+- GitHub CI releases with portable/source ZIPs, license notices, and SHA256 checksums.
 
-Profiles snapshot individual account settings and support review/apply/launch, replacement/renaming, deletion and JSON import/export. Profile launch uses the existing shared queue; already running clients remain open. Exported profiles contain private links and account metadata, but no authentication credentials.
+## Existing data
 
-The Recovery page shows reasons, retry countdowns and policy status, with Retry now for eligible scheduled retries and guided same-account browser repair. Fallback policies are Allow public (the previous default), Stay on destination, and Pause and notify; only definitive unavailability activates them. Rate-limit cooldowns, ownership checks and authentication pauses remain enforced.
+Legacy RbxTools accounts and backups remain supported. A download cache cannot hide legacy data; a RoLauncher accounts database takes priority. Uninstall retains saved data.
 
-Persistent history keeps 1,000 safe events with account filters. Support-report export uses allowlisted fields and excludes credentials, private links, trackers and raw errors/logs. Ten whole-file DPAPI backups support automatic previous-state/pre-upgrade protection, manual snapshots, validated stopped-account restore and offline corruption recovery. Restored accounts stay stopped. Backups remain bound to the Windows user.
+## Validation
 
-Automatic update checks use the official `oangsa/RoLauncher` GitHub repository at startup and every six hours. Press Download to fetch a newer stable installer and verify SHA256, then Relaunch to create a backup, close RoLauncher, install silently and reopen with the same data directory and API port. The helper waits for both application processes using their original exit handles. Roblox clients stay open. Download cancellation and failed preparation leave the current app running. No Roblox credentials or local API token are sent to GitHub.
+Automated tests, installer checks, and package verification passed. Full real-client recovery, Discord delivery, and resource measurements remain unverified. The installer is unsigned.
 
-`rolauncher-v1.0.0-setup-x64.exe` installs per user with a Start menu shortcut and uninstall support; no administrator access is required. It includes the complete self-contained desktop, WebView2Loader.dll, notices and AGENTS.md. The portable Windows ZIP, corresponding source ZIP and SHA256SUMS are also included. Main CI verifies and publishes all four files with the reviewed changelog through the feature PR → dev → main flow. Published artifacts are not replaced. The installer is not code-signed, so Windows may show an unknown-publisher prompt.
-
-Automated checks and real-client limitations are recorded in VALIDATION.md. Live multi-account launch, end-to-end Roblox recovery, real Discord delivery and 10/50-client resource measurements remain required before claiming those integrations are verified. This artifact does not claim those checks have passed.
+[User guide](https://github.com/oangsa/RoLauncher/blob/v1.0.0/docs/USAGE.md) · [Validation](https://github.com/oangsa/RoLauncher/blob/v1.0.0/docs/VALIDATION.md) · [Changelog](https://github.com/oangsa/RoLauncher/blob/v1.0.0/CHANGELOG.md)
