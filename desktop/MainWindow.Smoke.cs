@@ -255,8 +255,14 @@ public sealed partial class MainWindow
             Assert(quickStart is not null && quickStop is not null && quickRestart is not null, "Every row exposes three lifecycle quick actions.");
             Root.UpdateLayout();
             var rowDelete = FindVisual<Button>(rowContainer, "RowDetailsButton")!;
+            var tableEdge = rowDelete.TransformToVisual(AccountTable).TransformPoint(new Windows.Foundation.Point(rowDelete.ActualWidth, 0));
+            Assert(tableEdge.X <= AccountTable.ActualWidth, "Row actions fit inside the account table.");
+            AccountTableScroll.ChangeView(AccountTableScroll.ScrollableWidth, null, null, true);
+            await Task.Delay(150);
+            Root.UpdateLayout();
             var actionEdge = rowDelete.TransformToVisual(AccountTableScroll).TransformPoint(new Windows.Foundation.Point(rowDelete.ActualWidth, 0));
-            Assert(actionEdge.X <= AccountTableScroll.ActualWidth, "Row actions fit the account table viewport at the default window size.");
+            Assert(actionEdge.X <= AccountTableScroll.ActualWidth + 1, "Horizontal scrolling makes row actions visible in a narrow viewport.");
+            AccountTableScroll.ChangeView(0, null, null, true);
             var selectionBefore = Selected().Select(r => r.Id).ToArray();
             ClearSelectionFrom(quickStart!);
             Assert(Selected().Select(r => r.Id).SequenceEqual(selectionBefore), "Clicking a row action preserves bulk selection.");
