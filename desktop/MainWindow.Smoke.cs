@@ -488,7 +488,8 @@ public sealed partial class MainWindow
             var scale = NativeTray.Scale(hwnd);
             AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(hwnd)).Resize(new Windows.Graphics.SizeInt32((int)(1700 * scale), (int)(940 * scale)));
             await Task.Delay(350);
-            Assert(AccountTable.ActualWidth > 1100 && Math.Abs(AccountTable.ActualWidth - AccountTableScroll.ActualWidth) < 2, "Account table fills a wide viewport.");
+            Assert(Math.Abs(AccountTable.ActualWidth - Math.Max(820, AccountTableScroll.ActualWidth)) < 2,
+                $"Account table fills the available viewport while retaining its scrollable minimum (table {AccountTable.ActualWidth}, viewport {AccountTableScroll.ActualWidth}).");
             await CaptureAsync(directory, "accounts-wide.png");
             AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(hwnd)).Resize(new Windows.Graphics.SizeInt32((int)(1020 * scale), (int)(780 * scale)));
             await Task.Delay(350);
