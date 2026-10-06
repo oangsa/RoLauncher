@@ -23,6 +23,7 @@
         </ResourceDictionary>
       </ResourceDictionary.ThemeDictionaries>
       <CornerRadius x:Key="ControlCornerRadius">8</CornerRadius>
+      <Thickness x:Key="InfoBarActionHorizontalOrientationMargin">16,4,0,4</Thickness>
       <local:StatusConverter x:Key="StatusBackground" Background="True"/>
       <local:StatusConverter x:Key="StatusForeground"/>
       <CornerRadius x:Key="OverlayCornerRadius">12</CornerRadius>

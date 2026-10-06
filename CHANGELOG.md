@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.2.1] — 2026-10-06
+
+- Center the update banner's Download, Cancel download and Relaunch button vertically with balanced spacing.
+
 ## [1.2.0] — 2026-10-06
 
 - Match the account group dropdown height to its adjacent action buttons.
