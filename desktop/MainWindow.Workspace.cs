@@ -2,6 +2,7 @@ using System.Net.Http;
 using System.Text.Json;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 
@@ -123,6 +124,9 @@ public sealed partial class MainWindow
         RunningMetric.Text = running.ToString(); RunningHint.Text = $"{pending} queued or launching";
         RejoiningMetric.Text = rejoining.ToString(); RejoiningHint.Text = "Reconnect grace or retry wait";
         AttentionMetric.Text = attention.Length.ToString(); AttentionHint.Text = "Paused or unverified status";
+        var longest = _rows.OrderByDescending(row => row.LongestSeconds).FirstOrDefault();
+        LongestStreakMetric.Text = longest is null ? "—" : AccountRow.FormatDuration(longest.LongestSeconds);
+        LongestStreakHint.Text = longest is null || longest.LongestSeconds == 0 ? "No recorded streak yet" : $"{longest.Alias} · @{longest.Account.Username}";
         var covered = accounts.Count(a => a.AutoRecovery && a.Target is not null);
         CoverageMetric.Text = total == 0 ? "—" : $"{covered * 100.0 / total:0}%";
         CoverageBar.Value = total == 0 ? 0 : covered * 100.0 / total;
@@ -174,6 +178,41 @@ public sealed partial class MainWindow
             DialogClearTarget.IsChecked = false;
         }
         SetEditorEnabled(!_saving);
+    }
+    private static bool IsCardControl(DependencyObject? source, object card)
+    {
+        for (var node = source; node is not null && !ReferenceEquals(node, card); node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node))
+            if (node is ButtonBase) return true;
+        return false;
+    }
+    private void GameCard_PointerEntered(object sender, PointerRoutedEventArgs e) => AnimateGameCard(sender, true);
+    private void GameCard_PointerExited(object sender, PointerRoutedEventArgs e) => AnimateGameCard(sender, false);
+    private void AnimateGameCard(object sender, bool hover)
+    {
+        if (sender is not Border card) return;
+        card.BorderBrush = new SolidColorBrush(hover ? (Root.ActualTheme == ElementTheme.Dark ? Windows.UI.Color.FromArgb(255, 212, 212, 216) : Windows.UI.Color.FromArgb(255, 113, 113, 122)) : (Root.ActualTheme == ElementTheme.Dark ? Windows.UI.Color.FromArgb(255, 63, 63, 70) : Windows.UI.Color.FromArgb(255, 228, 228, 231)));
+        var transform = card.RenderTransform as TranslateTransform ?? new TranslateTransform();
+        card.RenderTransform = transform;
+        var animation = new Microsoft.UI.Xaml.Media.Animation.DoubleAnimation
+        {
+            To = hover ? -4 : 0, Duration = TimeSpan.FromMilliseconds(140), EnableDependentAnimation = true
+        };
+        Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTarget(animation, transform);
+        Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTargetProperty(animation, "Y");
+        var storyboard = new Microsoft.UI.Xaml.Media.Animation.Storyboard();
+        storyboard.Children.Add(animation); storyboard.Begin();
+    }
+
+    private async void GameCard_Tapped(object sender, TappedRoutedEventArgs e)
+    {
+        if (IsCardControl(e.OriginalSource as DependencyObject, sender)) return;
+        if (sender is FrameworkElement { DataContext: GameProfile profile }) { e.Handled = true; await GuardAsync(() => EditGameAsync(profile)); }
+    }
+    private async void GameCard_KeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (IsCardControl(e.OriginalSource as DependencyObject, sender)) return;
+        if (e.Key is Windows.System.VirtualKey.Enter or Windows.System.VirtualKey.Space && sender is FrameworkElement { DataContext: GameProfile profile })
+        { e.Handled = true; await GuardAsync(() => EditGameAsync(profile)); }
     }
     private async void AddGame_Click(object sender, RoutedEventArgs e) => await GuardAsync(() => EditGameAsync(null));
     private async void EditGame_Click(object sender, RoutedEventArgs e)

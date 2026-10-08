@@ -26,6 +26,7 @@ if args[0] == "run":
     assert "--share=network" in args
     assert "--device=input" in args
     assert f"--filesystem={home}" in args
+    assert f"--env=HOME={home}" in args
     assert f"--env=XDG_DATA_HOME={home}/.var/app/org.vinegarhq.Sober/data" in args
 else:
     assert args == ["info", "--show-ref", "org.vinegarhq.Sober"]

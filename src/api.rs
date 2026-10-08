@@ -64,6 +64,7 @@ pub fn router(engine: Engine) -> Router {
             get(discord_settings).patch(discord_update),
         )
         .route("/v1/settings/discord/test", post(discord_test))
+        .route("/v1/settings/discord/bot/{action}", post(bot_control))
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn_with_state(engine.clone(), authenticate))
         .with_state(engine)
@@ -252,6 +253,12 @@ async fn discord_update(
     Json(patch): Json<crate::discord::DiscordPatch>,
 ) -> Result<Json<crate::discord::DiscordView>, ApiError> {
     engine.set_discord(patch).map(Json).map_err(error)
+}
+async fn bot_control(
+    State(engine): State<Engine>,
+    Path(action): Path<String>,
+) -> Result<Json<crate::discord::DiscordView>, ApiError> {
+    engine.bot_control(&action).map(Json).map_err(error)
 }
 async fn discord_test(State(engine): State<Engine>) -> Result<StatusCode, ApiError> {
     engine
@@ -650,12 +657,18 @@ mod tests {
         )
         .unwrap();
         let app = router(engine.clone());
-        for route in ["/v1/settings/discord", "/v1/settings/discord/test"] {
+        for route in [
+            "/v1/settings/discord",
+            "/v1/settings/discord/test",
+            "/v1/settings/discord/bot/start",
+            "/v1/settings/discord/bot/stop",
+            "/v1/settings/discord/bot/restart",
+        ] {
             let response = app
                 .clone()
                 .oneshot(
                     Request::builder()
-                        .method(if route.ends_with("test") {
+                        .method(if route.ends_with("test") || route.contains("/bot/") {
                             "POST"
                         } else {
                             "GET"

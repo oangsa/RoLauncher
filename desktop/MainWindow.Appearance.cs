@@ -50,7 +50,7 @@ public sealed partial class MainWindow
         ? Microsoft.UI.ColorHelper.FromArgb(255, 212, 212, 216) : Microsoft.UI.ColorHelper.FromArgb(255, 24, 24, 27));
     private void AccountTable_SizeChanged(object sender, SizeChangedEventArgs e)
     {
-        if (AccountTable is not null) AccountTable.Width = Math.Max(820, e.NewSize.Width);
+        if (AccountTable is not null) AccountTable.Width = Math.Max(AccountTable.MinWidth, e.NewSize.Width);
     }
     private AccountRow[] PresetSelected() => _rows.Where(row => _presetChosenIds.Contains(row.Id)).ToArray();
     private HashSet<string> PresetLookupIds => _presetLookupDraftIds ?? _presetChosenIds;

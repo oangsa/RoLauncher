@@ -178,7 +178,14 @@ pub struct Account {
     pub failures: u32,
     pub next_retry: Option<DateTime<Utc>>,
     pub connected_since: Option<DateTime<Utc>>,
+    /// Managed run; disconnects and automatic rejoins do not reset it.
+    #[serde(default)]
+    pub running_since: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub longest_streak_seconds: u64,
     pub disconnected_since: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub disconnect_notified: bool,
     pub last_error: Option<String>,
     pub operation_id: Option<Uuid>,
     #[serde(default)]
@@ -207,13 +214,35 @@ impl Account {
             failures: 0,
             next_retry: None,
             connected_since: None,
+            running_since: None,
+            longest_streak_seconds: 0,
             disconnected_since: None,
+            disconnect_notified: false,
             last_error: None,
             operation_id: None,
             public_fallback_active: false,
             fallback_policy: FallbackPolicy::default(),
             group: String::new(),
             recovery_reason: String::new(),
+        }
+    }
+    pub fn running_seconds(&self, now: DateTime<Utc>) -> u64 {
+        self.running_since
+            .map_or(0, |since| (now - since).num_seconds().max(0) as u64)
+    }
+    pub fn finish_run(&mut self, now: DateTime<Utc>) {
+        self.longest_streak_seconds = self.longest_streak_seconds.max(self.running_seconds(now));
+        self.running_since = None;
+    }
+    pub fn track_run(&mut self, now: DateTime<Utc>) {
+        if !self.desired_running {
+            self.finish_run(now);
+        } else {
+            if self.running_since.is_none() && self.status == Status::Running {
+                self.running_since = Some(self.connected_since.unwrap_or(now));
+            }
+            self.longest_streak_seconds =
+                self.longest_streak_seconds.max(self.running_seconds(now));
         }
     }
     pub fn effective_target(&self) -> Option<Target> {
@@ -248,6 +277,8 @@ pub struct Database {
     pub retired_launches: Vec<RetiredLaunch>,
     #[serde(default)]
     pub discord: crate::discord::SavedDiscord,
+    #[serde(default)]
+    pub discord_bot_running: bool,
     #[serde(default)]
     pub profiles: Vec<LaunchProfile>,
     #[serde(default)]
@@ -315,6 +346,50 @@ mod tests {
         assert!(t.validate().is_ok());
         t.job_id = Some(Uuid::new_v4());
         assert!(t.validate().is_err());
+    }
+    #[test]
+    fn managed_runs_survive_disconnects_and_restarts_and_keep_the_best() {
+        let start = Utc::now() - chrono::Duration::hours(2);
+        let mut account = Account::new("1".into(), "test".into());
+        account.desired_running = true;
+        account.status = Status::Launching;
+        account.track_run(start);
+        assert!(account.running_since.is_none());
+        account.status = Status::Running;
+        account.connected_since = Some(start);
+        account.track_run(start);
+        for status in [
+            Status::Reconnecting,
+            Status::Backoff,
+            Status::Queued,
+            Status::Unknown,
+            Status::Running,
+        ] {
+            account.status = status;
+            account.connected_since = None;
+            account.track_run(start + chrono::Duration::hours(1));
+            assert_eq!(account.running_since, Some(start));
+            assert_eq!(account.longest_streak_seconds, 3600);
+        }
+        let mut reopened: Account =
+            serde_json::from_str(&serde_json::to_string(&account).unwrap()).unwrap();
+        reopened.desired_running = false;
+        reopened.track_run(start + chrono::Duration::hours(2));
+        assert!(reopened.running_since.is_none());
+        assert_eq!(reopened.longest_streak_seconds, 7200);
+        reopened.desired_running = true;
+        reopened.track_run(start + chrono::Duration::hours(3));
+        reopened.finish_run(start + chrono::Duration::hours(3) + chrono::Duration::minutes(5));
+        assert_eq!(reopened.longest_streak_seconds, 7200);
+        assert_eq!(reopened.running_seconds(start), 0);
+        let mut old = serde_json::to_value(account).unwrap();
+        old.as_object_mut().unwrap().remove("running_since");
+        old.as_object_mut()
+            .unwrap()
+            .remove("longest_streak_seconds");
+        let migrated: Account = serde_json::from_value(old).unwrap();
+        assert!(migrated.running_since.is_none());
+        assert_eq!(migrated.longest_streak_seconds, 0);
     }
     #[test]
     fn backoff_is_bounded() {

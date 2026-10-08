@@ -283,6 +283,7 @@ impl Ui {
             } else {
                 Some(url.trim().into())
             },
+            bot: None,
         });
         match result {
             Ok(_) => {
@@ -830,6 +831,7 @@ impl Ui {
                     enabled: Some(false),
                     webhook_url: Some(String::new()),
                     notify_recovery: None,
+                    bot: None,
                 });
                 if let Err(error) = result {
                     message(&error);

@@ -19,6 +19,8 @@ with tempfile.TemporaryDirectory() as temp:
     shutil.copy2(root / "docs/RELEASE-1.4.0.md", fixture / "docs/RELEASE-1.4.0.md")
     for name in ("versioning.py", "prepare-release.py"):
         shutil.copy2(root / "scripts" / name, fixture / "scripts" / name)
+    # Keep this fixture independent of the repository's upcoming release target.
+    write_version(fixture, "1.4.0")
     first, second = stamp(fixture), stamp(fixture)
     assert first != second and core(first) == core(second) == "1.4.0"
     assert tomllib.loads((fixture / "Cargo.toml").read_text())["package"]["version"] == second
