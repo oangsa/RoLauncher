@@ -10,7 +10,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -36,6 +36,7 @@ struct Inner {
     events: broadcast::Sender<Snapshot>,
     shutdown: AtomicBool,
     launch_allowed: Arc<AtomicBool>,
+    bot_generation: AtomicU64,
     discord: crate::discord::Discord,
 }
 #[derive(Clone)]
@@ -132,6 +133,7 @@ impl Engine {
         };
         for saved in &mut database.accounts {
             let a = &mut saved.account;
+            a.track_run(Utc::now());
             resume_after_confirmed_close(a);
             if a.desired_running && a.status != Status::NeedsAttention {
                 a.status = if a.process.is_some() || a.tracker.is_some() {
@@ -149,6 +151,10 @@ impl Engine {
         store.save(&database)?;
         let (events, _) = broadcast::channel(128);
         let discord = crate::discord::Discord::new(database.discord.clone())?;
+        let bot_running = database.discord_bot_running && database.discord.bot.enabled;
+        if bot_running {
+            discord.bot_status("starting", "Connecting to Discord…");
+        }
         Ok(Self(Arc::new(Inner {
             state: Mutex::new(State {
                 database,
@@ -162,6 +168,7 @@ impl Engine {
             wake: Notify::new(),
             events,
             shutdown: AtomicBool::new(false),
+            bot_generation: AtomicU64::new(u64::from(bot_running)),
             launch_allowed,
             discord,
         })))
@@ -207,6 +214,24 @@ impl Engine {
         let mut current = self.0.state.lock().unwrap();
         let mut next = current.clone();
         let result = edit(&mut next)?;
+        let now = Utc::now();
+        for saved in &mut next.database.accounts {
+            let a = &mut saved.account;
+            a.track_run(now);
+            if a.status == Status::Reconnecting && a.desired_running {
+                let known_error = a.last_error.as_deref().is_some_and(|e| {
+                    e.starts_with("Session lost (code") || e.starts_with("Connection failed:")
+                });
+                if known_error
+                    || a.disconnected_since
+                        .is_some_and(|t| Utc::now() - t >= ChronoDuration::seconds(30))
+                {
+                    a.disconnect_notified = true;
+                }
+            } else {
+                a.disconnect_notified = false;
+            }
+        }
         management::record_activity(&current, &mut next);
         self.0.store.save(&next.database)?;
         while next.operations.len() > 1000 {
@@ -238,8 +263,15 @@ impl Engine {
                 .accounts
                 .iter()
                 .find(|a| a.account.id == saved.account.id)
-                && let Some(notice) = crate::discord::account_notice(&old.account, &saved.account)
+                && let Some(mut notice) =
+                    crate::discord::account_notice(&old.account, &saved.account)
             {
+                notice.game_name = next
+                    .database
+                    .game_profiles
+                    .iter()
+                    .find(|p| Some(p.target.place_id) == notice.place_id)
+                    .map(|p| p.game_name.clone());
                 let _ = self.0.discord.record(notice, false);
             }
         }
@@ -252,6 +284,93 @@ impl Engine {
     }
     pub fn discord_settings(&self) -> crate::discord::DiscordView {
         self.0.discord.view()
+    }
+    pub(crate) fn bot_settings(&self) -> crate::discord_bot::SavedBot {
+        let mut saved = self.0.state.lock().unwrap().database.discord.bot.clone();
+        saved.registration = None;
+        saved
+    }
+    pub(crate) fn bot_generation(&self) -> u64 {
+        self.0.bot_generation.load(Ordering::Acquire)
+    }
+    pub(crate) fn bot_status(&self, generation: u64, state: &str, value: &str) {
+        if self.bot_generation() == generation {
+            self.0.discord.bot_status(state, value);
+        }
+    }
+    pub(crate) fn bot_online_notice(&self, generation: u64, value: &str) {
+        if self.bot_generation() == generation {
+            self.0.discord.bot_online_notice(value);
+        }
+    }
+    pub fn bot_control(&self, action: &str) -> Result<crate::discord::DiscordView, String> {
+        if !matches!(action, "start" | "stop" | "restart") {
+            return Err("Unsupported bot control".into());
+        }
+        let settings = self.bot_settings();
+        if action != "stop"
+            && (!settings.enabled
+                || settings.encrypted_token.is_empty()
+                || settings.guild_id.is_empty()
+                || settings.allowed_users.is_empty())
+        {
+            return Err("Save and enable bot commands before starting the bot".into());
+        }
+        self.transaction(|s| {
+            s.database.discord_bot_running = action != "stop";
+            Ok(())
+        })?;
+        let generation = self
+            .0
+            .bot_generation
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |old| match action {
+                "start" if old % 2 == 1 => Some(old),
+                "start" | "restart" => Some((old / 2 + 1) * 2 + 1),
+                "stop" => Some((old / 2 + 1) * 2),
+                _ => None,
+            })
+            .map_err(|_| "Unsupported bot control")?;
+        if action != "start" || generation.is_multiple_of(2) {
+            self.0.discord.bot_status(
+                if action == "stop" {
+                    "offline"
+                } else {
+                    "starting"
+                },
+                if action == "stop" {
+                    "Bot stopped. Saved settings are retained."
+                } else {
+                    "Connecting to Discord…"
+                },
+            );
+        }
+        Ok(self.discord_settings())
+    }
+    pub(crate) fn bot_registration(&self) -> Option<crate::discord_bot::StatusRegistration> {
+        self.0
+            .state
+            .lock()
+            .unwrap()
+            .database
+            .discord
+            .bot
+            .registration
+            .clone()
+    }
+    pub(crate) fn set_bot_registration(
+        &self,
+        settings: &crate::discord_bot::SavedBot,
+        registration: crate::discord_bot::StatusRegistration,
+    ) -> Result<(), String> {
+        self.transaction(|s| {
+            let mut current = s.database.discord.bot.clone();
+            current.registration = None;
+            if &current != settings {
+                return Err("Bot settings changed".into());
+            }
+            s.database.discord.bot.registration = Some(registration);
+            Ok(())
+        })
     }
     pub fn set_discord(
         &self,
@@ -271,6 +390,9 @@ impl Engine {
         self.transaction_inner(
             |s| {
                 let discord = &mut s.database.discord;
+                if let Some(bot) = &patch.bot {
+                    discord.bot = bot.apply(&discord.bot)?;
+                }
                 if let Some(value) = encrypted {
                     discord.encrypted_webhook = value;
                 }
@@ -287,6 +409,9 @@ impl Engine {
             },
             true,
         )?;
+        if patch.bot.is_some() && !self.bot_settings().enabled {
+            self.bot_control("stop")?;
+        }
         Ok(self.discord_settings())
     }
     pub fn test_discord(&self) -> Result<(), String> {
@@ -364,6 +489,25 @@ impl Engine {
         })
     }
     pub fn command(&self, id: &str, action: &str) -> Result<Operation, String> {
+        self.command_inner(id, action, None)
+    }
+    pub(crate) fn bot_command(
+        &self,
+        settings: &crate::discord_bot::SavedBot,
+        id: &str,
+        action: &str,
+    ) -> Result<Operation, String> {
+        if !matches!(action, "stop" | "restart") {
+            return Err("Unsupported bot action".into());
+        }
+        self.command_inner(id, action, Some(settings))
+    }
+    fn command_inner(
+        &self,
+        id: &str,
+        action: &str,
+        bot: Option<&crate::discord_bot::SavedBot>,
+    ) -> Result<Operation, String> {
         if action == "retry" {
             return self.retry_now(id);
         }
@@ -371,6 +515,7 @@ impl Engine {
             return Err("Unknown command".into());
         }
         self.transaction(|s| {
+            if bot.is_some_and(|b| { let mut saved = s.database.discord.bot.clone(); saved.registration = None; !b.enabled || *b != saved || self.bot_generation().is_multiple_of(2) }) || self.is_shutdown() { return Err("Command connection changed".into()); }
             let existing = account_mut(s,id)?.clone();
             if (action == "start" && existing.desired_running && existing.status != Status::NeedsAttention) || (action == "stop" && !existing.desired_running) {
                 if let Some(op) = existing.operation_id.and_then(|id|s.operations.get(&id)).cloned() { return Ok(op); }
@@ -385,7 +530,7 @@ impl Engine {
             if existing.process.is_none() && let Some(tracker)=existing.tracker {
                 s.database.retired_launches.push(RetiredLaunch {tracker,generation:existing.generation,account_id:id.into(),deadline:existing.ownership_deadline.unwrap_or_else(||Utc::now()+ChronoDuration::seconds(90))});
             }
-            let a = account_mut(s,id)?; a.desired_running = action != "stop";
+            let a = account_mut(s,id)?; a.finish_run(Utc::now()); a.desired_running = action != "stop";
             if a.process.is_none() { a.tracker=None;a.ownership_deadline=None; }
             a.generation = Uuid::new_v4(); a.failures = 0; a.next_retry = None; a.connected_since = None; a.disconnected_since = None; a.last_error = None;
             a.status = if action == "stop" { Status::Stopped } else { Status::Queued };
@@ -449,7 +594,11 @@ impl Engine {
     pub fn spawn(&self) {
         let engine = self.clone();
         tokio::spawn(async move {
-            engine.0.discord.run().await;
+            crate::discord_bot::run(engine).await;
+        });
+        let engine = self.clone();
+        tokio::spawn(async move {
+            engine.0.discord.run(Some(engine.clone())).await;
         });
         let engine = self.clone();
         tokio::spawn(async move {
@@ -633,6 +782,7 @@ impl Engine {
         let mut last_discovery = Instant::now() - Duration::from_secs(30);
         let mut last_log_discovery = Instant::now() - Duration::from_secs(30);
         let mut close_attempts: HashMap<(u32, String), Instant> = HashMap::new();
+        let mut exit_watches: HashMap<(u32, String), platform::ExitWatch> = HashMap::new();
         while !self.is_shutdown() {
             let retired = self
                 .0
@@ -723,12 +873,19 @@ impl Engine {
                     continue;
                 };
                 let key = (identity.pid, identity.creation_time.clone());
+                if !exit_watches.contains_key(&key)
+                    && let Some(watch) = platform::ExitWatch::new(&identity)
+                {
+                    exit_watches.insert(key.clone(), watch);
+                }
                 if !account.auto_recovery && account.last_error.as_deref() == Some(REJOIN_DISABLED)
                 {
                     close_attempts.remove(&key);
                 }
                 match platform::alive(&identity) {
                     Ok(false) => {
+                        let clean =
+                            exit_watches.remove(&key).and_then(|w| w.clean_exit()) == Some(true);
                         tails.remove(&key);
                         close_attempts.remove(&key);
                         let _ = self.update(&account.id, account.generation, |a| {
@@ -755,6 +912,10 @@ impl Engine {
                             } else if !a.desired_running || !a.auto_recovery {
                                 a.desired_running = false;
                                 a.status = Status::Stopped;
+                            }
+                            if clean && !account.disconnect_notified {
+                                a.last_error = Some("Client closed normally".into());
+                                a.recovery_reason = "NormalExit".into();
                             }
                         });
                         if !account.desired_running {
@@ -796,6 +957,15 @@ impl Engine {
                     }
                 }
                 // Read fresh reconnect/disconnect events before deciding to replace a client.
+                if !account.disconnect_notified
+                    && account.status == Status::Reconnecting
+                    && account
+                        .disconnected_since
+                        .is_some_and(|t| Utc::now() - t >= ChronoDuration::seconds(30))
+                {
+                    self.0.discord.prepare_capture(&identity).await;
+                    let _ = self.update(&account.id, account.generation, |_| {});
+                }
                 let Some(account) = self.snapshot().accounts.into_iter().find(|a| {
                     a.id == account.id
                         && a.generation == account.generation
@@ -983,6 +1153,60 @@ fn apply_failure(a: &mut Account, error: &Failure) {
 mod tests {
     use super::*;
     #[test]
+    fn bot_controls_reuse_saved_settings_without_starting_on_save() {
+        let path = std::env::temp_dir().join(format!("rbx-bot-control-test-{}", Uuid::new_v4()));
+        let engine = Engine::open(Store::new(path.clone()).unwrap(), "test".into()).unwrap();
+        let mut patch = crate::discord::DiscordPatch::default();
+        patch.bot = Some(crate::discord_bot::BotPatch {
+            enabled: Some(true),
+            token: Some("TEST_BOT_TOKEN".into()),
+            guild_id: Some("42".into()),
+            allowed_users: Some(vec!["123".into()]),
+        });
+        engine.set_discord(patch).unwrap();
+        let saved = engine.bot_settings();
+        assert_eq!(engine.bot_generation(), 0);
+        assert_eq!(engine.discord_settings().bot.connection_state, "offline");
+        assert!(engine.bot_control("invalid").is_err());
+        engine.bot_control("start").unwrap();
+        let first = engine.bot_generation();
+        assert_eq!(first % 2, 1);
+        engine.bot_control("start").unwrap();
+        assert_eq!(engine.bot_generation(), first);
+        engine.bot_control("restart").unwrap();
+        assert!(engine.bot_generation() > first);
+        engine.bot_status(first, "online", "stale connection");
+        assert_eq!(engine.discord_settings().bot.connection_state, "starting");
+        let registration = crate::discord_bot::StatusRegistration {
+            guild_id: "42".into(),
+            channel_id: 43,
+            message_id: 44,
+            page: 1,
+        };
+        engine
+            .set_bot_registration(&saved, registration.clone())
+            .unwrap();
+        assert!(engine.bot_settings() == saved);
+        assert!(engine.bot_registration() == Some(registration.clone()));
+        engine.bot_control("stop").unwrap();
+        assert_eq!(engine.bot_generation() % 2, 0);
+        assert!(engine.bot_settings() == saved);
+        engine.bot_control("start").unwrap();
+        assert_eq!(engine.bot_generation() % 2, 1);
+        let reopened = Engine::open(Store::new(path.clone()).unwrap(), "test".into()).unwrap();
+        assert!(reopened.bot_settings() == saved);
+        assert!(reopened.bot_registration() == Some(registration));
+        assert_eq!(reopened.bot_generation(), 1);
+        reopened.bot_control("stop").unwrap();
+        let stopped = Engine::open(Store::new(path.clone()).unwrap(), "test".into()).unwrap();
+        assert_eq!(stopped.bot_generation(), 0);
+        stopped.shutdown();
+        engine.shutdown();
+        reopened.shutdown();
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
     fn start_recovers_when_launch_coordination_becomes_ready() {
         let (engine, path) = fixture(1);
         let gate = engine.0.launch_allowed.clone();
@@ -1009,6 +1233,7 @@ mod tests {
                 enabled: Some(true),
                 webhook_url: Some(hook.into()),
                 notify_recovery: Some(true),
+                bot: None,
             })
             .unwrap();
         let saved = std::fs::read_to_string(path.join("accounts.json")).unwrap();
@@ -1029,7 +1254,7 @@ mod tests {
         engine.signal("1", generation, Signal::Disconnected);
         engine.signal("1", generation, Signal::SessionLost(Some(267)));
         let count = engine.discord_settings().recent.len();
-        assert_eq!(count, 2); // Generic disconnect followed by the more specific kick.
+        assert_eq!(count, 1); // Transient disconnect is silent; the confirmed kick is reported.
         engine.signal("1", generation, Signal::ConnectionFailed);
         engine.signal("1", generation, Signal::SessionLost(None));
         engine.signal("1", generation, Signal::SessionLost(Some(267)));
@@ -1045,6 +1270,7 @@ mod tests {
                 enabled: None,
                 webhook_url: None,
                 notify_recovery: None,
+                bot: None,
             })
             .unwrap();
         assert!(
@@ -1063,11 +1289,41 @@ mod tests {
                 .set_discord(crate::discord::DiscordPatch {
                     enabled: Some(false),
                     webhook_url: None,
-                    notify_recovery: None
+                    notify_recovery: None,
+                    bot: None,
                 })
                 .is_err()
         );
         assert!(engine.discord_settings().enabled);
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+    #[test]
+    fn discord_redirect_grace_only_reports_persistent_disconnects_and_recovers_once() {
+        let (engine, path) = fixture(1);
+        engine.command("1", "start").unwrap();
+        let generation = engine.snapshot().accounts[0].generation;
+        engine.signal("1", generation, Signal::Connected);
+        engine.signal("1", generation, Signal::Disconnected);
+        engine.signal("1", generation, Signal::Connected);
+        assert!(engine.discord_settings().recent.is_empty());
+        engine.signal("1", generation, Signal::Disconnected);
+        engine
+            .update("1", generation, |a| {
+                a.disconnected_since = Some(Utc::now() - ChronoDuration::seconds(31))
+            })
+            .unwrap();
+        assert_eq!(engine.discord_settings().recent.len(), 1);
+        engine.update("1", generation, |_| {}).unwrap();
+        assert_eq!(engine.discord_settings().recent.len(), 1);
+        engine.signal("1", generation, Signal::Connected);
+        assert_eq!(engine.discord_settings().recent.len(), 2);
+        assert_eq!(
+            engine.discord_settings().recent[0].title,
+            "Account is back online"
+        );
+        engine.command("1", "stop").unwrap();
+        assert_eq!(engine.discord_settings().recent.len(), 2);
         drop(engine);
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -1583,6 +1839,13 @@ mod tests {
             })
             .unwrap();
         engine.command("1", "start").unwrap();
+        let generation = engine.snapshot().accounts[0].generation;
+        engine.signal("1", generation, Signal::Connected);
+        engine
+            .update("1", generation, |a| {
+                a.running_since = Some(Utc::now() - ChronoDuration::hours(2))
+            })
+            .unwrap();
         let backup = engine.backup().unwrap();
         let blob = std::fs::read_to_string(path.join("backups").join(&backup)).unwrap();
         assert!(!blob.contains("TEST_SESSION_SECRET"));
@@ -1594,6 +1857,8 @@ mod tests {
         let a = engine.snapshot().accounts.remove(0);
         assert_eq!(a.status, Status::Stopped);
         assert!(!a.desired_running);
+        assert!(a.running_since.is_none());
+        assert!(a.longest_streak_seconds >= 7200);
         assert!(a.process.is_none() && a.tracker.is_none());
         assert_eq!(engine.token(), token);
         assert!(engine.restore("../accounts.json").is_err());
@@ -1617,6 +1882,35 @@ mod tests {
                     .to_string_lossy()
                     .starts_with("accounts-before-restore-"))
         );
+        std::fs::remove_dir_all(path).unwrap();
+    }
+    #[test]
+    fn account_run_persists_through_reopen_and_ends_on_manual_restart_or_stop() {
+        let (engine, path) = fixture(1);
+        engine.command("1", "start").unwrap();
+        let generation = engine.snapshot().accounts[0].generation;
+        engine.signal("1", generation, Signal::Connected);
+        let start = Utc::now() - ChronoDuration::hours(2);
+        engine
+            .update("1", generation, |a| a.running_since = Some(start))
+            .unwrap();
+        engine.signal("1", generation, Signal::Disconnected);
+        let reopened = Engine::open(Store::new(path.clone()).unwrap(), "test".into()).unwrap();
+        assert_eq!(reopened.snapshot().accounts[0].running_since, Some(start));
+        drop(reopened);
+        engine.command("1", "restart").unwrap();
+        let account = engine.snapshot().accounts[0].clone();
+        assert!(account.running_since.is_none());
+        assert!(account.longest_streak_seconds >= 7200);
+        engine.signal("1", account.generation, Signal::Connected);
+        engine.command("1", "stop").unwrap();
+        let reopened = Engine::open(Store::new(path.clone()).unwrap(), "test".into()).unwrap();
+        assert!(reopened.snapshot().accounts[0].running_since.is_none());
+        assert!(reopened.snapshot().accounts[0].longest_streak_seconds >= 7200);
+        engine.shutdown();
+        reopened.shutdown();
+        drop(engine);
+        drop(reopened);
         std::fs::remove_dir_all(path).unwrap();
     }
     fn fixture(count: usize) -> (Engine, std::path::PathBuf) {

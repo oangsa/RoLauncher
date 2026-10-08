@@ -1,7 +1,9 @@
 pub mod api;
+pub mod capture;
 #[cfg(any(windows, target_os = "linux"))]
 pub mod desktop;
 pub mod discord;
+pub mod discord_bot;
 pub mod engine;
 #[cfg(windows)]
 pub mod login;

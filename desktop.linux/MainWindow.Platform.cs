@@ -36,7 +36,8 @@ public sealed partial class MainWindow
     private void SelectAllRows()
     {
         foreach (var row in _visibleRows)
-            if (!AccountList.SelectedItems.Contains(row)) AccountList.SelectedItems.Add(row);
+            row.IsSelected = true;
+        UpdateSelectionSettings();
     }
     private static bool IsControlDown() => Microsoft.UI.Xaml.Window.Current?.CoreWindow?.GetKeyState(VirtualKey.Control)
         .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down) == true;

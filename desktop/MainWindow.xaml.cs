@@ -58,7 +58,7 @@ public sealed partial class MainWindow : Window
 #endif
     }
 
-    private AccountRow[] Selected() => AccountList.SelectedItems.Cast<AccountRow>().Where(_visibleRows.Contains).ToArray();
+    private AccountRow[] Selected() => _visibleRows.Where(r => r.IsSelected).ToArray();
     private async Task GuardAsync(Func<Task> action, bool backgroundFeedback = false)
     {
         void Report(string message, InfoBarSeverity severity)
@@ -123,6 +123,17 @@ public sealed partial class MainWindow : Window
             _discordReady = true;
             DiscordEnabled.IsChecked = discord.Enabled;
             DiscordRecovery.IsChecked = discord.NotifyRecovery;
+            if (discord.Bot is { } bot)
+            {
+                BotStatus.Text = bot.Status;
+                BotConnection.Text = bot.ConnectionState switch { "online" => "Online", "starting" => "Starting", _ => "Offline" };
+                BotConnection.Foreground = new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255,
+                    bot.ConnectionState == "online" ? (byte)46 : bot.ConnectionState == "starting" ? (byte)202 : (byte)220,
+                    bot.ConnectionState == "online" ? (byte)160 : bot.ConnectionState == "starting" ? (byte)155 : (byte)60,
+                    bot.ConnectionState == "online" ? (byte)67 : bot.ConnectionState == "starting" ? (byte)30 : (byte)60));
+                BotToken.PlaceholderText = bot.Configured ? "Token saved" : "Paste a bot token";
+                if (!_botLoaded) { BotEnabled.IsChecked = bot.Enabled; BotGuild.Text = bot.GuildId; BotUsers.Text = string.Join(", ", bot.AllowedUsers); _botLoaded = true; }
+            }
             DiscordStatus.Text = $"{(discord.Configured ? "Webhook saved" : "No webhook configured")} · {discord.DeliveryStatus}";
             // The API returns only the configured flag; never put the saved secret into the UI.
             WebhookInput.PlaceholderText = discord.Configured ? "●●●●●●●●●●●●●●●●" : "Paste a Discord webhook URL";
@@ -162,7 +173,7 @@ public sealed partial class MainWindow : Window
         {
             foreach (var row in _visibleRows.Where(r => !matches.Contains(r)).ToArray())
             {
-                AccountList.SelectedItems.Remove(row);
+                row.IsSelected = false;
                 _visibleRows.Remove(row);
             }
             for (var i = 0; i < matches.Length; i++)
@@ -174,13 +185,21 @@ public sealed partial class MainWindow : Window
         EmptyHint.Text = _rows.Count == 0 ? "Add your first account above to get started." : "Try another name or clear the filters.";
         UpdateSelectionSettings();
     }
-    private void AccountList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private async void AccountList_ItemClick(object sender, ItemClickEventArgs e)
     {
-        if (!_updating) UpdateSelectionSettings();
+        if (e.ClickedItem is AccountRow row) await GuardAsync(() => ShowAccountAsync(row));
+    }
+    private void AccountCheckbox_Click(object sender, RoutedEventArgs e) { if (sender is CheckBox { DataContext: AccountRow row } box) row.IsSelected = box.IsChecked == true; UpdateSelectionSettings(); }
+    private void SelectAccounts_Click(object sender, RoutedEventArgs e)
+    {
+        var select = SelectAccounts.IsChecked == true;
+        foreach (var row in _visibleRows) row.IsSelected = select;
+        UpdateSelectionSettings();
     }
     private void UpdateSelectionSettings()
     {
         var selected = Selected();
+        SelectAccounts.IsChecked = _visibleRows.Count > 0 && selected.Length == _visibleRows.Count;
         StartButton.IsEnabled = StopButton.IsEnabled = RestartButton.IsEnabled = RemoveButton.IsEnabled = selected.Length != 0;
         BulkEditButton.IsEnabled = selected.Length != 0;
         AccountCount.Text = $"{_visibleRows.Count} of {_rows.Count} accounts · {selected.Length} selected · Ctrl+A to select visible";
@@ -199,7 +218,8 @@ public sealed partial class MainWindow : Window
             if (node is ListViewItem or ButtonBase or TextBox or PasswordBox or ComboBox) return;
             if (node == Root) break;
         }
-        AccountList.SelectedItems.Clear();
+        foreach (var row in _rows) row.IsSelected = false;
+        UpdateSelectionSettings();
     }
     private async void RowAction_Click(object sender, RoutedEventArgs e)
     {
@@ -461,6 +481,28 @@ public sealed partial class MainWindow : Window
     {
         if (!_discordReady) return;
         await GuardAsync(async () => await _api.SendAsync(HttpMethod.Patch, "settings/discord", new { enabled = DiscordEnabled.IsChecked == true, notify_recovery = DiscordRecovery.IsChecked == true }));
+        await RefreshAsync();
+    }
+    private bool _botLoaded;
+    private async void BotSave_Click(object sender, RoutedEventArgs e)
+    {
+        var bot = new Dictionary<string, object?> { ["enabled"] = BotEnabled.IsChecked == true, ["guild_id"] = BotGuild.Text.Trim(), ["allowed_users"] = BotUsers.Text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) };
+        if (!string.IsNullOrWhiteSpace(BotToken.Password)) bot["token"] = BotToken.Password;
+        await GuardAsync(async () => { await _api.SendAsync(HttpMethod.Patch, "settings/discord", new { bot }); BotToken.Password = ""; _botLoaded = false; FeedbackMessage("Bot settings saved."); });
+        await RefreshAsync();
+    }
+    private async void BotControl_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: string action })
+        {
+            await GuardAsync(async () => { await _api.SendAsync(HttpMethod.Post, $"settings/discord/bot/{action}"); });
+            await RefreshAsync();
+        }
+    }
+
+    private async void BotRemove_Click(object sender, RoutedEventArgs e)
+    {
+        await GuardAsync(async () => { await _api.SendAsync(HttpMethod.Patch, "settings/discord", new { bot = new { enabled = false, token = "", guild_id = "", allowed_users = Array.Empty<string>() } }); BotToken.Password = ""; _botLoaded = false; });
         await RefreshAsync();
     }
     private async void WebhookSave_Click(object sender, RoutedEventArgs e)

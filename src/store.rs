@@ -103,8 +103,13 @@ impl Store {
     pub fn backup(&self, database: &Database) -> Result<String, String> {
         let directory = self.directory.join("backups");
         std::fs::create_dir_all(&directory).map_err(|_| "Unable to create backup folder")?;
+        let mut snapshot = database.clone();
+        let now = chrono::Utc::now();
+        for saved in &mut snapshot.accounts {
+            saved.account.track_run(now);
+        }
         let json = zeroize::Zeroizing::new(
-            serde_json::to_string(database).map_err(|_| "Unable to serialize backup")?,
+            serde_json::to_string(&snapshot).map_err(|_| "Unable to serialize backup")?,
         );
         let encrypted = platform::protect(&json)?;
         let name = format!(
@@ -159,6 +164,7 @@ impl Store {
             }
             platform::unprotect(&saved.encrypted_session)?;
             let a = &mut saved.account;
+            a.running_since = None;
             a.desired_running = false;
             a.process = None;
             a.tracker = None;

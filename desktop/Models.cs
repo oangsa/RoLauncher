@@ -7,7 +7,8 @@ public sealed record ProcessInfo(uint Pid);
 public sealed record Account(string Id, string Username, string Alias, Target? Target,
     bool AutoRecovery, string Status, ProcessInfo? Process, uint Failures, string? LastError,
     string Group = "", string FallbackPolicy = "allow_public", DateTimeOffset? NextRetry = null,
-    string RecoveryReason = "", bool PublicFallbackActive = false, bool DesiredRunning = false);
+    string RecoveryReason = "", bool PublicFallbackActive = false, bool DesiredRunning = false,
+    DateTimeOffset? RunningSince = null, ulong LongestStreakSeconds = 0);
 public sealed record ProfileEntry(string AccountId, string Alias, Target? Target, bool AutoRecovery, string FallbackPolicy, string Group);
 public sealed record LaunchProfile(string Id, string Name, ProfileEntry[] Entries)
 {
@@ -26,11 +27,14 @@ public sealed record Activity(DateTimeOffset Timestamp, string AccountId, ulong?
     public string Summary => $"{Timestamp.ToLocalTime():g} · {AccountLabel ?? (AccountId.Length == 0 ? "RoLauncher" : $"Account {AccountId}")} · {Status.Replace('_', ' ')} · {Message}";
 }
 public sealed record Notice(DateTimeOffset Timestamp, string Account, string Title, string Message, ulong? PlaceId);
-public sealed record DiscordView(bool Enabled, bool Configured, bool NotifyRecovery, string DeliveryStatus, Notice[] Recent);
+public sealed record BotView(bool Enabled, bool Configured, string GuildId, string[] AllowedUsers, string Status, string ConnectionState = "offline");
+public sealed record DiscordView(bool Enabled, bool Configured, bool NotifyRecovery, string DeliveryStatus, Notice[] Recent, BotView? Bot = null);
 
 public sealed class AccountRow(Account account) : INotifyPropertyChanged
 {
     public Account Account { get; private set; } = account;
+    private bool _isSelected;
+    public bool IsSelected { get => _isSelected; set { if (_isSelected == value) return; _isSelected = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsSelected))); } }
     public string Id => Account.Id;
     public string Alias => Account.Alias;
     public string Group => string.IsNullOrEmpty(Account.Group) ? "Ungrouped" : Account.Group;
@@ -39,6 +43,14 @@ public sealed class AccountRow(Account account) : INotifyPropertyChanged
     public bool CanRetry => Account.Status == "backoff" && Account.NextRetry is not null && Account.AutoRecovery && Account.DesiredRunning && Account.RecoveryReason != "RateLimit";
     public string Fallback => Account.PublicFallbackActive ? "Public fallback active" : Account.FallbackPolicy switch { "stay" => "Stay on destination", "pause" => "Pause and notify if unavailable", _ => "Public fallback allowed" };
     public string Username => $"@{Account.Username}";
+    public ulong RunningSeconds => Account.RunningSince is { } since ? (ulong)Math.Max(0, (DateTimeOffset.UtcNow - since).TotalSeconds) : 0;
+    public ulong LongestSeconds => Math.Max(Account.LongestStreakSeconds, RunningSeconds);
+    public string RunningTime => Account.RunningSince is null ? "—" : FormatDuration(RunningSeconds);
+    public string LongestOnline => FormatDuration(LongestSeconds);
+    public static string FormatDuration(ulong seconds) => seconds >= 86400
+        ? $"{seconds / 86400}d {seconds % 86400 / 3600}h {seconds % 3600 / 60}m"
+        : seconds >= 3600 ? $"{seconds / 3600}h {seconds % 3600 / 60}m {seconds % 60}s"
+        : seconds >= 60 ? $"{seconds / 60}m {seconds % 60}s" : $"{seconds}s";
     public string Pid => Account.Process?.Pid.ToString() ?? "—";
     public string Status => Account.Status switch
     {

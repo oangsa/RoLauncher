@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.5.0] — 2026-10-08
+
+- Add Discord Stop/Restart slash commands, username autocomplete and /status-register for a saved status message that updates automatically, restricted to configured server/users. Separate Save, Start, Stop and Restart controls retain bot credentials, with a colored connection status. The bot resumes on app launch if it was previously started; Stop keeps it off until started again.
+- Show current running time and saved longest online streak on each account row, plus the longest streak and account on Dashboard. Disconnects and automatic rejoins count toward a run; Stop or manual Restart ends it.
+- Open account and game editors by clicking rows/cards; select bulk accounts with a dedicated checkbox column and highlight game cards on hover.
+- Suppress transient redirect and clean-exit alerts; include game names, detected errors and available instance screenshots.
+- Explicitly isolate Sober HOME inside Flatpak and read owned logs through process descriptors. Native Arch/KDE validation remains pending.
+
 ## [1.4.0] — 2026-10-07
 
 ### Fixed

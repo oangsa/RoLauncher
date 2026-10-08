@@ -14,6 +14,10 @@ accounts = [dict(id=str(i), username=f"sample_{i}", alias=name,
     for i, (name, status, error) in enumerate([
         ("Main account", "running", None), ("Test account", "backoff", "Waiting for automatic rejoin"),
         ("Build account", "needs_attention", "Session expired; sign in again")])]
+from datetime import datetime, timedelta, timezone
+for i, account in enumerate(accounts):
+    account["running_since"] = (datetime.now(timezone.utc) - timedelta(hours=2-i)).isoformat() if i < 2 else None
+    account["longest_streak_seconds"] = [7200, 5400, 10800][i]
 commands = []
 imported_cookies = []
 profiles = []
@@ -21,6 +25,7 @@ game_profiles = []
 close_to_tray = True
 backups = []
 include_beta_updates = False
+bot = dict(enabled=True, configured=True, guild_id="42", allowed_users=["123"], status="Bot stopped. Use Start to connect.", connection_state="offline")
 activity = [dict(timestamp="2026-10-05T09:20:00+07:00", account_id="1", place_id=1818, status="backoff", failures=1, message="Retry scheduled; inspect the next retry time")]
 
 class Fixture(BaseHTTPRequestHandler):
@@ -44,7 +49,7 @@ class Fixture(BaseHTTPRequestHandler):
         elif self.path == "/v1/settings/discord":
             self.reply(dict(enabled=False, configured=True, notify_recovery=True, delivery_status="Ready for a test.",
                 recent=[dict(timestamp="2026-10-05T09:20:00+07:00", account="Test account (@sample_1)",
-                    title="Automatic rejoin scheduled", message="Waiting for the next retry. Your other accounts are still monitored.", place_id=1818)]))
+                    title="Automatic rejoin scheduled", message="Waiting for the next retry. Your other accounts are still monitored.", place_id=1818)], bot=bot))
         elif self.path == "/v1/test/commands": self.reply(commands)
         elif self.path == "/v1/test/import-count": self.reply(len(imported_cookies))
         else: self.reply({}, 404)
@@ -52,6 +57,10 @@ class Fixture(BaseHTTPRequestHandler):
         commands.append(self.path)
         data = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         body = json.loads(data) if data else None
+        if self.path.startswith("/v1/settings/discord/bot/"):
+            action = self.path.rsplit("/", 1)[-1]
+            bot.update(connection_state="offline" if action == "stop" else "online", status="Bot stopped." if action == "stop" else "Connected.")
+            self.reply(dict(bot=bot)); return
         if self.path == "/v1/accounts":
             assert body["cookies"] in (["fixture-cookie-a"], ["fixture-cookie-b"])
             imported_cookies.extend(body["cookies"])
@@ -90,6 +99,12 @@ class Fixture(BaseHTTPRequestHandler):
     def do_PATCH(self):
         global include_beta_updates, close_to_tray
         patch = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+        if self.path == "/v1/settings/discord":
+            if "bot" in patch:
+                values = {k: v for k, v in patch["bot"].items() if k != "token"}
+                bot.update(values)
+                if patch["bot"].get("token"): bot["configured"] = True
+            self.reply(dict(bot=bot)); return
         if self.path == "/v1/settings/window":
             close_to_tray = patch["close_to_tray"]; self.reply({}); return
         if self.path == "/v1/settings/updates":

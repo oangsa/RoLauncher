@@ -173,6 +173,26 @@ mod imp {
             _ => Err(last_error("Process exit wait failed")),
         }
     }
+    pub struct ExitWatch(Handle);
+    // A Windows process handle may be waited/query-checked from any thread.
+    unsafe impl Send for ExitWatch {}
+    impl ExitWatch {
+        pub fn new(identity: &ProcessIdentity) -> Option<Self> {
+            let handle = process_handle(
+                identity.pid,
+                PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+            )
+            .ok()?;
+            (process_time(handle.0).ok()? == identity.creation_time && valid_player_image(handle.0))
+                .then_some(Self(handle))
+        }
+        pub fn clean_exit(&self) -> Option<bool> {
+            let mut code = 0;
+            (unsafe { WaitForSingleObject(self.0.0, 0) } == WAIT_OBJECT_0
+                && unsafe { GetExitCodeProcess(self.0.0, &mut code) } != 0)
+                .then_some(code == 0)
+        }
+    }
     pub fn close(identity: &ProcessIdentity, force: bool) -> Result<(), String> {
         let h = match process_handle(
             identity.pid,

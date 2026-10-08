@@ -5,12 +5,29 @@ use std::{collections::VecDeque, sync::Mutex, time::Duration};
 use tokio::sync::{Notify, mpsc};
 use zeroize::Zeroizing;
 
+pub(crate) fn escape(value: &str, limit: usize) -> String {
+    value
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(limit)
+        .flat_map(|c| {
+            if "\\`*_~|<>[]()".contains(c) {
+                vec!['\\', c]
+            } else {
+                vec![c]
+            }
+        })
+        .collect()
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedDiscord {
     pub enabled: bool,
     pub encrypted_webhook: String,
     #[serde(default = "default_recovery")]
     pub notify_recovery: bool,
+    #[serde(default)]
+    pub bot: crate::discord_bot::SavedBot,
 }
 fn default_recovery() -> bool {
     true
@@ -21,16 +38,18 @@ impl Default for SavedDiscord {
             enabled: false,
             encrypted_webhook: String::new(),
             notify_recovery: true,
+            bot: Default::default(),
         }
     }
 }
 
 // Deliberately no Debug/Serialize: the incoming URL contains a credential.
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub struct DiscordPatch {
     pub enabled: Option<bool>,
     pub webhook_url: Option<String>,
     pub notify_recovery: Option<bool>,
+    pub bot: Option<crate::discord_bot::BotPatch>,
 }
 impl Drop for DiscordPatch {
     fn drop(&mut self) {
@@ -84,6 +103,9 @@ pub struct Notice {
     pub title: String,
     pub message: String,
     pub place_id: Option<u64>,
+    pub game_name: Option<String>,
+    #[serde(skip)]
+    pub process: Option<crate::model::ProcessIdentity>,
     pub recovery: bool,
     pub color: u32,
 }
@@ -92,12 +114,12 @@ impl Notice {
         Self { timestamp: Utc::now(), account: "RoLauncher".into(),
             title: if suspended { "Connection unavailable" } else { "Connection restored" }.into(),
             message: if suspended { "New launches and automatic rejoins are waiting for your Internet connection. Existing clients are still monitored." } else { "The connection is available again. Pending automatic rejoins can continue." }.into(),
-            place_id: None, recovery: !suspended, color: if suspended { 0xfee75c } else { 0x57f287 } }
+            place_id: None, game_name: None, process: None, recovery: !suspended, color: if suspended { 0xfee75c } else { 0x57f287 } }
     }
     pub fn test() -> Self {
         Self { timestamp: Utc::now(), account: "RoLauncher".into(), title: "Discord notifications are ready".into(),
             message: "Test message received. Account alerts will appear in this channel when notifications are enabled.".into(),
-            place_id: None, recovery: false, color: 0x57f287 }
+            place_id: None, game_name: None, process: None, recovery: false, color: 0x57f287 }
     }
     fn for_account(a: &Account, title: &str, message: String, recovery: bool, color: u32) -> Self {
         Self {
@@ -106,6 +128,8 @@ impl Notice {
             title: title.into(),
             message,
             place_id: a.target.as_ref().map(|t| t.place_id),
+            game_name: None,
+            process: if recovery { None } else { a.process.clone() },
             recovery,
             color,
         }
@@ -129,7 +153,7 @@ impl Notice {
             vec![serde_json::json!({"name":"Account", "value":account, "inline":true})];
         if let Some(place) = self.place_id {
             fields.push(
-                serde_json::json!({"name":"Place", "value":place.to_string(), "inline":true}),
+                serde_json::json!({"name":"Game", "value":format!("[{}](https://www.roblox.com/games/{place})", escape(self.game_name.as_deref().unwrap_or("Game name unavailable"), 100)), "inline":true}),
             );
         }
         serde_json::json!({"username":"RoLauncher", "allowed_mentions":{"parse":[]}, "embeds":[{
@@ -149,9 +173,19 @@ fn rejoin(a: &Account) -> &'static str {
 
 /// Only known summaries are exported; raw errors/logs/targets never leave the app.
 pub fn account_notice(old: &Account, new: &Account) -> Option<Notice> {
+    if new.last_error.as_deref() == Some("Client closed normally") {
+        return None;
+    }
+    if !new.desired_running && new.status != Status::NeedsAttention {
+        return None;
+    }
     let error = new.last_error.as_deref().unwrap_or("");
     if new.status == Status::Reconnecting
+        && (new.disconnect_notified
+            || error.starts_with("Session lost (code")
+            || error.starts_with("Connection failed:"))
         && (old.status != Status::Reconnecting
+            || (!old.disconnect_notified && new.disconnect_notified)
             || (error.starts_with("Session lost (code 267)")
                 && !old
                     .last_error
@@ -172,10 +206,17 @@ pub fn account_notice(old: &Account, new: &Account) -> Option<Notice> {
                 "The game connection was lost or the join failed.",
             )
         };
+        let detail = error
+            .strip_prefix("Session lost (code ")
+            .and_then(|s| s.split_once(')'))
+            .and_then(|(code, _)| code.parse::<u32>().ok())
+            .filter(|code| *code != 267)
+            .map(|code| format!(" Roblox reported error code {code}."))
+            .unwrap_or_default();
         return Some(Notice::for_account(
             new,
             title,
-            format!("{reason} {}", rejoin(new)),
+            format!("{reason}{detail} {}", rejoin(new)),
             false,
             0xfee75c,
         ));
@@ -258,7 +299,8 @@ pub fn account_notice(old: &Account, new: &Account) -> Option<Notice> {
     }
     if new.status == Status::Running
         && old.status != Status::Running
-        && (old.status == Status::Reconnecting || new.failures > 0)
+        && old.recovery_reason != "NormalExit"
+        && (old.disconnect_notified || new.failures > 0)
     {
         return Some(Notice::for_account(
             new,
@@ -278,6 +320,7 @@ pub struct DiscordView {
     pub notify_recovery: bool,
     pub delivery_status: String,
     pub recent: Vec<Notice>,
+    pub bot: crate::discord_bot::BotView,
 }
 struct Config {
     saved: SavedDiscord,
@@ -286,11 +329,14 @@ struct Config {
     recent: VecDeque<Notice>,
     stopped: bool,
     rejected: bool,
+    bot_status: String,
+    bot_state: String,
 }
 struct Queued {
     notice: Notice,
     revision: u64,
     test: bool,
+    screenshot: Option<Vec<u8>>,
 }
 pub struct Discord {
     config: Mutex<Config>,
@@ -298,6 +344,7 @@ pub struct Discord {
     receiver: Mutex<Option<mpsc::Receiver<Queued>>>,
     changed: Notify,
     client: reqwest::Client,
+    captures: Mutex<std::collections::HashMap<(u32, String), Vec<u8>>>,
 }
 impl Discord {
     pub fn new(saved: SavedDiscord) -> Result<Self, String> {
@@ -308,6 +355,7 @@ impl Discord {
             .build()
             .map_err(|_| "Unable to prepare Discord notifications")?;
         Ok(Self {
+            captures: Mutex::new(std::collections::HashMap::new()),
             config: Mutex::new(Config {
                 saved,
                 revision: 0,
@@ -315,6 +363,8 @@ impl Discord {
                 recent: VecDeque::new(),
                 stopped: false,
                 rejected: false,
+                bot_status: "Bot stopped. Use Start to connect.".into(),
+                bot_state: "offline".into(),
             }),
             sender,
             receiver: Mutex::new(Some(receiver)),
@@ -338,6 +388,22 @@ impl Discord {
             notify_recovery: c.saved.notify_recovery,
             delivery_status: c.status.clone(),
             recent: c.recent.iter().cloned().collect(),
+            bot: crate::discord_bot::BotView::new(
+                &c.saved.bot,
+                c.bot_status.clone(),
+                c.bot_state.clone(),
+            ),
+        }
+    }
+    pub fn bot_status(&self, state: &str, value: &str) {
+        let mut c = self.config.lock().unwrap();
+        c.bot_status = value.into();
+        c.bot_state = state.into();
+    }
+    pub fn bot_online_notice(&self, value: &str) {
+        let mut c = self.config.lock().unwrap();
+        if c.bot_state == "online" {
+            c.bot_status = value.into();
         }
     }
     pub fn record(&self, notice: Notice, test: bool) -> Result<(), String> {
@@ -356,11 +422,18 @@ impl Discord {
             return Ok(());
         }
         let revision = c.revision;
+        let screenshot = notice.process.as_ref().and_then(|p| {
+            self.captures
+                .lock()
+                .unwrap()
+                .remove(&(p.pid, p.creation_time.clone()))
+        });
         self.sender
             .try_send(Queued {
                 notice,
                 revision,
                 test,
+                screenshot,
             })
             .map_err(|_| {
                 c.status =
@@ -369,6 +442,21 @@ impl Discord {
             })?;
         c.status = "Notification queued.".into();
         Ok(())
+    }
+    pub async fn prepare_capture(&self, identity: &crate::model::ProcessIdentity) {
+        if !self.config.lock().unwrap().saved.enabled {
+            return;
+        }
+        let key = (identity.pid, identity.creation_time.clone());
+        let identity = identity.clone();
+        let image = crate::capture::instance_async(identity).await;
+        if let Some(image) = image {
+            let mut captures = self.captures.lock().unwrap();
+            if captures.len() >= 8 {
+                captures.clear();
+            }
+            captures.insert(key, image);
+        }
     }
     pub fn stop(&self) {
         self.config.lock().unwrap().stopped = true;
@@ -388,7 +476,7 @@ impl Discord {
             c.status = value.into();
         }
     }
-    pub async fn run(&self) {
+    pub async fn run(&self, engine: Option<crate::engine::Engine>) {
         let Some(mut receiver) = self.receiver.lock().unwrap().take() else {
             return;
         };
@@ -397,10 +485,31 @@ impl Discord {
             if self.config.lock().unwrap().stopped {
                 return;
             }
-            let q = tokio::select! {
+            let mut q = tokio::select! {
                 q = receiver.recv() => match q { Some(q) => q, None => return },
                 _ = self.changed.notified() => continue,
             };
+            if self.current(&q).is_none() {
+                continue;
+            }
+            let screenshot = if q.screenshot.is_some() {
+                q.screenshot.take()
+            } else if let Some(identity) = q.notice.process.clone() {
+                crate::capture::instance_async(identity).await
+            } else {
+                None
+            };
+            if q.notice.process.is_some() && screenshot.is_none() {
+                q.notice.message.push_str(
+                    " Screenshot unavailable (window closed, protected, or capture unsupported).",
+                );
+            }
+            if q.notice.game_name.is_none()
+                && let Some(place) = q.notice.place_id
+                && let Some(engine) = &engine
+            {
+                q.notice.game_name = engine.game_details(place).await.ok().map(|d| d.0);
+            }
             for attempt in 0..3 {
                 // Changes or Exit cancel queued/retrying alerts. An issued request may finish.
                 while cooldown > tokio::time::Instant::now() && self.current(&q).is_some() {
@@ -418,7 +527,14 @@ impl Discord {
                     );
                     break;
                 };
-                match send_attempt(&self.client, &hook, &q.notice.payload()).await {
+                match send_attachment_attempt(
+                    &self.client,
+                    &hook,
+                    &q.notice.payload(),
+                    screenshot.as_deref(),
+                )
+                .await
+                {
                     Outcome::Sent(delay) => {
                         let mut c = self.config.lock().unwrap();
                         if c.revision == q.revision {
@@ -469,18 +585,41 @@ fn seconds(value: f64) -> Option<Duration> {
     (value.is_finite() && (0.0..=3600.0).contains(&value))
         .then(|| Duration::from_secs_f64(value.max(1.0)))
 }
+#[cfg(test)]
 async fn send_attempt(
     client: &reqwest::Client,
     hook: &str,
     payload: &serde_json::Value,
 ) -> Outcome {
+    send_attachment_attempt(client, hook, payload, None).await
+}
+async fn send_attachment_attempt(
+    client: &reqwest::Client,
+    hook: &str,
+    payload: &serde_json::Value,
+    screenshot: Option<&[u8]>,
+) -> Outcome {
     // Never return reqwest errors: they can include the secret webhook URL.
-    let response = client
-        .post(hook)
-        .query(&[("wait", "true")])
-        .json(payload)
-        .send()
-        .await;
+    let request = client.post(hook).query(&[("wait", "true")]);
+    let request = if let Some(bytes) = screenshot {
+        let mut payload = payload.clone();
+        payload["embeds"][0]["image"] = serde_json::json!({"url":"attachment://instance.png"});
+        payload["attachments"] = serde_json::json!([{"id":0,"filename":"instance.png","description":"Affected game window"}]);
+        request.multipart(
+            reqwest::multipart::Form::new()
+                .text("payload_json", payload.to_string())
+                .part(
+                    "files[0]",
+                    reqwest::multipart::Part::bytes(bytes.to_vec())
+                        .file_name("instance.png")
+                        .mime_str("image/png")
+                        .expect("constant MIME"),
+                ),
+        )
+    } else {
+        request.json(payload)
+    };
+    let response = request.send().await;
     let Ok(mut response) = response else {
         return Outcome::Failed(
             "Cannot reach Discord. Check your connection; see Recent activity for the alert.",
@@ -556,6 +695,22 @@ mod tests {
     use uuid::Uuid;
 
     const HOOK: &str = "https://discord.com/api/webhooks/123456/SECRET_token";
+    #[test]
+    fn clean_window_closes_and_brief_redirects_are_silent() {
+        let mut old = Account::new("1".into(), "user".into());
+        old.desired_running = true;
+        old.status = Status::Running;
+        let mut next = old.clone();
+        next.status = Status::Reconnecting;
+        assert!(account_notice(&old, &next).is_none());
+        let mut online = next.clone();
+        online.status = Status::Running;
+        assert!(account_notice(&next, &online).is_none());
+        next.status = Status::Backoff;
+        next.next_retry = Some(Utc::now());
+        next.last_error = Some("Client closed normally".into());
+        assert!(account_notice(&old, &next).is_none());
+    }
     #[test]
     fn webhook_destination_validation_and_redaction() {
         assert!(validate_webhook(HOOK).is_ok());
@@ -682,6 +837,7 @@ mod tests {
             enabled: true,
             encrypted_webhook: "encrypted-marker".into(),
             notify_recovery: false,
+            ..Default::default()
         });
         let mut recovery = Notice::test();
         recovery.recovery = true;
@@ -712,7 +868,7 @@ mod tests {
         assert!(service.current(&q).is_some());
         service.configure(SavedDiscord::default());
         assert!(service.current(&q).is_none());
-        let worker = service.run();
+        let worker = service.run(None);
         let stop = async {
             tokio::task::yield_now().await;
             service.stop();
