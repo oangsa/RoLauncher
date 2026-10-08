@@ -48,6 +48,8 @@ public sealed partial class MainWindow
             Tab_Click(RecoveryTab, new RoutedEventArgs()); await RefreshAsync();
             Assert(TotalMetric.Text == "3" && RunningMetric.Text == "1" && RejoiningMetric.Text == "1" && AttentionMetric.Text == "1", "Dashboard counts actual account states.");
             Assert(RecoveryList.ItemsSource is AccountRow[] { Length: 1 } attention && attention[0].Id == "2", "Dashboard attention queue excludes healthy accounts and automatic retries.");
+            Assert(LongestStreakMetric.Text == "3h 0m 0s" && LongestStreakHint.Text.Contains("Build account"), "Dashboard shows the best saved streak and its account.");
+            Assert(_rows[0].RunningSeconds >= 7200 && _rows[1].RunningSeconds >= 3600 && _rows[1].LongestSeconds == 5400, "Account timers continue through retry waits and retain longer historical streaks.");
             Assert(CoverageBar.Value > 66 && CoverageBar.Value < 67, "Coverage requires both automatic rejoin and a destination.");
             var meters = _statusMeters.Select(m => m.Bar).ToArray();
             var statusRows = StatusBreakdown.Children.ToArray();
@@ -143,11 +145,11 @@ public sealed partial class MainWindow
             Assert(!Feedback.IsOpen, "Repeated background failures do not keep a toast open.");
             _lastRefreshFeedback = null;
             Tab_Click(AccountsTab, new RoutedEventArgs());
-            AccountList.SelectedItems.Add(_rows[0]);
+            _rows[0].IsSelected = true; UpdateSelectionSettings();
             NameSearch.Text = "@SAMPLE_1";
             await Task.Delay(150);
-            Assert(_visibleRows.Count == 1 && _visibleRows[0].Id == "1" && Selected().Length == 0, "Username search deselects hidden accounts.");
-            AccountList.SelectAll();
+            Assert(_visibleRows.Count == 1 && _visibleRows[0].Id == "1" && Selected().Length == 0, $"Username search deselects hidden accounts. Visible={_visibleRows.Count}, IDs={string.Join(",", _visibleRows.Select(r => r.Id))}, selected={Selected().Length}");
+            SelectAllRows();
             await RunActionAsync("stop", Selected());
             var commands = await _api.GetAsync<string[]>("test/commands");
             Assert(commands.Count(c => c.EndsWith("/stop")) == 1 && commands.Contains("/v1/accounts/1/stop"), "Filtered bulk action touches only visible selection.");
@@ -201,7 +203,7 @@ public sealed partial class MainWindow
 
             NameSearch.Text = "Studio";
             await Task.Delay(150);
-            AccountList.SelectedItems.Add(_rows[0]);
+            _rows[0].IsSelected = true; UpdateSelectionSettings();
             await RefreshAsync();
             Assert(Selected().Length == 1 && _visibleRows.Count == 1, "Refresh preserves matching selection.");
             modal = ShowAccountAsync(_rows[0]);
@@ -218,8 +220,12 @@ public sealed partial class MainWindow
             InvokeDialogButton("PrimaryButton");
             await modal.WaitAsync(TimeSpan.FromSeconds(5));
             await CaptureAsync(directory, "accounts.png");
-            AccountList.SelectAll();
+            SelectAllRows();
             Assert(Selected().Length == 3, "Bulk selection selects visible accounts.");
+            SelectAccounts.IsChecked = false; SelectAccounts_Click(SelectAccounts, new RoutedEventArgs());
+            Assert(Selected().Length == 0 && _visibleRows.All(r => !r.IsSelected), "Unchecking the header clears every visible account.");
+            SelectAccounts.IsChecked = true; SelectAccounts_Click(SelectAccounts, new RoutedEventArgs());
+            Assert(Selected().Length == 3 && _visibleRows.All(r => r.IsSelected), "Checking the header selects every visible account despite row callbacks.");
             Tab_Click(SettingsTab, new RoutedEventArgs());
             await Task.Delay(500);
             await CaptureAsync(directory, "settings.png");
@@ -234,6 +240,18 @@ public sealed partial class MainWindow
                 "Support and integrations is a dedicated page.");
             Assert(WebhookInput.Password == "" && WebhookInput.PlaceholderText.StartsWith("●"),
                 "Saved webhook displays dots without putting a secret or sentinel in the editable value.");
+            Tab_Click(DiscordTab, new RoutedEventArgs());
+            Assert(BotGuild.Text == "42" && BotUsers.Text == "123" && BotToken.Password == "" && BotConnection.Text == "Offline", "Saved bot settings load without exposing the token.");
+            BotSave_Click(BotGuild, new RoutedEventArgs()); await Task.Delay(350);
+            Assert(BotConnection.Text == "Offline", "Saving bot settings does not start the bot.");
+            foreach (var action in new[] { "start", "stop", "restart" })
+            {
+                BotControl_Click(new Button { Tag = action }, new RoutedEventArgs()); await Task.Delay(350);
+                Assert(BotConnection.Text == (action == "stop" ? "Offline" : "Online"), $"Bot {action} updates its connection status.");
+                Assert(BotGuild.Text == "42" && BotUsers.Text == "123" && BotToken.Password == "", $"Bot {action} reuses saved settings without re-entering fields.");
+            }
+            PageScroll.ChangeView(null, 10000, null, true); await Task.Delay(150);
+            await CaptureAsync(directory, "discord-bot-controls.png");
             Tab_Click(AccountsTab, new RoutedEventArgs());
             var rejoinEdit = ShowBulkAsync(Selected()); await Task.Delay(350);
             Assert(_bulkForm!.Rejoin.IsChecked is null, "Bulk account settings show mixed rejoin values.");
@@ -244,7 +262,7 @@ public sealed partial class MainWindow
             Action_Click(StopButton, new RoutedEventArgs());
             await Task.Delay(350);
             commands = await _api.GetAsync<string[]>("test/commands");
-            Assert(commands.Count(c => c.EndsWith("/stop")) == 4, "Stop applies to every selected account.");
+            Assert(commands.Count(c => c.StartsWith("/v1/accounts/") && c.EndsWith("/stop")) == 4, "Stop applies to every selected account.");
             Tab_Click(AccountsTab, new RoutedEventArgs());
             await Task.Delay(250);
             Assert(_rows[0].Destination == "Fixture game", "Account destinations resolve a game name without requiring a saved game profile.");
@@ -301,6 +319,12 @@ public sealed partial class MainWindow
             InvokeDialogButton("PrimaryButton"); await game.WaitAsync(TimeSpan.FromSeconds(5));
             Assert(_gameProfiles.Length == 1 && _gameProfiles[0].GameName == "Fixture game", "Saving a game resolves metadata and persists its destination.");
             await CaptureAsync(directory, "games.png");
+            var gameCard = FindVisual<Border>(GameCards, "SavedGameCard")!;
+            AnimateGameCard(gameCard, true); await Task.Delay(200);
+            Assert(gameCard.RenderTransform is TranslateTransform lift && lift.Y == -4, "Game card lifts on hover.");
+            await CaptureAsync(directory, "games-hover.png");
+            AnimateGameCard(gameCard, false); await Task.Delay(200);
+            Assert(gameCard.RenderTransform is TranslateTransform rest && rest.Y == 0, "Game card returns to rest when the pointer leaves.");
             game = EditGameAsync(_gameProfiles[0]); await Task.Delay(300);
             FindVisual<TextBox>(_gameDialog!, "GameProfileName")!.Text = "Renamed fixture";
             InvokeDialogButton("PrimaryButton"); await game.WaitAsync(TimeSpan.FromSeconds(5));
@@ -383,7 +407,7 @@ public sealed partial class MainWindow
             HistoryAccount.SelectedItem = HistoryAccount.Items.OfType<ComboBoxItem>().First(i => (i.Tag as string) == "0"); await Task.Delay(250);
             Assert(HistoryList.ItemsSource is Activity[] { Length: 0 }, "History can filter by account.");
             HistoryAccount.SelectedIndex = 0;
-            AccountList.SelectedItems.Clear();
+            foreach (var row in _rows) row.IsSelected = false; UpdateSelectionSettings();
             Tab_Click(AccountsTab, new RoutedEventArgs());
             modal = ShowAccountAsync(_rows[1]); await Task.Delay(350);
             DialogRejoin.IsChecked = true;
@@ -488,7 +512,7 @@ public sealed partial class MainWindow
             var scale = NativeTray.Scale(hwnd);
             AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(hwnd)).Resize(new Windows.Graphics.SizeInt32((int)(1700 * scale), (int)(940 * scale)));
             await Task.Delay(350);
-            Assert(Math.Abs(AccountTable.ActualWidth - Math.Max(820, AccountTableScroll.ActualWidth)) < 2,
+            Assert(Math.Abs(AccountTable.ActualWidth - Math.Max(AccountTable.MinWidth, AccountTableScroll.ActualWidth)) < 2,
                 $"Account table fills the available viewport while retaining its scrollable minimum (table {AccountTable.ActualWidth}, viewport {AccountTableScroll.ActualWidth}).");
             await CaptureAsync(directory, "accounts-wide.png");
             AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(hwnd)).Resize(new Windows.Graphics.SizeInt32((int)(1020 * scale), (int)(780 * scale)));
@@ -540,11 +564,11 @@ public sealed partial class MainWindow
             Assert(!_accountDialog.IsPrimaryButtonEnabled && EditorError.IsOpen, "External removal disables stale modal save.");
             InvokeDialogButton("CloseButton");
             await modal.WaitAsync(TimeSpan.FromSeconds(5));
-            AccountList.SelectedItems.Clear();
+            foreach (var row in _rows) row.IsSelected = false; UpdateSelectionSettings();
             _rows.Clear();
             ApplyFilters();
             await CaptureAsync(directory, "empty.png");
-            File.WriteAllText(Path.Combine(directory, "result.txt"), "WinUI smoke passed: sidebar scroll reset, saved game create/edit/account selection, close preference, changelog modal; bulk settings Save/Cancel, atomic invalid/rejected saves, alias patterns, selected/all account scopes, groups and filtering, saved profile review/apply, backup picker, recovery/history and account filtering; inherited toast, modal, deletion, selection, bulk-action, sign-in, resize and rendering checks.");
+            File.WriteAllText(Path.Combine(directory, "result.txt"), "WinUI smoke passed: header select/clear, saved bot controls and status, game hover animation, sidebar scroll reset, saved game create/edit/account selection, close preference, changelog modal; bulk settings Save/Cancel, atomic invalid/rejected saves, alias patterns, selected/all account scopes, groups and filtering, saved profile review/apply, backup picker, recovery/history and account filtering; inherited toast, modal, deletion, selection, bulk-action, sign-in, resize and rendering checks.");
         }
         catch (Exception ex)
         {

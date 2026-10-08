@@ -28,7 +28,7 @@ public sealed partial class MainWindow
     }
 
     private void InitializePicker(object picker) => InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
-    private void SelectAllRows() => AccountList.SelectAll();
+    private void SelectAllRows() { foreach (var row in _visibleRows) row.IsSelected = true; UpdateSelectionSettings(); }
     private async Task ShowAccountDialogAsync() => await _accountDialog.ShowAsync();
     private static bool IsControlDown() => Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control)
         .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);

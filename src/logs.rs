@@ -32,6 +32,22 @@ pub fn parse_line(line: &str) -> Option<Signal> {
     if network && line.contains("Failed to connect to server") && line.contains("no response") {
         return Some(Signal::ConnectionFailed);
     }
+    if network && let Some((_, reason)) = line.split_once("Sending disconnect with reason:") {
+        let code = reason
+            .trim()
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .and_then(|n| n.parse::<u32>().ok());
+        // 0/282 can be intentional shutdown/transfer. Do not turn them into
+        // immediate error alerts. Preserve confirmed Roblox failure codes.
+        if let Some(code @ (266 | 267 | 268 | 273 | 277 | 279 | 280 | 285)) = code {
+            return Some(if code == 279 {
+                Signal::ConnectionFailed
+            } else {
+                Signal::SessionLost(Some(code))
+            });
+        }
+    }
     if network
         && (line.contains("Client:Disconnect")
             || line.contains("Sending disconnect with reason:")
@@ -83,6 +99,8 @@ pub struct Tail {
     pub path: PathBuf,
     pub offset: u64,
     pending: Vec<u8>,
+    #[cfg(target_os = "linux")]
+    inode: (u64, u64),
 }
 impl Tail {
     pub fn new(path: PathBuf, from_end: bool) -> std::io::Result<Self> {
@@ -92,13 +110,29 @@ impl Tail {
             0
         };
         Ok(Self {
-            path,
+            path: path.clone(),
             offset,
             pending: Vec::new(),
+            #[cfg(target_os = "linux")]
+            inode: {
+                use std::os::unix::fs::MetadataExt;
+                let metadata = std::fs::metadata(&path)?;
+                (metadata.dev(), metadata.ino())
+            },
         })
     }
     pub fn read(&mut self) -> std::io::Result<Vec<Signal>> {
         let mut f = File::open(&self.path)?;
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = f.metadata()?;
+            if (metadata.dev(), metadata.ino()) != self.inode {
+                return Err(std::io::Error::other(
+                    "Log descriptor changed; rediscover ownership",
+                ));
+            }
+        }
         if f.metadata()?.len() < self.offset {
             self.offset = 0;
             self.pending.clear();

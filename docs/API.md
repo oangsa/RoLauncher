@@ -55,3 +55,9 @@ Invoke-RestMethod 'http://127.0.0.1:38471/v1/accounts/USER_ID/start' -Method Pos
 ```
 
 [Back to README](../README.md)
+
+### Discord bot settings (upcoming 1.5.0)
+
+`PATCH /v1/settings/discord` accepts an optional `bot` object with `enabled`, `token`, `guild_id` and `allowed_users` (array of Discord user ID strings). Omitted fields retain saved values. An empty token removes it. Enabling requires a token, server ID and nonempty allowlist. GET returns bot enabled/configured flags, guild ID, allowed user IDs and connection status plus `connection_state` (`online`, `starting`, `offline`), never the token. Saving does not start a stopped bot. `POST /v1/settings/discord/bot/start`, `/stop`, and `/restart` control the connection using saved settings; Stop retains credentials. The bot resumes on app launch if it was previously started; an explicit Stop keeps it offline until started again. `/status-register channel` persists a channel/message/page registration and updates the same message when account data changes, checked every 15 seconds. Re-registering the same channel reuses the message (or replaces a deleted one). The same loopback authentication/origin protections apply. Commands are opt-in and use the existing supervised Stop/Restart operations.
+
+Account timing: `running_since` is the UTC start of the current managed run, or null before a confirmed connection and after Stop/manual Restart. Disconnects and automatic rejoins retain it. `longest_streak_seconds` stores the best elapsed run duration; clients display the maximum of this value and the current run. Both fields persist across app restarts. Discord bot Start/Restart persist the intent to run on the next app launch; Stop or disabling/removing the bot clears it.

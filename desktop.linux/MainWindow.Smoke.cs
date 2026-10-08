@@ -56,7 +56,7 @@ public sealed partial class MainWindow
             Check(Selected().Length == 1 && StartButton.IsEnabled, "Selection controls share the Windows behavior.");
             ClearFilters_Click(SettingsTab, new RoutedEventArgs());
             Check(_visibleRows.Count == 3, "Clearing filters restores saved accounts.");
-            AccountList.SelectedItems.Clear(); LoginButton.Focus(FocusState.Programmatic);
+            foreach (var row in _rows) row.IsSelected = false; UpdateSelectionSettings(); LoginButton.Focus(FocusState.Programmatic);
             SendSelectAllKeys(); await Task.Delay(200);
             Check(Selected().Length == 3, "Native Linux Ctrl+A selects visible accounts.");
             var trace = new List<string>();

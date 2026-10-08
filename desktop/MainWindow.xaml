@@ -160,35 +160,37 @@
                   <MenuFlyoutItem Text="Edit all accounts" Click="EditAll_Click"/>
                 </MenuFlyout></Button.Flyout></Button>
               </StackPanel>
-              <TextBlock Text="Set automatic rejoin in an account’s settings (pencil icon). For several accounts, search or filter, select them, then choose Edit selected." Style="{StaticResource Caption}" TextWrapping="Wrap"/>
+              <TextBlock Text="Set automatic rejoin in an account’s settings (click its row). For several accounts, search or filter, select them, then choose Edit selected." Style="{StaticResource Caption}" TextWrapping="Wrap"/>
               <ScrollViewer x:Name="AccountTableScroll" SizeChanged="AccountTable_SizeChanged" HorizontalContentAlignment="Stretch" HorizontalScrollBarVisibility="Auto" HorizontalScrollMode="Enabled" VerticalScrollBarVisibility="Disabled" VerticalScrollMode="Disabled">
-              <StackPanel x:Name="AccountTable" MinWidth="820" HorizontalAlignment="Stretch" Spacing="8">
+              <StackPanel x:Name="AccountTable" MinWidth="1220" HorizontalAlignment="Stretch" Spacing="8">
               <Grid Background="{ThemeResource TableHeaderBrush}" Padding="12,10" CornerRadius="6" ColumnSpacing="12">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="1.4*" MinWidth="110"/><ColumnDefinition Width="45"/><ColumnDefinition Width="110"/><ColumnDefinition Width="1.3*" MinWidth="110"/><ColumnDefinition Width="50"/><ColumnDefinition Width="45"/><ColumnDefinition Width="*" MinWidth="40"/><ColumnDefinition Width="174"/></Grid.ColumnDefinitions>
-                <TextBlock Text="Account" Style="{StaticResource Caption}"/><TextBlock Grid.Column="1" Text="PID" Style="{StaticResource Caption}"/>
-                <TextBlock Grid.Column="2" Text="Status" Style="{StaticResource Caption}"/><TextBlock Grid.Column="3" Text="Game" Style="{StaticResource Caption}"/>
-                <TextBlock Grid.Column="4" Text="Failures" Style="{StaticResource Caption}"/><TextBlock Grid.Column="5" Text="Rejoin" Style="{StaticResource Caption}"/><TextBlock Grid.Column="6" Text="Last error" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" Style="{StaticResource Caption}"/>
-                <TextBlock Grid.Column="7" Text="Actions" Style="{StaticResource Caption}"/>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="40"/><ColumnDefinition Width="1.4*" MinWidth="110"/><ColumnDefinition Width="45"/><ColumnDefinition Width="110"/><ColumnDefinition Width="1.3*" MinWidth="110"/><ColumnDefinition Width="50"/><ColumnDefinition Width="45"/><ColumnDefinition Width="*" MinWidth="40"/><ColumnDefinition Width="120"/><ColumnDefinition Width="120"/><ColumnDefinition Width="174"/></Grid.ColumnDefinitions>
+                <CheckBox x:Name="SelectAccounts" Click="SelectAccounts_Click" IsThreeState="False" AutomationProperties.Name="Select all visible accounts"/><TextBlock Grid.Column="1" Text="Account" Style="{StaticResource Caption}"/><TextBlock Grid.Column="2" Text="PID" Style="{StaticResource Caption}"/>
+                <TextBlock Grid.Column="3" Text="Status" Style="{StaticResource Caption}"/><TextBlock Grid.Column="4" Text="Game" Style="{StaticResource Caption}"/>
+                <TextBlock Grid.Column="5" Text="Failures" Style="{StaticResource Caption}"/><TextBlock Grid.Column="6" Text="Rejoin" Style="{StaticResource Caption}"/><TextBlock Grid.Column="7" Text="Last error" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" Style="{StaticResource Caption}"/>
+                <TextBlock Grid.Column="8" Text="Running time" Style="{StaticResource Caption}"/><TextBlock Grid.Column="9" Text="Longest online" Style="{StaticResource Caption}"/>
+                <TextBlock Grid.Column="10" Text="Actions" Style="{StaticResource Caption}"/>
               </Grid>
               <Grid>
-                <ListView x:Name="AccountList" MinHeight="170" MaxHeight="340" SelectionMode="Extended" SelectionChanged="AccountList_SelectionChanged" IsItemClickEnabled="False" AutomationProperties.Name="Accounts, use Control or Shift to select multiple">
+                <ListView x:Name="AccountList" MinHeight="170" MaxHeight="340" SelectionMode="None" IsItemClickEnabled="True" ItemClick="AccountList_ItemClick" AutomationProperties.Name="Accounts, click to edit or use checkboxes to select">
                   <ListView.ItemContainerStyle>
                     <Style TargetType="ListViewItem"><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="0"/><Setter Property="Margin" Value="0,2"/><Setter Property="CornerRadius" Value="8"/></Style>
                   </ListView.ItemContainerStyle>
                   <ListView.ItemTemplate>
                     <DataTemplate>
                       <Grid Padding="12,12" ColumnSpacing="12">
-                        <Grid.ColumnDefinitions><ColumnDefinition Width="1.4*" MinWidth="110"/><ColumnDefinition Width="45"/><ColumnDefinition Width="110"/><ColumnDefinition Width="1.3*" MinWidth="110"/><ColumnDefinition Width="50"/><ColumnDefinition Width="45"/><ColumnDefinition Width="*" MinWidth="40"/><ColumnDefinition Width="174"/></Grid.ColumnDefinitions>
-                        <StackPanel Spacing="3"><TextBlock Text="{Binding Alias}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/><TextBlock Text="{Binding Username}" Style="{StaticResource Caption}" TextTrimming="CharacterEllipsis"/><TextBlock Text="{Binding Group}" Style="{StaticResource Caption}" TextTrimming="CharacterEllipsis"/></StackPanel>
-                        <TextBlock Grid.Column="1" Text="{Binding Pid}" VerticalAlignment="Center" Foreground="{ThemeResource MutedBrush}"/>
-                        <Border Grid.Column="2" Background="{Binding Account.Status, Converter={StaticResource StatusBackground}}" CornerRadius="6" Padding="9,5" HorizontalAlignment="Left" VerticalAlignment="Center">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="40"/><ColumnDefinition Width="1.4*" MinWidth="110"/><ColumnDefinition Width="45"/><ColumnDefinition Width="110"/><ColumnDefinition Width="1.3*" MinWidth="110"/><ColumnDefinition Width="50"/><ColumnDefinition Width="45"/><ColumnDefinition Width="*" MinWidth="40"/><ColumnDefinition Width="120"/><ColumnDefinition Width="120"/><ColumnDefinition Width="174"/></Grid.ColumnDefinitions>
+                        <CheckBox IsChecked="{Binding IsSelected, Mode=OneWay}" Click="AccountCheckbox_Click" AutomationProperties.Name="Select account"/><StackPanel Grid.Column="1" Spacing="3"><TextBlock Text="{Binding Alias}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/><TextBlock Text="{Binding Username}" Style="{StaticResource Caption}" TextTrimming="CharacterEllipsis"/><TextBlock Text="{Binding Group}" Style="{StaticResource Caption}" TextTrimming="CharacterEllipsis"/></StackPanel>
+                        <TextBlock Grid.Column="2" Text="{Binding Pid}" VerticalAlignment="Center" Foreground="{ThemeResource MutedBrush}"/>
+                        <Border Grid.Column="3" Background="{Binding Account.Status, Converter={StaticResource StatusBackground}}" CornerRadius="6" Padding="9,5" HorizontalAlignment="Left" VerticalAlignment="Center">
                           <TextBlock Text="{Binding Status}" Foreground="{Binding Account.Status, Converter={StaticResource StatusForeground}}" FontSize="12"/>
                         </Border>
-                        <StackPanel Grid.Column="3" Spacing="3" VerticalAlignment="Center"><TextBlock Text="{Binding Destination}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding Destination}"/><TextBlock Text="{Binding DestinationKind}" Style="{StaticResource Caption}"/></StackPanel>
-                        <TextBlock Grid.Column="4" Text="{Binding Failures}" VerticalAlignment="Center" Foreground="{ThemeResource MutedBrush}"/>
-                        <TextBlock Grid.Column="5" Text="{Binding Rejoin}" VerticalAlignment="Center" Foreground="{ThemeResource MutedBrush}"/>
-                        <TextBlock Grid.Column="6" Text="{Binding Error}" VerticalAlignment="Center" Foreground="{ThemeResource MutedBrush}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding Error}"/>
-                        <StackPanel Grid.Column="7" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                        <StackPanel Grid.Column="4" Spacing="3" VerticalAlignment="Center"><TextBlock Text="{Binding Destination}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding Destination}"/><TextBlock Text="{Binding DestinationKind}" Style="{StaticResource Caption}"/></StackPanel>
+                        <TextBlock Grid.Column="5" Text="{Binding Failures}" VerticalAlignment="Center" Foreground="{ThemeResource MutedBrush}"/>
+                        <TextBlock Grid.Column="6" Text="{Binding Rejoin}" VerticalAlignment="Center" Foreground="{ThemeResource MutedBrush}"/>
+                        <TextBlock Grid.Column="7" Text="{Binding Error}" VerticalAlignment="Center" Foreground="{ThemeResource MutedBrush}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding Error}"/>
+                        <TextBlock Grid.Column="8" Text="{Binding RunningTime}" VerticalAlignment="Center" ToolTipService.ToolTip="Time since first connection; includes disconnects and automatic rejoins"/><TextBlock Grid.Column="9" Text="{Binding LongestOnline}" VerticalAlignment="Center" ToolTipService.ToolTip="Longest saved run, including disconnects and automatic rejoins"/>
+                        <StackPanel Grid.Column="10" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
                           <Button x:Name="RowStartButton" Width="30" Height="34" Padding="0" Background="Transparent" BorderThickness="0" Tag="start" Click="RowAction_Click" ToolTipService.ToolTip="Start this account" AutomationProperties.Name="Start this account"><FontIcon Glyph="&#xE768;" FontSize="14"/></Button>
                           <Button x:Name="RowStopButton" Width="30" Height="34" Padding="0" Background="Transparent" BorderThickness="0" Tag="stop" Click="RowAction_Click" ToolTipService.ToolTip="Stop this account" AutomationProperties.Name="Stop this account"><FontIcon Glyph="&#xE71A;" FontSize="14"/></Button>
                           <Button x:Name="RowRestartButton" Width="30" Height="34" Padding="0" Background="Transparent" BorderThickness="0" Tag="restart" Click="RowAction_Click" ToolTipService.ToolTip="Restart this account" AutomationProperties.Name="Restart this account"><FontIcon Glyph="&#xE777;" FontSize="14"/></Button>
@@ -218,6 +220,7 @@
             <Border Grid.Column="2" Style="{StaticResource Card}"><StackPanel Spacing="8"><TextBlock Text="Rejoining" Style="{StaticResource Caption}"/><TextBlock x:Name="RejoiningMetric" FontSize="32" FontWeight="SemiBold"/><TextBlock x:Name="RejoiningHint" Style="{StaticResource Caption}"/></StackPanel></Border>
             <Border Grid.Column="3" Style="{StaticResource Card}"><StackPanel Spacing="8"><TextBlock Text="Needs attention" Style="{StaticResource Caption}"/><TextBlock x:Name="AttentionMetric" FontSize="32" FontWeight="SemiBold"/><TextBlock x:Name="AttentionHint" Style="{StaticResource Caption}"/></StackPanel></Border>
           </Grid>
+          <Border Style="{StaticResource Card}"><StackPanel Spacing="8"><TextBlock Text="Longest streak" Style="{StaticResource Caption}"/><TextBlock x:Name="LongestStreakMetric" FontSize="32" FontWeight="SemiBold"/><TextBlock x:Name="LongestStreakHint" Style="{StaticResource Caption}" TextWrapping="Wrap"/><TextBlock Text="Saved across app restarts · includes disconnects and automatic rejoins · ends on Stop or manual Restart" Style="{StaticResource Caption}" TextWrapping="Wrap"/></StackPanel></Border>
           <Grid ColumnSpacing="16"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
             <Border Style="{StaticResource Card}"><StackPanel Spacing="12">
               <TextBlock Text="Account status" Style="{StaticResource SectionTitle}"/>
@@ -314,6 +317,17 @@
               <TextBlock Text="A saved webhook appears as dots. Enter a new URL to replace it, or leave it untouched to keep it." Style="{StaticResource Caption}"/>
               <StackPanel Orientation="Horizontal" Spacing="8"><Button Content="Save webhook" Click="WebhookSave_Click" Style="{StaticResource AccentButtonStyle}" Padding="18,9" CornerRadius="8"/><Button Content="Send test" Click="WebhookTest_Click"/><Button Content="Remove webhook" Style="{StaticResource DangerButtonStyle}" Loaded="DangerControl_Loaded" Click="WebhookRemove_Click"/></StackPanel>
               <TextBlock x:Name="DiscordStatus" Text="No webhook configured." Style="{StaticResource Caption}"/>
+              <TextBlock Text="Error alerts attach the affected game window when capture is available. Closed, minimized, or protected windows may provide text only." Style="{StaticResource Caption}" TextWrapping="Wrap"/>
+              <TextBlock Text="Bot commands" Style="{StaticResource SectionTitle}" Margin="0,12,0,0"/>
+              <TextBlock Text="Create a Discord bot and install it in your server with bot and applications.commands scopes. Allow View Channel, Send Messages, and Embed Links. Only the user IDs below can use commands or account autocomplete." Style="{StaticResource Caption}" TextWrapping="Wrap"/>
+              <CheckBox x:Name="BotEnabled" Content="Enable /action and /status-register"/>
+              <PasswordBox x:Name="BotToken" Header="Bot token · hidden (leave blank to keep saved token)" PasswordRevealMode="Hidden" MaxLength="256"/>
+              <TextBox x:Name="BotGuild" Header="Discord server ID" MaxLength="20"/>
+              <TextBox x:Name="BotUsers" Header="Allowed Discord user IDs · comma separated" MaxLength="2200"/>
+              <StackPanel Orientation="Horizontal" Spacing="8"><Button Content="Save commands" Click="BotSave_Click"/><Button Content="Start" Tag="start" Click="BotControl_Click"/><Button Content="Stop" Tag="stop" Click="BotControl_Click" Style="{StaticResource DangerButtonStyle}" Loaded="DangerControl_Loaded"/><Button Content="Restart" Tag="restart" Click="BotControl_Click"/><Button Content="Remove bot" Click="BotRemove_Click"/></StackPanel>
+              <TextBlock x:Name="BotConnection" Text="Offline" FontSize="12" Foreground="#DC3C3C"/>
+              <TextBlock Text="Save keeps your settings. Use Start or Restart to connect with saved settings." Style="{StaticResource Caption}" TextWrapping="Wrap"/>
+              <TextBlock x:Name="BotStatus" Text="Commands disabled." Style="{StaticResource Caption}" TextWrapping="Wrap"/>
             </StackPanel>
           </Border>
         </StackPanel>
@@ -349,7 +363,7 @@
           <TextBlock x:Name="GamesEmpty" Text="No saved games yet. Add a game to get started." Style="{StaticResource Caption}"/>
           <ItemsControl x:Name="GameCards"><ItemsControl.ItemsPanel><ItemsPanelTemplate><local:GameCardPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
             <ItemsControl.ItemTemplate><DataTemplate>
-              <Border Style="{StaticResource Card}" Width="270" Margin="0,0,12,12"><StackPanel Spacing="12">
+              <Border x:Name="SavedGameCard" Style="{StaticResource Card}" Width="270" Margin="0,0,12,12" PointerEntered="GameCard_PointerEntered" PointerExited="GameCard_PointerExited" Tapped="GameCard_Tapped" KeyDown="GameCard_KeyDown" IsTabStop="True" AutomationProperties.Name="Edit saved game"><StackPanel Spacing="12">
                 <Grid Height="150" Background="{ThemeResource SidebarBrush}" CornerRadius="8"><TextBlock Text="Game" HorizontalAlignment="Center" VerticalAlignment="Center" Style="{StaticResource Caption}"/><Image Source="{Binding ThumbnailUrl}" Stretch="UniformToFill"/></Grid>
                 <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextWrapping="Wrap"/>
                 <TextBlock Text="{Binding GameName}" TextWrapping="Wrap"/>

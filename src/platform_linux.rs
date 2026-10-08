@@ -29,6 +29,17 @@ static DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
 // before Sober appears in /proc. The engine's launches are serialized as well.
 static LAUNCH_PENDING: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
+static LAUNCH_EXITS: LazyLock<Mutex<HashMap<String, bool>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+pub struct ExitWatch(String);
+impl ExitWatch {
+    pub fn new(identity: &ProcessIdentity) -> Option<Self> {
+        Some(Self(identity.tracker.clone()))
+    }
+    pub fn clean_exit(&self) -> Option<bool> {
+        LAUNCH_EXITS.lock().ok()?.remove(&self.0)
+    }
+}
 #[cfg(not(test))]
 static KEY: Mutex<Option<Zeroizing<[u8; 32]>>> = Mutex::new(None);
 
@@ -217,10 +228,18 @@ pub fn launch_for(uri: &str, account_id: &str) -> Result<(), String> {
         .spawn()
         .map_err(|_| "Cannot launch Sober; install Flatpak and org.vinegarhq.Sober")?;
     pending.insert(account_id.to_owned());
+    let tracker = tracker_from_command_line(uri).ok_or("Invalid launch identity")?;
     let account_id = account_id.to_owned();
     // Reap the Flatpak child; closing the supervisor deliberately leaves clients open.
     std::thread::spawn(move || {
-        let _ = child.wait();
+        if let Ok(status) = child.wait()
+            && let Ok(mut exits) = LAUNCH_EXITS.lock()
+        {
+            if exits.len() >= 1000 {
+                exits.clear();
+            }
+            exits.insert(tracker, status.success());
+        }
         if let Ok(mut pending) = LAUNCH_PENDING.lock() {
             pending.remove(&account_id);
         }
@@ -260,6 +279,9 @@ fn isolation_arguments(instance: &Path) -> Result<Vec<String>, String> {
         serde_json::from_str(include_str!("../scripts/sober-isolation/options.json"))
             .map_err(|_| "Invalid built-in Sober sandbox options")?;
     args.push(format!("--filesystem={instance}"));
+    // Flatpak reconstructs HOME from the passwd entry; the host environment
+    // alone does not isolate Sober's HOME-relative instance lock.
+    args.push(format!("--env=HOME={instance}"));
     for (variable, suffix) in [
         ("XDG_DATA_HOME", "data"),
         ("XDG_CONFIG_HOME", "config"),
@@ -360,13 +382,12 @@ fn open_logs(pid: u32) -> Result<Vec<LogFile>, String> {
         let Ok(path) = std::fs::read_link(fd.path()) else {
             continue;
         };
-        if !path.is_absolute()
-            || path.extension().is_none_or(|e| e != "log")
-            || !path.components().any(|c| c.as_os_str() == "sober_logs")
-        {
+        if !is_sober_log(&path) {
             continue;
         }
-        let path = root.join("root").join(path.strip_prefix("/").unwrap());
+        // Read the descriptor itself: Flatpak mount paths and deleted/rotated
+        // log names need not resolve through /proc/PID/root from the host.
+        let path = fd.path();
         if let Ok(metadata) = path.metadata()
             && metadata.is_file()
         {
@@ -377,6 +398,12 @@ fn open_logs(pid: u32) -> Result<Vec<LogFile>, String> {
         }
     }
     Ok(files)
+}
+fn is_sober_log(path: &Path) -> bool {
+    path.is_absolute()
+        && path.extension().is_some_and(|e| e == "log")
+        && (path.components().any(|c| c.as_os_str() == "sober_logs")
+            || path.parent().is_some_and(|p| p.ends_with("sober/logs")))
 }
 fn exclusive_log<'a>(
     sandbox: Sandbox,
@@ -566,6 +593,17 @@ fn supports_input_device(version: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sandbox_home_is_explicit_and_log_paths_are_restricted() {
+        let args = isolation_arguments(Path::new("/tmp/test/sober-instances/123")).unwrap();
+        assert!(args.contains(&"--env=HOME=/tmp/test/sober-instances/123".into()));
+        assert!(is_sober_log(Path::new(
+            "/home/user/sober/sober_logs/latest.log"
+        )));
+        assert!(is_sober_log(Path::new("/home/user/sober/logs/latest.log")));
+        assert!(!is_sober_log(Path::new("/home/user/other/latest.log")));
+        assert!(!is_sober_log(Path::new("relative/sober_logs/latest.log")));
+    }
     #[test]
     fn input_device_grants_require_a_supported_flatpak_version() {
         for version in ["Flatpak 1.15.6", "Flatpak 1.16.3", "Flatpak 2.0.0"] {
