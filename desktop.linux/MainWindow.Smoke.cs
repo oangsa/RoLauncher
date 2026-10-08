@@ -64,12 +64,25 @@ public sealed partial class MainWindow
             SendPointerClick(StartButton); await Task.Delay(300);
             var rowButton = FindLinux<Button>(AccountList, "RowDetailsButton")!;
             Root.UpdateLayout();
+            AccountTableScroll.ChangeView(AccountTableScroll.ScrollableWidth, null, null, true);
+            await Task.Delay(150);
+            Root.UpdateLayout();
             SendPointerClick(rowButton);
             await Task.Delay(200);
             File.WriteAllText(Path.Combine(directory, "pointer-trace.txt"), string.Join("\n", trace) + $"\nrow {rowButton.ActualWidth}x{rowButton.ActualHeight}; tag {rowButton.Tag}; modal {_modalOpen}; feedback {Feedback.Message}");
             Check(_modalOpen && _editorRow == ResolveAccount(rowButton), "Actual row edit button resolves the clicked account.");
             _accountDialog.Hide();
             await WaitLinuxAsync(() => !_modalOpen, "The row editor finishes closing before another dialog opens.");
+            AccountTableScroll.ChangeView(0, null, null, true);
+            await Task.Delay(150);
+            Root.UpdateLayout();
+            var clickedRow = _visibleRows[0];
+            var rowContainer = AccountList.ContainerFromItem(clickedRow) as FrameworkElement
+                ?? throw new InvalidOperationException("Account row container missing.");
+            SendPointerClick(rowContainer);
+            await WaitLinuxAsync(() => _modalOpen && _editorRow == clickedRow, "Native Linux row click opens the clicked account editor.");
+            _accountDialog.Hide();
+            await WaitLinuxAsync(() => !_modalOpen, "The row click editor finishes closing.");
             Tab_Click(SettingsTab, new RoutedEventArgs());
             PageScroll.ChangeView(null, 10000, null, true); await Task.Delay(150);
             Tab_Click(AccountsTab, new RoutedEventArgs()); await Task.Delay(150);
