@@ -2,6 +2,8 @@ using Microsoft.UI;
 using Microsoft.UI.Windowing;
 using Windows.System;
 using WinRT.Interop;
+using Microsoft.UI.Xaml.Media;
+using Windows.UI.ViewManagement;
 
 namespace RoLauncher.Desktop;
 
@@ -9,6 +11,8 @@ public sealed partial class MainWindow
 {
     private IDisposable ConfigureDesktop()
     {
+        // Native acrylic owns system transparency, activation and contrast fallback.
+        SystemBackdrop = new DesktopAcrylicBackdrop();
         var hwnd = WindowNative.GetWindowHandle(this);
         var appWindow = AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(hwnd));
         appWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "RoLauncher.ico"));
@@ -28,6 +32,7 @@ public sealed partial class MainWindow
     }
 
     private void InitializePicker(object picker) => InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+    private static bool NavigationAnimationsEnabled() => new UISettings().AnimationsEnabled && !new AccessibilitySettings().HighContrast;
     private void SelectAllRows() { foreach (var row in _visibleRows) row.IsSelected = true; UpdateSelectionSettings(); }
     private async Task ShowAccountDialogAsync() => await _accountDialog.ShowAsync();
     private static bool IsControlDown() => Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control)

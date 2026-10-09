@@ -38,6 +38,45 @@ public sealed partial class MainWindow
             for (var i = 0; i < 100 && _refreshing; i++) await Task.Delay(50);
             Assert(!_refreshing, "Initial account and settings refresh finishes before layout measurements.");
             Root.UpdateLayout();
+            foreach (var destination in Destinations)
+            {
+                SwitchPage(destination.Tab, false);
+                Root.UpdateLayout();
+                var position = destination.Tab.TransformToVisual(SidebarNavigation).TransformPoint(new Windows.Foundation.Point()).Y;
+                Assert(Destinations.Count(d => d.Tab.IsChecked == true) == 1 && Destinations.Count(d => d.Page.Visibility == Visibility.Visible) == 1,
+                    "Each destination has one selected tab and one immediately interactive page.");
+                Assert(NavigationSelection.Visibility == Visibility.Visible && Math.Abs(NavigationSelectionTransform.TranslateY - position) < .5 &&
+                    Math.Abs(NavigationSelection.Height - destination.Tab.ActualHeight) < .5,
+                    "The selection pill follows the actual row across all sidebar groups.");
+                Assert(_pageTransition is null && _selectionTransition is null && PageContent.Opacity == 1 && PageTransitionTransform.TranslateY == 0,
+                    "Reduced-motion navigation settles immediately without leaving a hidden or offset page.");
+            }
+            SwitchPage(RecoveryTab, false);
+            await Task.Delay(80); // Let the destination's deferred scroll reset finish.
+            PageScroll.ChangeView(null, 180, null, true); await Task.Delay(80);
+            var retainedScroll = PageScroll.VerticalOffset;
+            RecoveryTab.IsChecked = false; // A real ToggleButton click toggles itself first.
+            Tab_Click(RecoveryTab, new RoutedEventArgs());
+            Assert(RecoveryTab.IsChecked == true && retainedScroll > 0 && Math.Abs(PageScroll.VerticalOffset - retainedScroll) < .5,
+                "Clicking the current destination retains its selection and scroll position.");
+            if (NavigationAnimationsEnabled())
+            {
+                SwitchPage(AccountsTab, true);
+                await Task.Delay(50);
+                Assert(PageContent.Opacity >= .78 && PageContent.Opacity < 1 && Math.Abs(PageTransitionTransform.TranslateY) > .01,
+                    $"Page fade and translation actually animate before settling (opacity {PageContent.Opacity}, offset {PageTransitionTransform.TranslateY}, state {_pageTransition?.GetCurrentState()}, time {_pageTransition?.GetCurrentTime()}).");
+                foreach (var destination in Destinations.Reverse())
+                {
+                    SwitchPage(destination.Tab, true); await Task.Delay(16);
+                }
+                await Task.Delay(350);
+                var position = AccountsTab.TransformToVisual(SidebarNavigation).TransformPoint(new Windows.Foundation.Point()).Y;
+                Assert(AccountsPage.Visibility == Visibility.Visible && AccountsTab.IsChecked == true && Math.Abs(PageContent.Opacity - 1) < .001 &&
+                    Math.Abs(PageTransitionTransform.TranslateY) < .01 && Math.Abs(NavigationSelectionTransform.TranslateY - position) < .5,
+                    "Rapid navigation cancels earlier transitions and settles at the latest selected page.");
+            }
+            SwitchPage(AccountsTab, false);
+            PageScroll.ChangeView(0, 0, null, true);
             var cookiePosition = CookieInput.TransformToVisual(AccountsPage).TransformPoint(new Windows.Foundation.Point());
             var loginPosition = LoginButton.TransformToVisual(AccountsPage).TransformPoint(new Windows.Foundation.Point());
             Assert(loginPosition.Y > cookiePosition.Y && CookieInput.AcceptsReturn && CookieInput.ActualWidth > 200, "Multiline cookie input has a separate action row.");
@@ -61,11 +100,11 @@ public sealed partial class MainWindow
             Root.UpdateLayout();
             var hoverBorder = FindVisual<ContentPresenter>(PresetsTab, "ContentPresenter");
             var checkedHoverBorder = FindVisual<ContentPresenter>(RecoveryTab, "ContentPresenter");
-            Assert(hoverBorder?.Background is SolidColorBrush hoverFill && hoverFill.Color.A == 0 &&
+            Assert(hoverBorder?.Background is SolidColorBrush hoverFill && hoverFill.Color.A > 0 &&
                 hoverBorder.BorderBrush is SolidColorBrush hoverStroke && hoverStroke.Color.A == 0 &&
                 checkedHoverBorder?.Background is SolidColorBrush checkedFill && checkedFill.Color.A == 0 &&
                 checkedHoverBorder.BorderBrush is SolidColorBrush checkedStroke && checkedStroke.Color.A == 0,
-                "Selected and unselected sidebar hover states have transparent fill and border.");
+                "Unselected sidebar hover has a subtle fill; the selected row preserves the shared pill and transparent border.");
             await CaptureAsync(directory, "sidebar-hover.png");
             VisualStateManager.GoToState(PresetsTab, "Normal", false);
             VisualStateManager.GoToState(RecoveryTab, "Checked", false);
@@ -122,7 +161,7 @@ public sealed partial class MainWindow
             await Task.Delay(150);
             Assert(Feedback.IsOpen && Feedback.Message == "Test queued. Check recent activity for delivery status.", "Send test displays the toast.");
             var toastPosition = Feedback.TransformToVisual(Root).TransformPoint(new Windows.Foundation.Point());
-            Assert(toastPosition.Y == 12 && Math.Abs(toastPosition.X + Feedback.ActualWidth / 2 - (Root.ActualWidth + 224) / 2) < 1,
+            Assert(toastPosition.Y == 12 && Math.Abs(toastPosition.X + Feedback.ActualWidth / 2 - (Root.ActualWidth + Root.ColumnDefinitions[0].ActualWidth) / 2) < 1,
                 "Toast overlays the top center of the window.");
             Assert(SettingsPage.ActualHeight == pageHeight, "Toast does not move or resize page content.");
             await CaptureAsync(directory, "toast.png");
@@ -568,7 +607,7 @@ public sealed partial class MainWindow
             _rows.Clear();
             ApplyFilters();
             await CaptureAsync(directory, "empty.png");
-            File.WriteAllText(Path.Combine(directory, "result.txt"), "WinUI smoke passed: header select/clear, saved bot controls and status, game hover animation, sidebar scroll reset, saved game create/edit/account selection, close preference, changelog modal; bulk settings Save/Cancel, atomic invalid/rejected saves, alias patterns, selected/all account scopes, groups and filtering, saved profile review/apply, backup picker, recovery/history and account filtering; inherited toast, modal, deletion, selection, bulk-action, sign-in, resize and rendering checks.");
+            File.WriteAllText(Path.Combine(directory, "result.txt"), "WinUI smoke passed: animated page fade/slide, rapid navigation cancellation, sliding selection across all sidebar groups, reduced-motion path and current-page scroll retention; header select/clear, saved bot controls and status, game hover animation, sidebar scroll reset, saved game create/edit/account selection, close preference, changelog modal; bulk settings Save/Cancel, atomic invalid/rejected saves, alias patterns, selected/all account scopes, groups and filtering, saved profile review/apply, backup picker, recovery/history and account filtering; inherited toast, modal, deletion, selection, bulk-action, sign-in, resize and rendering checks.");
         }
         catch (Exception ex)
         {
@@ -618,6 +657,8 @@ public sealed partial class MainWindow
     private async Task CaptureAsync(string directory, string name, UIElement? element = null)
     {
         await Task.Delay(150);
+        if (_pageTransition?.GetCurrentState() == Microsoft.UI.Xaml.Media.Animation.ClockState.Active ||
+            _selectionTransition?.GetCurrentState() == Microsoft.UI.Xaml.Media.Animation.ClockState.Active) await Task.Delay(160);
         var bitmap = new RenderTargetBitmap();
         if (element is ContentDialog) element = OpenDialog();
         await bitmap.RenderAsync(element ?? Root);

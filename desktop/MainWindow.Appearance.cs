@@ -1,12 +1,110 @@
 using System.Text.RegularExpressions;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Animation;
 
 namespace RoLauncher.Desktop;
 
 public sealed partial class MainWindow
 {
+    private int _selectedPage;
+    private ToggleButton? _activeTab;
+    private Storyboard? _pageTransition, _selectionTransition;
+
+    private (ToggleButton Tab, FrameworkElement Page, int Id)[] Destinations =>
+    [
+        (AccountsTab, AccountsPage, 0), (GamesTab, GamesPage, 4),
+        (RecoveryTab, RecoveryPage, 3), (PresetsTab, PresetsPage, 6),
+        (SettingsTab, SettingsPage, 1), (DiscordTab, DiscordPage, 7),
+        (BackupsTab, BackupsPage, 8), (UpdatesTab, UpdatesPage, 9),
+        (SupportTab, SupportPage, 10)
+    ];
+
+    private void InitializeNavigation()
+    {
+        _activeTab = AccountsTab;
+        Root.Loaded += (_, _) => UpdateNavigationSelection(_activeTab, false);
+    }
+
+    private void SidebarNavigation_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (_activeTab is not null && NavigationSelection is not null)
+            UpdateNavigationSelection(_activeTab, false);
+    }
+
+    private void SwitchPage(ToggleButton tab, bool animate)
+    {
+        var page = int.Parse((string)tab.Tag);
+        // ToggleButton toggles itself off when clicked again. Keep the current
+        // destination checked without replaying motion or losing scroll position.
+        if (page == _selectedPage) { tab.IsChecked = true; return; }
+        var previousY = NavigationSelectionTransform.TranslateY;
+        foreach (var destination in Destinations)
+        {
+            var selected = page == destination.Id;
+            destination.Tab.IsChecked = selected;
+            destination.Tab.FontWeight = selected ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal;
+            destination.Page.Visibility = selected ? Visibility.Visible : Visibility.Collapsed;
+        }
+        _selectedPage = page;
+        _activeTab = tab;
+        UpdateSelectionSettings();
+        PageContent.MinWidth = 0;
+        PageScroll.UpdateLayout();
+        PageScroll.ChangeView(0, 0, null, true);
+        // Keep queued scroll work tied to the destination which scheduled it.
+        DispatcherQueue.TryEnqueue(() => { if (_selectedPage == page) PageScroll.ChangeView(0, 0, null, true); });
+        var direction = Math.Sign(tab.TransformToVisual(SidebarNavigation).TransformPoint(new Windows.Foundation.Point()).Y - previousY);
+        UpdateNavigationSelection(tab, animate);
+        AnimatePage(direction, animate);
+        if (page == 3) _ = GuardAsync(RefreshHistoryAsync);
+        if (page == 8) _ = GuardAsync(RefreshBackupsAsync);
+    }
+
+    private void UpdateNavigationSelection(ToggleButton tab, bool animate)
+    {
+        if (tab.ActualHeight <= 0) return;
+        var from = NavigationSelectionTransform.TranslateY;
+        _selectionTransition?.Stop();
+        var position = tab.TransformToVisual(SidebarNavigation).TransformPoint(new Windows.Foundation.Point()).Y;
+        NavigationSelection.Height = tab.ActualHeight;
+        NavigationSelectionTransform.TranslateY = position;
+        NavigationSelection.Visibility = Visibility.Visible;
+        _selectionTransition = null;
+        if (!animate || Math.Abs(from - position) < .5) return;
+        _selectionTransition = new Storyboard();
+        AddMotion(_selectionTransition, NavigationSelectionTransform, "TranslateY", from, position, 260);
+        _selectionTransition.Begin();
+    }
+
+    private void AnimatePage(int direction, bool animate)
+    {
+        _pageTransition?.Stop();
+        PageContent.Opacity = 1;
+        PageTransitionTransform.TranslateY = 0;
+        _pageTransition = null;
+        if (!animate) return;
+        _pageTransition = new Storyboard();
+        AddMotion(_pageTransition, PageContent, "Opacity", .78, 1, 180);
+        AddMotion(_pageTransition, PageTransitionTransform, "TranslateY", direction < 0 ? -10 : 10, 0, 240);
+        _pageTransition.Begin();
+    }
+
+    private static void AddMotion(Storyboard storyboard, DependencyObject target, string property,
+        double from, double to, int milliseconds)
+    {
+        var animation = new DoubleAnimation
+        {
+            From = from, To = to, Duration = new Duration(TimeSpan.FromMilliseconds(milliseconds)), EnableDependentAnimation = target is CompositeTransform,
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+        };
+        Storyboard.SetTarget(animation, target);
+        Storyboard.SetTargetProperty(animation, property);
+        storyboard.Children.Add(animation);
+    }
+
     private readonly System.Collections.ObjectModel.ObservableCollection<AccountRow> _presetVisibleRows = [];
     private readonly HashSet<string> _presetChosenIds = [];
     private HashSet<string>? _presetLookupDraftIds;

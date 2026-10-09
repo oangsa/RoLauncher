@@ -16,12 +16,18 @@
             <SolidColorBrush x:Key="ToggleButtonForegroundCheckedPointerOver" Color="#FAFAFA"/>
             <SolidColorBrush x:Key="ToggleButtonForegroundCheckedPressed" Color="#FAFAFA"/>
           </ResourceDictionary>
+          <ResourceDictionary x:Key="HighContrast">
+            <SolidColorBrush x:Key="ToggleButtonForegroundChecked" Color="{ThemeResource SystemColorHighlightTextColor}"/>
+            <SolidColorBrush x:Key="ToggleButtonForegroundCheckedPointerOver" Color="{ThemeResource SystemColorHighlightTextColor}"/>
+            <SolidColorBrush x:Key="ToggleButtonForegroundCheckedPressed" Color="{ThemeResource SystemColorHighlightTextColor}"/>
+          </ResourceDictionary>
         </ResourceDictionary.ThemeDictionaries>
       </ResourceDictionary>
     </Grid.Resources>
     <Grid.KeyboardAccelerators><KeyboardAccelerator Key="A" Modifiers="Control" Invoked="SelectAll_Invoked"/></Grid.KeyboardAccelerators>
-    <Grid.ColumnDefinitions><ColumnDefinition Width="224"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+    <Grid.ColumnDefinitions><ColumnDefinition Width="244"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+    <Border Grid.ColumnSpan="2" Grid.RowSpan="4" Background="{ThemeResource GlassAmbientBrush}" IsHitTestVisible="False"/>
     <Grid Grid.Column="1" Margin="28,22,28,18" ColumnSpacing="16">
       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
       <StackPanel Spacing="4">
@@ -31,11 +37,11 @@
       <TextBlock x:Name="VersionLabel" Grid.Column="1" VerticalAlignment="Center" Style="{StaticResource Caption}"/>
       <Button Grid.Column="2" Click="Changelog_Click" VerticalAlignment="Center" ToolTipService.ToolTip="What’s new" AutomationProperties.Name="What’s new"><FontIcon Glyph="&#xE946;"/></Button>
     </Grid>
-    <Border Grid.RowSpan="4" Background="{ThemeResource SidebarBrush}" Padding="12,24,12,12" BorderBrush="{ThemeResource LineBrush}" BorderThickness="0,0,1,0">
+    <Border Grid.RowSpan="4" Background="{ThemeResource SidebarBrush}" Margin="12" Padding="10,12" CornerRadius="22" BorderBrush="{ThemeResource GlassEdgeBrush}" BorderThickness="1">
       <Border.Resources>
         <SolidColorBrush x:Key="ToggleButtonBackground" Color="Transparent"/>
-        <SolidColorBrush x:Key="ToggleButtonBackgroundPointerOver" Color="Transparent"/>
-        <SolidColorBrush x:Key="ToggleButtonBackgroundPressed" Color="Transparent"/>
+        <SolidColorBrush x:Key="ToggleButtonBackgroundPointerOver" Color="{ThemeResource NavigationHoverColor}"/>
+        <SolidColorBrush x:Key="ToggleButtonBackgroundPressed" Color="{ThemeResource NavigationHoverColor}"/>
         <SolidColorBrush x:Key="ToggleButtonBackgroundChecked" Color="Transparent"/>
         <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPointerOver" Color="Transparent"/>
         <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPressed" Color="Transparent"/>
@@ -47,57 +53,63 @@
         <SolidColorBrush x:Key="ToggleButtonBorderBrushCheckedPressed" Color="Transparent"/>
       </Border.Resources>
       <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-        <StackPanel Spacing="4">
+        <Grid x:Name="SidebarNavigation" SizeChanged="SidebarNavigation_SizeChanged">
+          <Border x:Name="NavigationSelection" VerticalAlignment="Top" Background="{ThemeResource NavigationSelectionBrush}" BorderBrush="{ThemeResource GlassEdgeBrush}" BorderThickness="1" CornerRadius="12" IsHitTestVisible="False" Visibility="Collapsed">
+            <Border.RenderTransform><CompositeTransform x:Name="NavigationSelectionTransform"/></Border.RenderTransform>
+            <Border Width="3" Height="18" Margin="3,0,0,0" HorizontalAlignment="Left" VerticalAlignment="Center" CornerRadius="2" Background="{ThemeResource NavigationMarkerBrush}"/>
+          </Border>
+          <StackPanel Spacing="4">
           <TextBlock Text="WORKSPACE" Style="{StaticResource Caption}" FontWeight="SemiBold" Margin="12,16,0,8"/>
-          <ToggleButton x:Name="AccountsTab" Tag="0" IsChecked="True" FontWeight="SemiBold" Click="Tab_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="10,11" BorderThickness="3,0,0,0" CornerRadius="6" AutomationProperties.Name="Accounts">
+          <ToggleButton x:Name="AccountsTab" Tag="0" IsChecked="True" FontWeight="SemiBold" Click="Tab_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="10,11" BorderThickness="3,0,0,0" CornerRadius="12" AutomationProperties.Name="Accounts">
             <Grid ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="20"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
               <FontIcon Glyph="&#xE716;" FontSize="16"/><TextBlock Grid.Column="1" Text="Accounts" FontSize="13" VerticalAlignment="Center" TextWrapping="Wrap"/>
             </Grid>
           </ToggleButton>
-          <ToggleButton x:Name="GamesTab" Tag="4" Click="Tab_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="10,11" BorderThickness="3,0,0,0" CornerRadius="6" AutomationProperties.Name="Games">
+          <ToggleButton x:Name="GamesTab" Tag="4" Click="Tab_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="10,11" BorderThickness="3,0,0,0" CornerRadius="12" AutomationProperties.Name="Games">
             <Grid ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="20"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
               <FontIcon Glyph="&#xE7FC;" FontSize="16"/><TextBlock Grid.Column="1" Text="Games" FontSize="13" VerticalAlignment="Center" TextWrapping="Wrap"/>
             </Grid>
           </ToggleButton>
-          <ToggleButton x:Name="RecoveryTab" Tag="3" Click="Tab_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="10,11" BorderThickness="3,0,0,0" CornerRadius="6" AutomationProperties.Name="Dashboard">
+          <ToggleButton x:Name="RecoveryTab" Tag="3" Click="Tab_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="10,11" BorderThickness="3,0,0,0" CornerRadius="12" AutomationProperties.Name="Dashboard">
             <Grid ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="20"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
               <FontIcon Glyph="&#xE9D9;" FontSize="16"/><TextBlock Grid.Column="1" Text="Dashboard" FontSize="13" VerticalAlignment="Center" TextWrapping="Wrap"/>
             </Grid>
           </ToggleButton>
           <TextBlock Text="ACCOUNTS" Style="{StaticResource Caption}" FontWeight="SemiBold" Margin="12,16,0,8"/>
-          <ToggleButton x:Name="PresetsTab" Tag="6" Click="Tab_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="10,11" BorderThickness="3,0,0,0" CornerRadius="6" AutomationProperties.Name="Account presets">
+          <ToggleButton x:Name="PresetsTab" Tag="6" Click="Tab_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="10,11" BorderThickness="3,0,0,0" CornerRadius="12" AutomationProperties.Name="Account presets">
             <Grid ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="20"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
               <FontIcon Glyph="&#xE8F1;" FontSize="16"/><TextBlock Grid.Column="1" Text="Account presets" FontSize="13" VerticalAlignment="Center" TextWrapping="Wrap"/>
             </Grid>
           </ToggleButton>
           <TextBlock Text="SETTINGS" Style="{StaticResource Caption}" FontWeight="SemiBold" Margin="12,16,0,8"/>
-          <ToggleButton x:Name="SettingsTab" Tag="1" Click="Tab_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="10,11" BorderThickness="3,0,0,0" CornerRadius="6" AutomationProperties.Name="General">
+          <ToggleButton x:Name="SettingsTab" Tag="1" Click="Tab_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="10,11" BorderThickness="3,0,0,0" CornerRadius="12" AutomationProperties.Name="General">
             <Grid ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="20"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
               <FontIcon Glyph="&#xE713;" FontSize="16"/><TextBlock Grid.Column="1" Text="General" FontSize="13" VerticalAlignment="Center" TextWrapping="Wrap"/>
             </Grid>
           </ToggleButton>
-          <ToggleButton x:Name="DiscordTab" Tag="7" Click="Tab_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="10,11" BorderThickness="3,0,0,0" CornerRadius="6" AutomationProperties.Name="Discord notifications">
+          <ToggleButton x:Name="DiscordTab" Tag="7" Click="Tab_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="10,11" BorderThickness="3,0,0,0" CornerRadius="12" AutomationProperties.Name="Discord notifications">
             <Grid ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="20"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
               <FontIcon Glyph="&#xE8F2;" FontSize="16"/><TextBlock Grid.Column="1" Text="Discord notifications" FontSize="13" VerticalAlignment="Center" TextWrapping="Wrap"/>
             </Grid>
           </ToggleButton>
-          <ToggleButton x:Name="BackupsTab" Tag="8" Click="Tab_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="10,11" BorderThickness="3,0,0,0" CornerRadius="6" AutomationProperties.Name="Backup and restore">
+          <ToggleButton x:Name="BackupsTab" Tag="8" Click="Tab_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="10,11" BorderThickness="3,0,0,0" CornerRadius="12" AutomationProperties.Name="Backup and restore">
             <Grid ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="20"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
               <FontIcon Glyph="&#xE8F1;" FontSize="16"/><TextBlock Grid.Column="1" Text="Backup and restore" FontSize="13" VerticalAlignment="Center" TextWrapping="Wrap"/>
             </Grid>
           </ToggleButton>
-          <ToggleButton x:Name="UpdatesTab" Tag="9" Click="Tab_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="10,11" BorderThickness="3,0,0,0" CornerRadius="6" AutomationProperties.Name="Updates">
+          <ToggleButton x:Name="UpdatesTab" Tag="9" Click="Tab_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="10,11" BorderThickness="3,0,0,0" CornerRadius="12" AutomationProperties.Name="Updates">
             <Grid ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="20"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
               <FontIcon Glyph="&#xE895;" FontSize="16"/><TextBlock Grid.Column="1" Text="Updates" FontSize="13" VerticalAlignment="Center" TextWrapping="Wrap"/>
             </Grid>
           </ToggleButton>
           <TextBlock Text="TOOLS" Style="{StaticResource Caption}" FontWeight="SemiBold" Margin="12,16,0,8"/>
-          <ToggleButton x:Name="SupportTab" Tag="10" Click="Tab_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="10,11" BorderThickness="3,0,0,0" CornerRadius="6" AutomationProperties.Name="Support and integrations">
+          <ToggleButton x:Name="SupportTab" Tag="10" Click="Tab_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="10,11" BorderThickness="3,0,0,0" CornerRadius="12" AutomationProperties.Name="Support and integrations">
             <Grid ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="20"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
               <FontIcon Glyph="&#xE90F;" FontSize="16"/><TextBlock Grid.Column="1" Text="Support and integrations" FontSize="13" VerticalAlignment="Center" TextWrapping="Wrap"/>
             </Grid>
           </ToggleButton>
-        </StackPanel>
+          </StackPanel>
+        </Grid>
       </ScrollViewer>
     </Border>
     <InfoBar x:Name="UpdateNotice" Grid.Column="1" Grid.Row="2" Margin="28,0,28,18" Visibility="Collapsed" IsOpen="False" IsClosable="False" Severity="Informational">
@@ -105,6 +117,7 @@
     </InfoBar>
     <ScrollViewer x:Name="PageScroll" Grid.Column="1" Grid.Row="3" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" HorizontalScrollMode="Disabled" Padding="28,0,28,8">
       <Grid x:Name="PageContent">
+        <Grid.RenderTransform><CompositeTransform x:Name="PageTransitionTransform"/></Grid.RenderTransform>
         <StackPanel x:Name="AccountsPage" Spacing="16">
           <Border Style="{StaticResource Card}">
             <StackPanel Spacing="14">

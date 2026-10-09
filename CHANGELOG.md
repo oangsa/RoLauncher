@@ -1,8 +1,10 @@
 # Changelog
 
-## [1.5.1] — Unreleased
+## [1.6.0] — Unreleased
 
-- Capture the complete Roblox client at physical-pixel dimensions on scaled displays, including 2.8K, 4K and ultrawide windows. Re-measure each capture and skip frames resized during capture.
+- Add gentle fade/slide transitions when changing sidebar pages, with interruptible motion and support for Windows' reduced-motion setting. Clicking the current page preserves its scroll position.
+- Add a floating acrylic sidebar, softer translucent surfaces, and a sliding selection pill with a visible active-page marker. Keep system, light and dark appearance, with solid high-contrast fallbacks.
+- Fix cropped Roblox instance screenshots on scaled high-resolution displays. Capture physical client dimensions on each request and skip frames resized during capture.
 
 ## [1.5.0] — 2026-10-08
 

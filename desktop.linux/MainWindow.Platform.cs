@@ -1,4 +1,6 @@
 using Microsoft.UI.Windowing;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Media;
 using Windows.System;
 
 namespace RoLauncher.Desktop;
@@ -7,6 +9,10 @@ public sealed partial class MainWindow
 {
     private IDisposable ConfigureDesktop()
     {
+        // Uno has no Windows desktop acrylic backdrop behind the translucent
+        // workspace. Keep its host surface opaque while retaining sidebar materials.
+        Root.ActualThemeChanged += (_, _) => ApplyLinuxWorkspaceSurface();
+        ApplyLinuxWorkspaceSurface();
         // Uno initially lays an inline ContentDialog out as page content. Remove it
         // from the visual tree; ShowAsync attaches it to its own popup when needed.
         Root.Children.Remove(_accountDialog);
@@ -32,6 +38,9 @@ public sealed partial class MainWindow
 
     // Uno's Linux pickers use the session's XDG desktop portal (GNOME or KDE).
     private static void InitializePicker(object picker) { }
+    private static bool NavigationAnimationsEnabled() => new Windows.UI.ViewManagement.UISettings().AnimationsEnabled;
+    private void ApplyLinuxWorkspaceSurface() => Root.Background = new SolidColorBrush(Root.ActualTheme == ElementTheme.Dark
+        ? Windows.UI.Color.FromArgb(255, 24, 29, 41) : Windows.UI.Color.FromArgb(255, 244, 246, 250));
     private async Task ShowAccountDialogAsync() => await _accountDialog.ShowAsync();
     private void SelectAllRows()
     {

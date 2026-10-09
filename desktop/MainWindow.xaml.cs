@@ -41,6 +41,7 @@ public sealed partial class MainWindow : Window
         AccountList.ItemsSource = _visibleRows;
         PresetAccounts.ItemsSource = _presetVisibleRows;
         InitializeTheme();
+        InitializeNavigation();
         Root.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler(Workspace_PointerPressed), true);
 
         _tray = ConfigureDesktop();
@@ -372,31 +373,7 @@ public sealed partial class MainWindow : Window
 
     }
 
-    private void Tab_Click(object sender, RoutedEventArgs e)
-    {
-        var page = int.Parse((string)((ToggleButton)sender).Tag);
-        var destinations = new (ToggleButton Tab, FrameworkElement Page, int Id)[]
-        {
-            (AccountsTab, AccountsPage, 0), (SettingsTab, SettingsPage, 1),
-            (RecoveryTab, RecoveryPage, 3), (GamesTab, GamesPage, 4),
-            (PresetsTab, PresetsPage, 6),
-            (DiscordTab, DiscordPage, 7), (BackupsTab, BackupsPage, 8),
-            (UpdatesTab, UpdatesPage, 9), (SupportTab, SupportPage, 10)
-        };
-        foreach (var destination in destinations)
-        {
-            destination.Tab.IsChecked = page == destination.Id;
-            destination.Tab.FontWeight = page == destination.Id ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal;
-            destination.Page.Visibility = page == destination.Id ? Visibility.Visible : Visibility.Collapsed;
-        }
-        UpdateSelectionSettings();
-        PageContent.MinWidth = 0;
-        PageScroll.UpdateLayout();
-        PageScroll.ChangeView(0, 0, null, true);
-        DispatcherQueue.TryEnqueue(() => PageScroll.ChangeView(0, 0, null, true));
-        if (page == 3) _ = GuardAsync(RefreshHistoryAsync);
-        if (page == 8) _ = GuardAsync(RefreshBackupsAsync);
-    }
+    private void Tab_Click(object sender, RoutedEventArgs e) => SwitchPage((ToggleButton)sender, NavigationAnimationsEnabled());
     private void SelectAll_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs e)
     {
         if (_presetLookupDraftIds is not null && Root.XamlRoot is { } lookupRoot && Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(lookupRoot) is not (TextBox or PasswordBox))
