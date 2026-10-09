@@ -346,9 +346,9 @@ public sealed partial class MainWindow
                 var body = new TextBlock { Text = line[1..].Trim(), TextWrapping = TextWrapping.Wrap, FontSize = 14, IsTextSelectionEnabled = true };
                 Grid.SetColumn(body, 1); row.Children.Add(body); content.Children.Add(row);
             }
-            else content.Children.Add(new TextBlock { Text = line, FontSize = version ? 20 : section ? 16 : 14,
+            else content.Children.Add(new TextBlock { Text = line, FontSize = version ? 16 : 14,
                 FontWeight = version || section ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal,
-                Margin = new Thickness(0, version ? 16 : section ? 8 : 0, 0, 0), TextWrapping = TextWrapping.Wrap });
+                Margin = new Thickness(0, version && content.Children.Count > 0 ? 16 : section ? 8 : 0, 0, 0), TextWrapping = TextWrapping.Wrap });
         }
         return content;
     }

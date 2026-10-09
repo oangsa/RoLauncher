@@ -209,6 +209,9 @@ public sealed partial class MainWindow
             await Task.Delay(500);
             Assert(_modalOpen && _editorRow!.Id == "0", "Row details open a modal independent of selection.");
             AliasInput.Text = "Studio account";
+            Assert(FindVisual<Button>(OpenDialog(), "PrimaryButton")!.ActualWidth < 240 &&
+                FindVisual<Button>(OpenDialog(), "CloseButton")!.ActualWidth < 180,
+                "The inline account editor uses compact actions in its visible popup.");
             await CaptureAsync(directory, "account-modal.png", _accountDialog);
             PlaceInput.Text = "incomplete";
             InvokeDialogButton("PrimaryButton");
@@ -344,6 +347,7 @@ public sealed partial class MainWindow
             Assert(commands.Contains("/v1/login"), "Browser sign-in uses the authenticated bridge.");
             var changelog = ShowChangelogAsync();
             await Task.Delay(500);
+            AssertChangelogLayout();
             await CaptureAsync(directory, "changelog.png", OpenDialog());
             InvokeDialogButton("CloseButton"); await changelog;
             Tab_Click(SettingsTab, new RoutedEventArgs());
@@ -543,6 +547,10 @@ public sealed partial class MainWindow
             InvokeDialogButton("CloseButton"); await themedGame;
             ThemePicker.SelectedIndex = 1; await Task.Delay(200);
             Assert(Root.ActualTheme == ElementTheme.Light, "Light theme applies immediately.");
+            changelog = ShowChangelogAsync(); await Task.Delay(350);
+            AssertChangelogLayout();
+            await CaptureAsync(directory, "changelog-light.png", OpenDialog());
+            InvokeDialogButton("CloseButton"); await changelog;
             await CaptureAsync(directory, "appearance-light.png");
             ThemePicker.SelectedIndex = 0; await Task.Delay(200);
             Assert(Root.RequestedTheme == ElementTheme.Default, "System theme follows device preference.");
@@ -556,6 +564,10 @@ public sealed partial class MainWindow
             await CaptureAsync(directory, "accounts-wide.png");
             AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(hwnd)).Resize(new Windows.Graphics.SizeInt32((int)(1020 * scale), (int)(780 * scale)));
             await Task.Delay(350);
+            changelog = ShowChangelogAsync(); await Task.Delay(350);
+            AssertChangelogLayout();
+            await CaptureAsync(directory, "changelog-small.png", OpenDialog());
+            InvokeDialogButton("CloseButton"); await changelog;
             foreach (var tab in new[] { AccountsTab, GamesTab, RecoveryTab, PresetsTab, SettingsTab, DiscordTab, BackupsTab, UpdatesTab, SupportTab })
             {
                 Tab_Click(tab, new RoutedEventArgs()); await Task.Delay(80); Root.UpdateLayout();
@@ -654,6 +666,24 @@ public sealed partial class MainWindow
         var button = FindVisual<Button>(commands, name) ?? throw new InvalidOperationException($"Dialog button missing: {name}");
         ((IInvokeProvider)new ButtonAutomationPeer(button).GetPattern(PatternInterface.Invoke)).Invoke();
     }
+    private void AssertChangelogLayout()
+    {
+        var scroll = DialogControl<ScrollViewer>(_changelogDialog!, "ChangelogScroll")!;
+        Assert(scroll.ScrollableWidth < 1, "Release notes wrap without horizontal scrolling.");
+        var notes = (StackPanel)((Border)scroll.Content).Child;
+        foreach (var row in notes.Children.OfType<Grid>())
+        {
+            var body = (TextBlock)row.Children[1];
+            var right = body.TransformToVisual(scroll).TransformPoint(new Windows.Foundation.Point(body.ActualWidth, 0)).X;
+            Assert(right <= scroll.ActualWidth - 18, "Release-note text leaves a gutter for the scrollbar.");
+        }
+        var button = DialogControl<Button>(_changelogDialog!, "CloseButton")!;
+        Assert(button.ActualWidth < 180 && button.ActualHeight >= 39 && button.ActualHeight <= 41,
+            "The single Done action remains a compact workspace-sized button.");
+        var bottom = button.TransformToVisual(OpenDialog()).TransformPoint(new Windows.Foundation.Point(0, button.ActualHeight)).Y;
+        Assert(bottom <= ((FrameworkElement)OpenDialog()).ActualHeight, "The dialog action remains visible at the current window size.");
+    }
+
     private async Task CaptureAsync(string directory, string name, UIElement? element = null)
     {
         await Task.Delay(150);

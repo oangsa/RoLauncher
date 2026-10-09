@@ -1,4 +1,4 @@
-# RoLauncher 1.6.0-dev.5875acff6141
+# RoLauncher 1.6.0-dev.852bc6957f79
 
 A Roblox account launcher. Manage your accounts, save launch profiles, and reconnect automatically when a session disconnects. Windows uses native WinUI; the Linux development port reuses the same views through Uno and targets Sober on Ubuntu and Arch with GNOME and KDE.
 

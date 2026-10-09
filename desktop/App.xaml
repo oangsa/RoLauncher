@@ -11,6 +11,7 @@
           <SolidColorBrush x:Key="DangerBrush" Color="#B91C1C"/>
           <SolidColorBrush x:Key="WorkspaceBrush" Color="Transparent"/>
           <SolidColorBrush x:Key="CardBrush" Color="#B3FFFFFF"/>
+          <AcrylicBrush x:Key="DialogSurfaceBrush" TintColor="#FFFFFF" TintOpacity="0.65" TintLuminosityOpacity="0.75" FallbackColor="#FAFAFA"/>
           <SolidColorBrush x:Key="LineBrush" Color="#14000000"/>
           <SolidColorBrush x:Key="InkBrush" Color="#18181B"/>
           <SolidColorBrush x:Key="MutedBrush" Color="#71717A"/>
@@ -33,6 +34,7 @@
           <SolidColorBrush x:Key="DangerBrush" Color="#FF9494"/>
           <SolidColorBrush x:Key="WorkspaceBrush" Color="Transparent"/>
           <SolidColorBrush x:Key="CardBrush" Color="#0FFFFFFF"/>
+          <AcrylicBrush x:Key="DialogSurfaceBrush" TintColor="#202020" TintOpacity="0.65" TintLuminosityOpacity="0.75" FallbackColor="#2C2C2C"/>
           <SolidColorBrush x:Key="LineBrush" Color="#18FFFFFF"/>
           <SolidColorBrush x:Key="InkBrush" Color="#FAFAFA"/>
           <SolidColorBrush x:Key="MutedBrush" Color="#A1A1AA"/>
@@ -55,6 +57,7 @@
           <SolidColorBrush x:Key="DangerBrush" Color="{ThemeResource SystemColorWindowTextColor}"/>
           <SolidColorBrush x:Key="WorkspaceBrush" Color="{ThemeResource SystemColorWindowColor}"/>
           <SolidColorBrush x:Key="CardBrush" Color="{ThemeResource SystemColorWindowColor}"/>
+          <SolidColorBrush x:Key="DialogSurfaceBrush" Color="{ThemeResource SystemColorWindowColor}"/>
           <SolidColorBrush x:Key="LineBrush" Color="{ThemeResource SystemColorWindowTextColor}"/>
           <SolidColorBrush x:Key="InkBrush" Color="{ThemeResource SystemColorWindowTextColor}"/>
           <SolidColorBrush x:Key="MutedBrush" Color="{ThemeResource SystemColorWindowTextColor}"/>
@@ -71,27 +74,29 @@
       <local:StatusConverter x:Key="StatusBackground" Background="True"/>
       <local:StatusConverter x:Key="StatusForeground"/>
       <CornerRadius x:Key="OverlayCornerRadius">12</CornerRadius>
+      <CornerRadius x:Key="SurfaceCornerRadius">12</CornerRadius>
+      <Thickness x:Key="SurfacePadding">20</Thickness>
       <Style x:Key="Card" TargetType="Border">
         <Setter Property="Background" Value="{ThemeResource CardBrush}"/>
         <Setter Property="BorderBrush" Value="{ThemeResource LineBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
-        <Setter Property="CornerRadius" Value="12"/>
-        <Setter Property="Padding" Value="20"/>
-      </Style>
-      <!-- Keep WinUI's accessible dialog template, scrim, footer and focus handling. -->
-      <DataTemplate x:Key="DialogTitleTemplate">
-        <TextBlock Text="{Binding}" FontSize="24" FontWeight="SemiBold" TextWrapping="Wrap"/>
-      </DataTemplate>
-      <Style x:Key="WorkspaceDialogStyle" TargetType="ContentDialog" BasedOn="{StaticResource DefaultContentDialogStyle}">
-        <Setter Property="Background" Value="{ThemeResource SolidBackgroundFillColorBaseBrush}"/>
-        <Setter Property="BorderBrush" Value="{ThemeResource SurfaceStrokeColorDefaultBrush}"/>
-        <Setter Property="CornerRadius" Value="16"/>
-        <Setter Property="TitleTemplate" Value="{StaticResource DialogTitleTemplate}"/>
+        <Setter Property="CornerRadius" Value="{StaticResource SurfaceCornerRadius}"/>
+        <Setter Property="Padding" Value="{StaticResource SurfacePadding}"/>
       </Style>
       <Style x:Key="SectionTitle" TargetType="TextBlock">
         <Setter Property="FontSize" Value="18"/>
         <Setter Property="FontWeight" Value="SemiBold"/>
         <Setter Property="Foreground" Value="{ThemeResource InkBrush}"/>
+      </Style>
+      <!-- Keep WinUI's accessible dialog template, scrim, footer and focus handling. -->
+      <DataTemplate x:Key="DialogTitleTemplate">
+        <TextBlock Text="{Binding}" Style="{StaticResource SectionTitle}" TextWrapping="Wrap"/>
+      </DataTemplate>
+      <Style x:Key="WorkspaceDialogStyle" TargetType="ContentDialog" BasedOn="{StaticResource DefaultContentDialogStyle}">
+        <Setter Property="Background" Value="{ThemeResource DialogSurfaceBrush}"/>
+        <Setter Property="BorderBrush" Value="{ThemeResource LineBrush}"/>
+        <Setter Property="CornerRadius" Value="{StaticResource SurfaceCornerRadius}"/>
+        <Setter Property="TitleTemplate" Value="{StaticResource DialogTitleTemplate}"/>
       </Style>
       <Style x:Key="Caption" TargetType="TextBlock">
         <Setter Property="FontSize" Value="12"/>
