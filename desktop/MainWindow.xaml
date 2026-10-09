@@ -27,7 +27,6 @@
     <Grid.KeyboardAccelerators><KeyboardAccelerator Key="A" Modifiers="Control" Invoked="SelectAll_Invoked"/></Grid.KeyboardAccelerators>
     <Grid.ColumnDefinitions><ColumnDefinition Width="244"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-    <Border Grid.ColumnSpan="2" Grid.RowSpan="4" Background="{ThemeResource GlassAmbientBrush}" IsHitTestVisible="False"/>
     <Grid Grid.Column="1" Margin="28,22,28,18" ColumnSpacing="16">
       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
       <StackPanel Spacing="4">
@@ -37,7 +36,7 @@
       <TextBlock x:Name="VersionLabel" Grid.Column="1" VerticalAlignment="Center" Style="{StaticResource Caption}"/>
       <Button Grid.Column="2" Click="Changelog_Click" VerticalAlignment="Center" ToolTipService.ToolTip="What’s new" AutomationProperties.Name="What’s new"><FontIcon Glyph="&#xE946;"/></Button>
     </Grid>
-    <Border Grid.RowSpan="4" Background="{ThemeResource SidebarBrush}" Margin="12" Padding="10,12" CornerRadius="22" BorderBrush="{ThemeResource GlassEdgeBrush}" BorderThickness="1">
+    <Border Grid.RowSpan="4" Background="{ThemeResource SidebarBrush}" Margin="12" Padding="10,12" CornerRadius="16" BorderBrush="{ThemeResource GlassEdgeBrush}" BorderThickness="1">
       <Border.Resources>
         <SolidColorBrush x:Key="ToggleButtonBackground" Color="Transparent"/>
         <SolidColorBrush x:Key="ToggleButtonBackgroundPointerOver" Color="{ThemeResource NavigationHoverColor}"/>

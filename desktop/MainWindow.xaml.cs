@@ -356,7 +356,13 @@ public sealed partial class MainWindow : Window
     }
     private void ApplyDialogTheme(ContentDialog dialog)
     {
+        dialog.Style = (Style)Application.Current.Resources["WorkspaceDialogStyle"];
         dialog.RequestedTheme = Root.ActualTheme;
+        // Share the shell's rhythm without replacing the native dialog template.
+        // Keep per-dialog width limits and scrolling for narrow windows.
+        dialog.Resources["OverlayCornerRadius"] = new CornerRadius(16);
+        dialog.Resources["ContentDialogTitleMargin"] = new Thickness(0, 0, 0, 20);
+        dialog.Resources["ContentDialogButtonSpacing"] = 12d;
         // WinUI's default-action visual state forcibly replaces that button's style.
         if (dialog.DefaultButton == ContentDialogButton.Close)
         {

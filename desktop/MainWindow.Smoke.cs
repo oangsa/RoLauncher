@@ -661,7 +661,16 @@ public sealed partial class MainWindow
             _selectionTransition?.GetCurrentState() == Microsoft.UI.Xaml.Media.Animation.ClockState.Active) await Task.Delay(160);
         var bitmap = new RenderTargetBitmap();
         if (element is ContentDialog) element = OpenDialog();
-        await bitmap.RenderAsync(element ?? Root);
+        // RenderTargetBitmap omits the OS Mica backdrop. Preview its neutral fallback
+        // so transparent XAML layers remain legible in standalone fixture PNGs.
+        var background = Root.Background;
+        try
+        {
+            if (element is null) Root.Background = new SolidColorBrush(Root.ActualTheme == ElementTheme.Dark
+                ? Windows.UI.Color.FromArgb(255, 32, 32, 32) : Windows.UI.Color.FromArgb(255, 243, 243, 243));
+            await bitmap.RenderAsync(element ?? Root);
+        }
+        finally { Root.Background = background; }
         Assert(bitmap.PixelWidth > 0 && bitmap.PixelHeight > 0, $"Rendered element has no pixels: {element?.GetType().Name} ({(element as FrameworkElement)?.ActualWidth} x {(element as FrameworkElement)?.ActualHeight}).");
         var pixels = (await bitmap.GetPixelsAsync()).ToArray();
         using var stream = File.Create(Path.Combine(directory, name));

@@ -9,8 +9,7 @@ public sealed partial class MainWindow
 {
     private IDisposable ConfigureDesktop()
     {
-        // Uno has no Windows desktop acrylic backdrop behind the translucent
-        // workspace. Keep its host surface opaque while retaining sidebar materials.
+        // Uno has no Windows Mica backdrop. Use its neutral solid fallback base.
         Root.ActualThemeChanged += (_, _) => ApplyLinuxWorkspaceSurface();
         ApplyLinuxWorkspaceSurface();
         // Uno initially lays an inline ContentDialog out as page content. Remove it
@@ -40,7 +39,7 @@ public sealed partial class MainWindow
     private static void InitializePicker(object picker) { }
     private static bool NavigationAnimationsEnabled() => new Windows.UI.ViewManagement.UISettings().AnimationsEnabled;
     private void ApplyLinuxWorkspaceSurface() => Root.Background = new SolidColorBrush(Root.ActualTheme == ElementTheme.Dark
-        ? Windows.UI.Color.FromArgb(255, 24, 29, 41) : Windows.UI.Color.FromArgb(255, 244, 246, 250));
+        ? Windows.UI.Color.FromArgb(255, 32, 32, 32) : Windows.UI.Color.FromArgb(255, 243, 243, 243));
     private async Task ShowAccountDialogAsync() => await _accountDialog.ShowAsync();
     private void SelectAllRows()
     {

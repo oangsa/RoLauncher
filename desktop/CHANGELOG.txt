@@ -1,7 +1,7 @@
 1.6.0 — Upcoming release
 
 - Smooth page transitions and a sliding sidebar highlight make the current page easier to follow. Clicking the current page keeps your scroll position.
-- A floating acrylic sidebar and softer surfaces adapt to light, dark and system appearance. Windows' reduced-motion and high-contrast preferences are respected.
+- A neutral Windows Mica workspace, layered surfaces and consistent dialogs adapt to light, dark and system appearance. Windows' reduced-motion and high-contrast preferences are respected.
 - Fix cropped instance screenshots on scaled high-resolution displays; capture follows the client window after resizing or moving between monitors.
 
 1.5.0 — Discord controls and running records

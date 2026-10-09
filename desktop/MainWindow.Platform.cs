@@ -11,8 +11,8 @@ public sealed partial class MainWindow
 {
     private IDisposable ConfigureDesktop()
     {
-        // Native acrylic owns system transparency, activation and contrast fallback.
-        SystemBackdrop = new DesktopAcrylicBackdrop();
+        // Mica provides the Windows app base layer and owns system material fallbacks.
+        SystemBackdrop = new MicaBackdrop();
         var hwnd = WindowNative.GetWindowHandle(this);
         var appWindow = AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(hwnd));
         appWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "RoLauncher.ico"));

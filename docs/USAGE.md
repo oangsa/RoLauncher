@@ -15,7 +15,7 @@ For the portable ZIP, extract everything and run `RoLauncher.exe`. Keep `WebView
 
 ## Sidebar navigation
 
-The highlighted pill and marker show the current page. Changing pages uses a short fade and slide; clicking the current page keeps its scroll position. Windows' **Accessibility → Visual effects → Animation effects** preference controls navigation motion. Acrylic follows the system's transparency preference, and high contrast uses solid system colors. Choose System, Light or Dark in **Settings → General → Appearance**.
+The highlighted pill and marker show the current page. Changing pages uses a short fade and slide; clicking the current page keeps its scroll position. Windows' **Accessibility → Visual effects → Animation effects** preference controls navigation motion. Windows Mica and popup acrylic follow the system's transparency preference, and high contrast uses solid system colors. Choose System, Light or Dark in **Settings → General → Appearance**.
 
 The sidebar groups focused tabs under Workspace, Accounts, Settings, and Tools. Set automatic rejoin in the account settings modal using the pencil icon, or use **Edit selected** for multiple accounts. General, Discord notifications, Backup and restore, and Updates each have their own Settings tab. Support reports and the API token are on the dedicated **Tools → Support and integrations** page.
 

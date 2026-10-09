@@ -9,19 +9,16 @@
       <ResourceDictionary.ThemeDictionaries>
         <ResourceDictionary x:Key="Light">
           <SolidColorBrush x:Key="DangerBrush" Color="#B91C1C"/>
-          <SolidColorBrush x:Key="WorkspaceBrush" Color="#B8F4F6FA"/>
-          <SolidColorBrush x:Key="CardBrush" Color="#F2FFFFFF"/>
-          <SolidColorBrush x:Key="LineBrush" Color="#220F284A"/>
+          <SolidColorBrush x:Key="WorkspaceBrush" Color="Transparent"/>
+          <SolidColorBrush x:Key="CardBrush" Color="#B3FFFFFF"/>
+          <SolidColorBrush x:Key="LineBrush" Color="#14000000"/>
           <SolidColorBrush x:Key="InkBrush" Color="#18181B"/>
           <SolidColorBrush x:Key="MutedBrush" Color="#71717A"/>
-          <AcrylicBrush x:Key="SidebarBrush" TintColor="#F2F6FC" TintOpacity="0.72" TintLuminosityOpacity="0.8" FallbackColor="#EEF2F8"/>
-          <SolidColorBrush x:Key="GlassEdgeBrush" Color="#80FFFFFF"/>
-          <SolidColorBrush x:Key="NavigationSelectionBrush" Color="#D4DFEBFF"/>
+          <SolidColorBrush x:Key="SidebarBrush" Color="#80FFFFFF"/>
+          <SolidColorBrush x:Key="GlassEdgeBrush" Color="#14000000"/>
+          <SolidColorBrush x:Key="NavigationSelectionBrush" Color="#09000000"/>
           <SolidColorBrush x:Key="NavigationMarkerBrush" Color="#2563EB"/>
-          <Color x:Key="NavigationHoverColor">#100B2445</Color>
-          <LinearGradientBrush x:Key="GlassAmbientBrush" StartPoint="0,0" EndPoint="1,1">
-            <GradientStop Color="#247EA9F5" Offset="0"/><GradientStop Color="#007EA9F5" Offset="0.65"/><GradientStop Color="#1452AAAE" Offset="1"/>
-          </LinearGradientBrush>
+          <Color x:Key="NavigationHoverColor">#09000000</Color>
           <SolidColorBrush x:Key="TableHeaderBrush" Color="#F5F5F6"/>
           <SolidColorBrush x:Key="AccentButtonBackground" Color="#18181B"/>
           <SolidColorBrush x:Key="AccentButtonForeground" Color="White"/>
@@ -34,19 +31,16 @@
         </ResourceDictionary>
         <ResourceDictionary x:Key="Dark">
           <SolidColorBrush x:Key="DangerBrush" Color="#FF9494"/>
-          <SolidColorBrush x:Key="WorkspaceBrush" Color="#A8181D29"/>
-          <SolidColorBrush x:Key="CardBrush" Color="#EE242B38"/>
-          <SolidColorBrush x:Key="LineBrush" Color="#28C3D5F4"/>
+          <SolidColorBrush x:Key="WorkspaceBrush" Color="Transparent"/>
+          <SolidColorBrush x:Key="CardBrush" Color="#0FFFFFFF"/>
+          <SolidColorBrush x:Key="LineBrush" Color="#18FFFFFF"/>
           <SolidColorBrush x:Key="InkBrush" Color="#FAFAFA"/>
           <SolidColorBrush x:Key="MutedBrush" Color="#A1A1AA"/>
-          <AcrylicBrush x:Key="SidebarBrush" TintColor="#1D2638" TintOpacity="0.72" TintLuminosityOpacity="0.8" FallbackColor="#202938"/>
-          <SolidColorBrush x:Key="GlassEdgeBrush" Color="#30C9DDFF"/>
-          <SolidColorBrush x:Key="NavigationSelectionBrush" Color="#C03B506F"/>
+          <SolidColorBrush x:Key="SidebarBrush" Color="#08000000"/>
+          <SolidColorBrush x:Key="GlassEdgeBrush" Color="#18FFFFFF"/>
+          <SolidColorBrush x:Key="NavigationSelectionBrush" Color="#0FFFFFFF"/>
           <SolidColorBrush x:Key="NavigationMarkerBrush" Color="#AFCBFF"/>
           <Color x:Key="NavigationHoverColor">#18FFFFFF</Color>
-          <LinearGradientBrush x:Key="GlassAmbientBrush" StartPoint="0,0" EndPoint="1,1">
-            <GradientStop Color="#304F81DE" Offset="0"/><GradientStop Color="#007EA9F5" Offset="0.65"/><GradientStop Color="#1452AAAE" Offset="1"/>
-          </LinearGradientBrush>
           <SolidColorBrush x:Key="TableHeaderBrush" Color="#303034"/>
           <SolidColorBrush x:Key="AccentButtonBackground" Color="#D4D4D8"/>
           <SolidColorBrush x:Key="AccentButtonForeground" Color="#18181B"/>
@@ -70,20 +64,29 @@
           <SolidColorBrush x:Key="NavigationSelectionBrush" Color="{ThemeResource SystemColorHighlightColor}"/>
           <SolidColorBrush x:Key="NavigationMarkerBrush" Color="{ThemeResource SystemColorHighlightTextColor}"/>
           <Color x:Key="NavigationHoverColor">#00000000</Color>
-          <SolidColorBrush x:Key="GlassAmbientBrush" Color="Transparent"/>
         </ResourceDictionary>
       </ResourceDictionary.ThemeDictionaries>
       <CornerRadius x:Key="ControlCornerRadius">8</CornerRadius>
       <Thickness x:Key="InfoBarActionHorizontalOrientationMargin">16,4,0,4</Thickness>
       <local:StatusConverter x:Key="StatusBackground" Background="True"/>
       <local:StatusConverter x:Key="StatusForeground"/>
-      <CornerRadius x:Key="OverlayCornerRadius">16</CornerRadius>
+      <CornerRadius x:Key="OverlayCornerRadius">12</CornerRadius>
       <Style x:Key="Card" TargetType="Border">
         <Setter Property="Background" Value="{ThemeResource CardBrush}"/>
         <Setter Property="BorderBrush" Value="{ThemeResource LineBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
-        <Setter Property="CornerRadius" Value="16"/>
+        <Setter Property="CornerRadius" Value="12"/>
         <Setter Property="Padding" Value="20"/>
+      </Style>
+      <!-- Keep WinUI's accessible dialog template, scrim, footer and focus handling. -->
+      <DataTemplate x:Key="DialogTitleTemplate">
+        <TextBlock Text="{Binding}" FontSize="24" FontWeight="SemiBold" TextWrapping="Wrap"/>
+      </DataTemplate>
+      <Style x:Key="WorkspaceDialogStyle" TargetType="ContentDialog" BasedOn="{StaticResource DefaultContentDialogStyle}">
+        <Setter Property="Background" Value="{ThemeResource SolidBackgroundFillColorBaseBrush}"/>
+        <Setter Property="BorderBrush" Value="{ThemeResource SurfaceStrokeColorDefaultBrush}"/>
+        <Setter Property="CornerRadius" Value="16"/>
+        <Setter Property="TitleTemplate" Value="{StaticResource DialogTitleTemplate}"/>
       </Style>
       <Style x:Key="SectionTitle" TargetType="TextBlock">
         <Setter Property="FontSize" Value="18"/>

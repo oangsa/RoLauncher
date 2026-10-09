@@ -3,7 +3,7 @@
 ## [1.6.0] — Unreleased
 
 - Add gentle fade/slide transitions when changing sidebar pages, with interruptible motion and support for Windows' reduced-motion setting. Clicking the current page preserves its scroll position.
-- Add a floating acrylic sidebar, softer translucent surfaces, and a sliding selection pill with a visible active-page marker. Keep system, light and dark appearance, with solid high-contrast fallbacks.
+- Add a neutral Windows Mica workspace, layered cards, consistent modal/dialog styling, and a sliding sidebar selection pill with a visible active-page marker. Keep system, light and dark appearance, with solid high-contrast fallbacks.
 - Fix cropped Roblox instance screenshots on scaled high-resolution displays. Capture physical client dimensions on each request and skip frames resized during capture.
 
 ## [1.5.0] — 2026-10-08
