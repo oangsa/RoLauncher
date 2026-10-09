@@ -1,4 +1,4 @@
-1.6.0 — Upcoming release
+1.6.0 — Navigation, Windows materials and display capture
 
 - Smooth page transitions and a sliding sidebar highlight make the current page easier to follow. Clicking the current page keeps your scroll position.
 - A neutral Windows Mica workspace, layered surfaces and consistent dialogs adapt to light, dark and system appearance. Windows' reduced-motion and high-contrast preferences are respected.

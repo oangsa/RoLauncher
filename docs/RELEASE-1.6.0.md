@@ -1,6 +1,6 @@
 # RoLauncher 1.6.0
 
-Upcoming feature release; local builds use a development identity.
+Stable feature release prepared for publication after Windows and Linux release checks.
 
 Navigation gains short fade/slide transitions and a sliding sidebar selection pill with an active-page marker. Rapid tab changes interrupt existing transitions, and clicking the current page preserves its scroll position. Page switching remains immediately interactive. Windows' reduced-motion setting disables these transitions.
 
@@ -8,7 +8,7 @@ A neutral Windows Mica base and translucent content layers bring depth to the wo
 
 Fix cropped instance screenshots on scaled high-resolution Windows displays by measuring and capturing the verified Roblox client in physical pixels. Dimensions are re-read for every capture, including after resizing or moving between monitors; frames resized during capture are skipped. A bounded 128 MiB pixel buffer replaces the 4096-pixel dimension cutoff, while encoded attachments retain the existing 8 MiB limit.
 
-No account-data migration is required. This branch includes the independent capture-fix checkpoint; the patch-only branch remains available as a rollback path.
+No account-data migration is required. Linux remains a beta port; native GNOME/KDE and live Sober acceptance testing remain outstanding.
 
 Validation and device-testing limits are recorded in [VALIDATION.md](VALIDATION.md). Live Roblox GPU capture and mixed-monitor behavior still require device testing.
 
