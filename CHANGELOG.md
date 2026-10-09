@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.0] — Unreleased
+
+- Add gentle fade/slide transitions when changing sidebar pages, with interruptible motion and support for Windows' reduced-motion setting. Clicking the current page preserves its scroll position.
+- Add a neutral Windows Mica workspace, layered cards, consistent modal/dialog styling, and a sliding sidebar selection pill with a visible active-page marker. Keep system, light and dark appearance, with solid high-contrast fallbacks.
+- Use native Windows fonts and bundled Inter typography on Linux across pages, controls and dialogs.
+- Fix cropped Roblox instance screenshots on scaled high-resolution displays. Capture physical client dimensions on each request and skip frames resized during capture.
+
 ## [1.5.0] — 2026-10-08
 
 - Add Discord Stop/Restart slash commands, username autocomplete and /status-register for a saved status message that updates automatically, restricted to configured server/users. Separate Save, Start, Stop and Restart controls retain bot credentials, with a colored connection status. The bot resumes on app launch if it was previously started; Stop keeps it off until started again.

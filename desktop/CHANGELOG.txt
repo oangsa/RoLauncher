@@ -1,3 +1,10 @@
+1.6.0 — Navigation, Windows materials and display capture
+
+- Smooth page transitions and a sliding sidebar highlight make the current page easier to follow. Clicking the current page keeps your scroll position.
+- A neutral Windows Mica workspace, layered surfaces and consistent dialogs adapt to light, dark and system appearance. Windows' reduced-motion and high-contrast preferences are respected.
+- Use native Windows fonts and bundled Inter typography on Linux across pages, controls and dialogs.
+- Fix cropped instance screenshots on scaled high-resolution displays; capture follows the client window after resizing or moving between monitors.
+
 1.5.0 — Discord controls and running records
 
 - Add Discord Stop/Restart slash commands, username autocomplete and /status-register for a saved status message that updates automatically, restricted to configured server/users. Separate Save, Start, Stop and Restart controls retain bot credentials, with a colored connection status. The bot resumes on app launch if it was previously started; Stop keeps it off until started again.

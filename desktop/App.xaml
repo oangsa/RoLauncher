@@ -9,12 +9,17 @@
       <ResourceDictionary.ThemeDictionaries>
         <ResourceDictionary x:Key="Light">
           <SolidColorBrush x:Key="DangerBrush" Color="#B91C1C"/>
-          <SolidColorBrush x:Key="WorkspaceBrush" Color="#F7F7F8"/>
-          <SolidColorBrush x:Key="CardBrush" Color="White"/>
-          <SolidColorBrush x:Key="LineBrush" Color="#E4E4E7"/>
+          <SolidColorBrush x:Key="WorkspaceBrush" Color="Transparent"/>
+          <SolidColorBrush x:Key="CardBrush" Color="#B3FFFFFF"/>
+          <AcrylicBrush x:Key="DialogSurfaceBrush" TintColor="#FFFFFF" TintOpacity="0.65" TintLuminosityOpacity="0.75" FallbackColor="#FAFAFA"/>
+          <SolidColorBrush x:Key="LineBrush" Color="#14000000"/>
           <SolidColorBrush x:Key="InkBrush" Color="#18181B"/>
           <SolidColorBrush x:Key="MutedBrush" Color="#71717A"/>
-                              <SolidColorBrush x:Key="SidebarBrush" Color="#EEEEF0"/>
+          <SolidColorBrush x:Key="SidebarBrush" Color="#80FFFFFF"/>
+          <SolidColorBrush x:Key="GlassEdgeBrush" Color="#14000000"/>
+          <SolidColorBrush x:Key="NavigationSelectionBrush" Color="#09000000"/>
+          <SolidColorBrush x:Key="NavigationMarkerBrush" Color="#2563EB"/>
+          <Color x:Key="NavigationHoverColor">#09000000</Color>
           <SolidColorBrush x:Key="TableHeaderBrush" Color="#F5F5F6"/>
           <SolidColorBrush x:Key="AccentButtonBackground" Color="#18181B"/>
           <SolidColorBrush x:Key="AccentButtonForeground" Color="White"/>
@@ -27,12 +32,17 @@
         </ResourceDictionary>
         <ResourceDictionary x:Key="Dark">
           <SolidColorBrush x:Key="DangerBrush" Color="#FF9494"/>
-          <SolidColorBrush x:Key="WorkspaceBrush" Color="#18181B"/>
-          <SolidColorBrush x:Key="CardBrush" Color="#242427"/>
-          <SolidColorBrush x:Key="LineBrush" Color="#3F3F46"/>
+          <SolidColorBrush x:Key="WorkspaceBrush" Color="Transparent"/>
+          <SolidColorBrush x:Key="CardBrush" Color="#0FFFFFFF"/>
+          <AcrylicBrush x:Key="DialogSurfaceBrush" TintColor="#202020" TintOpacity="0.65" TintLuminosityOpacity="0.75" FallbackColor="#2C2C2C"/>
+          <SolidColorBrush x:Key="LineBrush" Color="#18FFFFFF"/>
           <SolidColorBrush x:Key="InkBrush" Color="#FAFAFA"/>
           <SolidColorBrush x:Key="MutedBrush" Color="#A1A1AA"/>
-                              <SolidColorBrush x:Key="SidebarBrush" Color="#202023"/>
+          <SolidColorBrush x:Key="SidebarBrush" Color="#08000000"/>
+          <SolidColorBrush x:Key="GlassEdgeBrush" Color="#18FFFFFF"/>
+          <SolidColorBrush x:Key="NavigationSelectionBrush" Color="#0FFFFFFF"/>
+          <SolidColorBrush x:Key="NavigationMarkerBrush" Color="#AFCBFF"/>
+          <Color x:Key="NavigationHoverColor">#18FFFFFF</Color>
           <SolidColorBrush x:Key="TableHeaderBrush" Color="#303034"/>
           <SolidColorBrush x:Key="AccentButtonBackground" Color="#D4D4D8"/>
           <SolidColorBrush x:Key="AccentButtonForeground" Color="#18181B"/>
@@ -43,35 +53,69 @@
           <SolidColorBrush x:Key="AccentButtonForegroundPointerOver" Color="#18181B"/>
           <SolidColorBrush x:Key="AccentButtonForegroundPressed" Color="#18181B"/>
         </ResourceDictionary>
+        <ResourceDictionary x:Key="HighContrast">
+          <SolidColorBrush x:Key="DangerBrush" Color="{ThemeResource SystemColorWindowTextColor}"/>
+          <SolidColorBrush x:Key="WorkspaceBrush" Color="{ThemeResource SystemColorWindowColor}"/>
+          <SolidColorBrush x:Key="CardBrush" Color="{ThemeResource SystemColorWindowColor}"/>
+          <SolidColorBrush x:Key="DialogSurfaceBrush" Color="{ThemeResource SystemColorWindowColor}"/>
+          <SolidColorBrush x:Key="LineBrush" Color="{ThemeResource SystemColorWindowTextColor}"/>
+          <SolidColorBrush x:Key="InkBrush" Color="{ThemeResource SystemColorWindowTextColor}"/>
+          <SolidColorBrush x:Key="MutedBrush" Color="{ThemeResource SystemColorWindowTextColor}"/>
+          <SolidColorBrush x:Key="SidebarBrush" Color="{ThemeResource SystemColorWindowColor}"/>
+          <SolidColorBrush x:Key="TableHeaderBrush" Color="{ThemeResource SystemColorWindowColor}"/>
+          <SolidColorBrush x:Key="GlassEdgeBrush" Color="{ThemeResource SystemColorWindowTextColor}"/>
+          <SolidColorBrush x:Key="NavigationSelectionBrush" Color="{ThemeResource SystemColorHighlightColor}"/>
+          <SolidColorBrush x:Key="NavigationMarkerBrush" Color="{ThemeResource SystemColorHighlightTextColor}"/>
+          <Color x:Key="NavigationHoverColor">#00000000</Color>
+        </ResourceDictionary>
       </ResourceDictionary.ThemeDictionaries>
+      <!-- Windows keeps WinUI's native font resource; Linux supplies bundled Inter. -->
+      <Style TargetType="TextBlock"><Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/></Style>
       <CornerRadius x:Key="ControlCornerRadius">8</CornerRadius>
       <Thickness x:Key="InfoBarActionHorizontalOrientationMargin">16,4,0,4</Thickness>
       <local:StatusConverter x:Key="StatusBackground" Background="True"/>
       <local:StatusConverter x:Key="StatusForeground"/>
       <CornerRadius x:Key="OverlayCornerRadius">12</CornerRadius>
+      <CornerRadius x:Key="SurfaceCornerRadius">12</CornerRadius>
+      <Thickness x:Key="SurfacePadding">20</Thickness>
       <Style x:Key="Card" TargetType="Border">
         <Setter Property="Background" Value="{ThemeResource CardBrush}"/>
         <Setter Property="BorderBrush" Value="{ThemeResource LineBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
-        <Setter Property="CornerRadius" Value="12"/>
-        <Setter Property="Padding" Value="20"/>
+        <Setter Property="CornerRadius" Value="{StaticResource SurfaceCornerRadius}"/>
+        <Setter Property="Padding" Value="{StaticResource SurfacePadding}"/>
       </Style>
       <Style x:Key="SectionTitle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/>
         <Setter Property="FontSize" Value="18"/>
         <Setter Property="FontWeight" Value="SemiBold"/>
         <Setter Property="Foreground" Value="{ThemeResource InkBrush}"/>
       </Style>
+      <!-- Keep WinUI's accessible dialog template, scrim, footer and focus handling. -->
+      <DataTemplate x:Key="DialogTitleTemplate">
+        <TextBlock Text="{Binding}" Style="{StaticResource SectionTitle}" TextWrapping="Wrap"/>
+      </DataTemplate>
+      <Style x:Key="WorkspaceDialogStyle" TargetType="ContentDialog" BasedOn="{StaticResource DefaultContentDialogStyle}">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/>
+        <Setter Property="Background" Value="{ThemeResource DialogSurfaceBrush}"/>
+        <Setter Property="BorderBrush" Value="{ThemeResource LineBrush}"/>
+        <Setter Property="CornerRadius" Value="{StaticResource SurfaceCornerRadius}"/>
+        <Setter Property="TitleTemplate" Value="{StaticResource DialogTitleTemplate}"/>
+      </Style>
       <Style x:Key="Caption" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/>
         <Setter Property="FontSize" Value="12"/>
         <Setter Property="Foreground" Value="{ThemeResource MutedBrush}"/>
         <Setter Property="TextWrapping" Value="Wrap"/>
       </Style>
       <Style x:Key="ActionButtonStyle" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/>
         <Setter Property="Height" Value="40"/>
         <Setter Property="Padding" Value="16,8"/>
         <Setter Property="CornerRadius" Value="8"/>
       </Style>
       <Style x:Key="PrimaryActionButtonStyle" TargetType="Button" BasedOn="{StaticResource AccentButtonStyle}">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/>
         <Setter Property="Height" Value="40"/>
         <Setter Property="Padding" Value="16,8"/>
         <Setter Property="CornerRadius" Value="8"/>
@@ -80,17 +124,27 @@
         <Setter Property="Foreground" Value="{ThemeResource DangerBrush}"/>
       </Style>
       <Style TargetType="Button">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/>
         <Setter Property="Padding" Value="16,9"/>
         <Setter Property="CornerRadius" Value="8"/>
       </Style>
       <Style TargetType="TextBox">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/>
         <Setter Property="CornerRadius" Value="8"/>
         <Setter Property="Padding" Value="12,9"/>
       </Style>
       <Style TargetType="PasswordBox">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/>
         <Setter Property="CornerRadius" Value="8"/>
         <Setter Property="Padding" Value="12,9"/>
       </Style>
+      <Style TargetType="ToggleButton" BasedOn="{StaticResource DefaultToggleButtonStyle}"><Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/></Style>
+      <Style TargetType="CheckBox" BasedOn="{StaticResource DefaultCheckBoxStyle}"><Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/></Style>
+      <Style TargetType="ComboBox" BasedOn="{StaticResource DefaultComboBoxStyle}"><Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/></Style>
+      <Style TargetType="ComboBoxItem" BasedOn="{StaticResource DefaultComboBoxItemStyle}"><Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/></Style>
+      <Style TargetType="HyperlinkButton" BasedOn="{StaticResource DefaultHyperlinkButtonStyle}"><Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/></Style>
+      <Style TargetType="MenuFlyoutItem" BasedOn="{StaticResource DefaultMenuFlyoutItemStyle}"><Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/></Style>
+      <Style TargetType="MenuFlyoutSubItem" BasedOn="{StaticResource DefaultMenuFlyoutSubItemStyle}"><Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/></Style>
     </ResourceDictionary>
   </Application.Resources>
 </Application>

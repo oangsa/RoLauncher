@@ -18,3 +18,5 @@ The WinUI 3 desktop uses Microsoft's Windows App SDK, Windows SDK projections/bu
 Distribute the complete Rust and XAML/C# application source, Cargo.lock and desktop package lock files with any binary redistribution under GPL-3.0. Do not redistribute build tool archives or unrelated personal credentials.
 
 The Windows executable installer is built with Inno Setup by Jordan Russell and Martijn Laan (https://jrsoftware.org/). Its unchanged license and copyright notice are included in licenses/inno-setup.txt. Inno Setup is a separate build tool and retains its own license.
+
+Inter, Copyright (c) 2016 The Inter Project Authors (https://github.com/rsms/inter), is distributed unmodified under the SIL Open Font License 1.1. Linux bundles static regular, semibold, bold and italic files from the official Inter 4.1 release (https://github.com/rsms/inter/releases/tag/v4.1). The license is included in licenses/inter-OFL.txt. Windows uses its installed native fonts. No system-wide font installation is required.

@@ -1,10 +1,10 @@
-# RoLauncher 1.5.0
+# RoLauncher 1.6.0
 
 A Roblox account launcher. Manage your accounts, save launch profiles, and reconnect automatically when a session disconnects. Windows uses native WinUI; the Linux development port reuses the same views through Uno and targets Sober on Ubuntu and Arch with GNOME and KDE.
 
 Linux is a **beta**, with live Sober account/recovery behavior still awaiting testing on GNOME and KDE. See [Linux setup and acceptance criteria](docs/LINUX.md). Windows keeps its native WinUI interface.
 
-See [the 1.5.0 release notes](docs/RELEASE-1.5.0.md) for changes since stable 1.4.0 and [development versioning](docs/DEVELOPMENT.md#releases) for local build identities.
+RoLauncher 1.6.0 adds animated navigation, Windows materials, consistent dialogs and a capture fix for scaled displays. See [release notes](docs/RELEASE-1.6.0.md) and [validation](docs/VALIDATION.md).
 
 ## Download
 
@@ -14,13 +14,14 @@ Choose the **setup-x64.exe** installer, run it, then open RoLauncher from the St
 
 Requires Windows 10 (1809+) or Windows 11, 64-bit. Browser sign-in needs the [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/).
 
-[**Download the 1.5.0 Linux preview**](https://github.com/oangsa/RoLauncher/releases/tag/v1.5.0)
+[**Download the 1.6.0 Linux preview**](https://github.com/oangsa/RoLauncher/releases/tag/v1.6.0)
 
 For Linux, choose **linux-x64.tar.gz** and follow the [setup instructions](docs/LINUX.md#install-the-linux-preview). Linux remains a preview even though the Windows release is stable.
 
 ## Features
 
-- Choose dark, light, or system appearance with a saved theme preference.
+- Use native Windows typography and bundled Inter on Linux.
+- Choose dark, light, or system appearance with a saved theme preference, a neutral Mica workspace, consistent dialogs, an animated active-page highlight and gentle page transitions.
 - Manage automatic rejoin in account settings, or search/filter and edit multiple accounts together. Create or launch presets through guided sections.
 - Save games with thumbnails and private-server destinations, then choose them in account settings.
 - Organize accounts into groups and launch them together.

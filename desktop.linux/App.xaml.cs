@@ -11,7 +11,10 @@ public partial class App : Application
     public App()
     {
         Uno.UI.FeatureConfiguration.TextBox.UseOverlayOnSkia = false;
+        Uno.UI.FeatureConfiguration.Font.DefaultTextFontFamily = "ms-appx:///Assets/Fonts/Inter-Regular.ttf";
         InitializeComponent();
+        Resources["ContentControlThemeFontFamily"] = new Microsoft.UI.Xaml.Media.FontFamily(
+            Uno.UI.FeatureConfiguration.Font.DefaultTextFontFamily);
     }
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
