@@ -1,9 +1,12 @@
-# Open Sans
+# Inter 4.1
 
-Unmodified OpenSans.ttf and OpenSans-Regular.ttf from Uno.Fonts.OpenSans 2.9.4, the package used by the Linux shell.
+Unmodified static font files from the official Inter 4.1 release:
+https://github.com/rsms/inter/releases/tag/v4.1
 
-Upstream package source: https://github.com/unoplatform/uno.fonts at a5a82943e36c97ce02cea3b0fba105f309216948.
-Font source: https://github.com/googlefonts/opensans.
-Copyright 2020 The Open Sans Project Authors. SIL Open Font License 1.1; see ../../licenses/open-sans-OFL.txt.
+Source archive: https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip
+Files: extras/ttf/Inter-Regular.ttf, Inter-SemiBold.ttf, Inter-Bold.ttf and Inter-Italic.ttf.
 
-The variable font includes weight and width axes. WinUI uses FontWeight to select regular and semibold for display text. Native TextBox and PasswordBox use the normal-width static regular face because their edit renderer condenses the variable face. Linux retains Uno's original font URI and static-font manifest so Skia uses the existing weight-specific files for both display and input text.
+Copyright 2016 The Inter Project Authors (https://github.com/rsms/inter).
+SIL Open Font License 1.1; see ../../licenses/inter-OFL.txt.
+
+Linux bundles these static faces with an Uno font manifest to select real regular, semibold, bold and italic text. Windows uses installed native WinUI fonts and bundles no text font files.

@@ -2,7 +2,7 @@
 
 - Smooth page transitions and a sliding sidebar highlight make the current page easier to follow. Clicking the current page keeps your scroll position.
 - A neutral Windows Mica workspace, layered surfaces and consistent dialogs adapt to light, dark and system appearance. Windows' reduced-motion and high-contrast preferences are respected.
-- Use the Linux shell’s Open Sans typography across Windows pages, controls and dialogs, bundled with the app.
+- Use native Windows fonts and bundled Inter typography on Linux across pages, controls and dialogs.
 - Fix cropped instance screenshots on scaled high-resolution displays; capture follows the client window after resizing or moving between monitors.
 
 1.5.0 — Discord controls and running records

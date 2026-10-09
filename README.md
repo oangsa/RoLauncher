@@ -1,4 +1,4 @@
-# RoLauncher 1.6.0-dev.f5d4ce6294f5
+# RoLauncher 1.6.0-dev.80c754cda96d
 
 A Roblox account launcher. Manage your accounts, save launch profiles, and reconnect automatically when a session disconnects. Windows uses native WinUI; the Linux development port reuses the same views through Uno and targets Sober on Ubuntu and Arch with GNOME and KDE.
 
@@ -20,7 +20,7 @@ For Linux, choose **linux-x64.tar.gz** and follow the [setup instructions](docs/
 
 ## Features
 
-- Use bundled Open Sans typography, matching the Windows and Linux interfaces.
+- Use native Windows typography and bundled Inter on Linux.
 - Choose dark, light, or system appearance with a saved theme preference, a neutral Mica workspace, consistent dialogs, an animated active-page highlight and gentle page transitions.
 - Manage automatic rejoin in account settings, or search/filter and edit multiple accounts together. Create or launch presets through guided sections.
 - Save games with thumbnails and private-server destinations, then choose them in account settings.

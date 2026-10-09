@@ -8,6 +8,7 @@
     <SelfContained>true</SelfContained>
     <IsUnoHead>true</IsUnoHead>
     <UnoFeatures>SkiaRenderer</UnoFeatures>
+    <UnoDefaultFont>None</UnoDefaultFont>
     <Nullable>enable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
@@ -26,6 +27,7 @@
     <Content Include="../desktop/CHANGELOG.txt" Link="CHANGELOG.txt" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../assets/RoLauncher.ico" Link="RoLauncher.ico" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../assets/RoLauncher.png" Link="RoLauncher.png" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../assets/fonts/Inter*" Link="Assets/Fonts/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <EmbeddedResource Include="../scripts/apply-update-linux.py" LogicalName="RoLauncher.ApplyUpdate.Linux.py" />
   </ItemGroup>
   <ItemGroup><EmbeddedResource Include="../desktop/CHANGELOG.txt" LogicalName="RoLauncher.Changelog" /></ItemGroup>

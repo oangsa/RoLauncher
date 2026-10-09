@@ -40,15 +40,14 @@ public sealed partial class MainWindow
             Root.UpdateLayout();
             var face = (FontFamily)Application.Current.Resources["ContentControlThemeFontFamily"];
             var specimen = "Hamburgefontsiv WWW iii 0123456789";
-            var openSans = new TextBlock { Text = specimen, FontSize = 20, FontFamily = face };
-            var systemFace = new TextBlock { Text = specimen, FontSize = 20, FontFamily = new FontFamily("Segoe UI") };
+            var nativeText = new TextBlock { Text = specimen, FontSize = 20, FontFamily = face };
             var semibold = new TextBlock { Text = specimen, FontSize = 20, FontFamily = face, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold };
             var unconstrained = new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity);
-            foreach (var text in new[] { openSans, systemFace, semibold }) text.Measure(unconstrained);
-            Assert(Math.Abs(openSans.DesiredSize.Width - systemFace.DesiredSize.Width) > 1,
-                "The bundled Open Sans font renders distinct metrics instead of silently falling back to Segoe UI.");
-            Assert(Math.Abs(openSans.DesiredSize.Width - semibold.DesiredSize.Width) > .5,
-                "The bundled font supplies distinct regular and semibold metrics.");
+            foreach (var text in new[] { nativeText, semibold }) text.Measure(unconstrained);
+            Assert(face.Source == "XamlAutoFontFamily" || face.Source.StartsWith("Segoe UI", StringComparison.Ordinal),
+                $"Windows uses WinUI's native font selection without a bundled font override ({face.Source}).");
+            Assert(Math.Abs(nativeText.DesiredSize.Width - semibold.DesiredSize.Width) > .5,
+                "The native font supplies distinct regular and semibold metrics.");
             foreach (var destination in Destinations)
             {
                 SwitchPage(destination.Tab, false);
@@ -708,7 +707,7 @@ public sealed partial class MainWindow
         File.AppendAllText(Path.Combine(Environment.GetEnvironmentVariable("ROLAUNCHER_UI_SMOKE_DIR")!, "input-font-metrics.txt"),
             $"{field.Name}: editor {width:F2}, label {reference.DesiredSize.Width:F2}\n");
         Assert(Math.Abs(width - reference.DesiredSize.Width) <= Math.Max(3, reference.DesiredSize.Width * .05),
-            $"{field.Name} input text matches the label's normal-width Open Sans (editor {width:F2}, label {reference.DesiredSize.Width:F2}).");
+            $"{field.Name} input text matches the label's native font (editor {width:F2}, label {reference.DesiredSize.Width:F2}).");
     }
     private void AssertChangelogLayout()
     {
