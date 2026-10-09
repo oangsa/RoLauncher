@@ -38,6 +38,17 @@ public sealed partial class MainWindow
             for (var i = 0; i < 100 && _refreshing; i++) await Task.Delay(50);
             Assert(!_refreshing, "Initial account and settings refresh finishes before layout measurements.");
             Root.UpdateLayout();
+            var face = (FontFamily)Application.Current.Resources["ContentControlThemeFontFamily"];
+            var specimen = "Hamburgefontsiv WWW iii 0123456789";
+            var openSans = new TextBlock { Text = specimen, FontSize = 20, FontFamily = face };
+            var systemFace = new TextBlock { Text = specimen, FontSize = 20, FontFamily = new FontFamily("Segoe UI") };
+            var semibold = new TextBlock { Text = specimen, FontSize = 20, FontFamily = face, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold };
+            var unconstrained = new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity);
+            foreach (var text in new[] { openSans, systemFace, semibold }) text.Measure(unconstrained);
+            Assert(Math.Abs(openSans.DesiredSize.Width - systemFace.DesiredSize.Width) > 1,
+                "The bundled Open Sans font renders distinct metrics instead of silently falling back to Segoe UI.");
+            Assert(Math.Abs(openSans.DesiredSize.Width - semibold.DesiredSize.Width) > .5,
+                "The bundled font supplies distinct regular and semibold metrics.");
             foreach (var destination in Destinations)
             {
                 SwitchPage(destination.Tab, false);

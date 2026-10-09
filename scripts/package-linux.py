@@ -18,6 +18,8 @@ def notices(directory):
         "--filter-platform", "x86_64-unknown-linux-gnu"], cwd=root))
     licenses = directory / "licenses"
     licenses.mkdir(exist_ok=True)
+    # The Open Sans font itself uses OFL, separately from its NuGet wrapper.
+    shutil.copy2(root / "licenses/open-sans-OFL.txt", licenses)
     for package in metadata["packages"]:
         source = Path(package["manifest_path"]).parent
         destination = licenses / f'{package["name"]}-{package["version"]}'

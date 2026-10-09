@@ -358,6 +358,10 @@ public sealed partial class MainWindow : Window
     {
         dialog.Style = (Style)Application.Current.Resources["WorkspaceDialogStyle"];
         dialog.RequestedTheme = Root.ActualTheme;
+        // Explicit text avoids the native template's baked-in Segoe UI presenter.
+        if (dialog.Content is string text)
+            dialog.Content = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap,
+                FontFamily = (Microsoft.UI.Xaml.Media.FontFamily)Application.Current.Resources["ContentControlThemeFontFamily"] };
         // Share the shell's rhythm without replacing the native dialog template.
         // Keep per-dialog width limits and scrolling for narrow windows.
         dialog.Resources["OverlayCornerRadius"] = Application.Current.Resources["SurfaceCornerRadius"];
@@ -399,6 +403,7 @@ public sealed partial class MainWindow : Window
             if (DialogControl<Button>(commands, name) is not { } button) continue;
             if (column < commands.ColumnDefinitions.Count && button.Visibility == Visibility.Visible)
                 commands.ColumnDefinitions[column].Width = GridLength.Auto;
+            button.FontFamily = (Microsoft.UI.Xaml.Media.FontFamily)Application.Current.Resources["ContentControlThemeFontFamily"];
             button.MinWidth = 104;
             button.Height = 40;
             button.Padding = new Thickness(16, 8, 16, 8);

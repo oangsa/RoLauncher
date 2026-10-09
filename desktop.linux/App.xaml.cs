@@ -12,6 +12,8 @@ public partial class App : Application
     {
         Uno.UI.FeatureConfiguration.TextBox.UseOverlayOnSkia = false;
         InitializeComponent();
+        Resources["ContentControlThemeFontFamily"] = new Microsoft.UI.Xaml.Media.FontFamily(
+            "ms-appx:///Uno.Fonts.OpenSans/Fonts/OpenSans.ttf");
     }
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)

@@ -18,3 +18,5 @@ The WinUI 3 desktop uses Microsoft's Windows App SDK, Windows SDK projections/bu
 Distribute the complete Rust and XAML/C# application source, Cargo.lock and desktop package lock files with any binary redistribution under GPL-3.0. Do not redistribute build tool archives or unrelated personal credentials.
 
 The Windows executable installer is built with Inno Setup by Jordan Russell and Martijn Laan (https://jrsoftware.org/). Its unchanged license and copyright notice are included in licenses/inno-setup.txt. Inno Setup is a separate build tool and retains its own license.
+
+Open Sans, Copyright 2020 The Open Sans Project Authors (https://github.com/googlefonts/opensans), is distributed unmodified under the SIL Open Font License 1.1. Windows bundles the variable font from Uno.Fonts.OpenSans 2.9.4 (repository revision a5a82943e36c97ce02cea3b0fba105f309216948) to match the Linux font family. The font’s license is included in licenses/open-sans-OFL.txt. No system-wide font installation is required.

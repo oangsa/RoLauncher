@@ -25,6 +25,7 @@
   </ItemGroup>
   <ItemGroup><Content Include="CHANGELOG.txt" CopyToOutputDirectory="PreserveNewest" /></ItemGroup>
   <ItemGroup>
+    <Content Include="../assets/fonts/OpenSans.ttf" Link="Assets/Fonts/OpenSans.ttf" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="../assets/RoLauncher.ico" Link="RoLauncher.ico" CopyToOutputDirectory="PreserveNewest" />
     <EmbeddedResource Include="../scripts/apply-update.ps1" LogicalName="RoLauncher.ApplyUpdate.ps1" />
   </ItemGroup>

@@ -69,6 +69,9 @@
           <Color x:Key="NavigationHoverColor">#00000000</Color>
         </ResourceDictionary>
       </ResourceDictionary.ThemeDictionaries>
+      <!-- Linux replaces this URI with its bundled Uno Open Sans family. -->
+      <FontFamily x:Key="ContentControlThemeFontFamily">ms-appx:///Assets/Fonts/OpenSans.ttf#Open Sans</FontFamily>
+      <Style TargetType="TextBlock"><Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/></Style>
       <CornerRadius x:Key="ControlCornerRadius">8</CornerRadius>
       <Thickness x:Key="InfoBarActionHorizontalOrientationMargin">16,4,0,4</Thickness>
       <local:StatusConverter x:Key="StatusBackground" Background="True"/>
@@ -84,6 +87,7 @@
         <Setter Property="Padding" Value="{StaticResource SurfacePadding}"/>
       </Style>
       <Style x:Key="SectionTitle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/>
         <Setter Property="FontSize" Value="18"/>
         <Setter Property="FontWeight" Value="SemiBold"/>
         <Setter Property="Foreground" Value="{ThemeResource InkBrush}"/>
@@ -93,22 +97,26 @@
         <TextBlock Text="{Binding}" Style="{StaticResource SectionTitle}" TextWrapping="Wrap"/>
       </DataTemplate>
       <Style x:Key="WorkspaceDialogStyle" TargetType="ContentDialog" BasedOn="{StaticResource DefaultContentDialogStyle}">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/>
         <Setter Property="Background" Value="{ThemeResource DialogSurfaceBrush}"/>
         <Setter Property="BorderBrush" Value="{ThemeResource LineBrush}"/>
         <Setter Property="CornerRadius" Value="{StaticResource SurfaceCornerRadius}"/>
         <Setter Property="TitleTemplate" Value="{StaticResource DialogTitleTemplate}"/>
       </Style>
       <Style x:Key="Caption" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/>
         <Setter Property="FontSize" Value="12"/>
         <Setter Property="Foreground" Value="{ThemeResource MutedBrush}"/>
         <Setter Property="TextWrapping" Value="Wrap"/>
       </Style>
       <Style x:Key="ActionButtonStyle" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/>
         <Setter Property="Height" Value="40"/>
         <Setter Property="Padding" Value="16,8"/>
         <Setter Property="CornerRadius" Value="8"/>
       </Style>
       <Style x:Key="PrimaryActionButtonStyle" TargetType="Button" BasedOn="{StaticResource AccentButtonStyle}">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/>
         <Setter Property="Height" Value="40"/>
         <Setter Property="Padding" Value="16,8"/>
         <Setter Property="CornerRadius" Value="8"/>
@@ -117,17 +125,27 @@
         <Setter Property="Foreground" Value="{ThemeResource DangerBrush}"/>
       </Style>
       <Style TargetType="Button">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/>
         <Setter Property="Padding" Value="16,9"/>
         <Setter Property="CornerRadius" Value="8"/>
       </Style>
       <Style TargetType="TextBox">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/>
         <Setter Property="CornerRadius" Value="8"/>
         <Setter Property="Padding" Value="12,9"/>
       </Style>
       <Style TargetType="PasswordBox">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/>
         <Setter Property="CornerRadius" Value="8"/>
         <Setter Property="Padding" Value="12,9"/>
       </Style>
+      <Style TargetType="ToggleButton" BasedOn="{StaticResource DefaultToggleButtonStyle}"><Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/></Style>
+      <Style TargetType="CheckBox" BasedOn="{StaticResource DefaultCheckBoxStyle}"><Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/></Style>
+      <Style TargetType="ComboBox" BasedOn="{StaticResource DefaultComboBoxStyle}"><Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/></Style>
+      <Style TargetType="ComboBoxItem" BasedOn="{StaticResource DefaultComboBoxItemStyle}"><Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/></Style>
+      <Style TargetType="HyperlinkButton" BasedOn="{StaticResource DefaultHyperlinkButtonStyle}"><Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/></Style>
+      <Style TargetType="MenuFlyoutItem" BasedOn="{StaticResource DefaultMenuFlyoutItemStyle}"><Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/></Style>
+      <Style TargetType="MenuFlyoutSubItem" BasedOn="{StaticResource DefaultMenuFlyoutSubItemStyle}"><Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/></Style>
     </ResourceDictionary>
   </Application.Resources>
 </Application>
