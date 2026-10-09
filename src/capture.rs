@@ -32,8 +32,44 @@ pub fn instance(identity: &ProcessIdentity) -> Option<Vec<u8>> {
 }
 
 #[cfg(windows)]
+struct PhysicalPixels(windows_sys::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT);
+
+#[cfg(windows)]
+impl PhysicalPixels {
+    fn enter() -> Option<Self> {
+        use windows_sys::Win32::UI::HiDpi::*;
+        // The supervisor and its worker threads do not inherit the WinUI
+        // process's manifest. Measure and render in the same physical units,
+        // including after a window moves to a monitor with different scaling.
+        let previous =
+            unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        (!previous.is_null()).then_some(Self(previous))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for PhysicalPixels {
+    fn drop(&mut self) {
+        unsafe { windows_sys::Win32::UI::HiDpi::SetThreadDpiAwarenessContext(self.0) };
+    }
+}
+
+#[cfg(any(windows, test))]
+fn pixel_buffer_len(width: i32, height: i32) -> Option<usize> {
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    let bytes = (width as usize)
+        .checked_mul(height as usize)?
+        .checked_mul(4)?;
+    // Bound allocation rather than imposing a monitor-resolution ceiling.
+    // Covers 2.8K, 4K, ultrawide and 8K clients; PNG delivery stays capped at 8 MiB.
+    (bytes <= 128 * 1024 * 1024).then_some(bytes)
+}
+
+#[cfg(windows)]
 fn capture(identity: &ProcessIdentity) -> Option<Vec<u8>> {
-    use windows_sys::Win32::{Foundation::*, Graphics::Gdi::*, UI::WindowsAndMessaging::*};
+    use windows_sys::Win32::{Foundation::*, UI::WindowsAndMessaging::*};
     struct Search {
         pid: u32,
         windows: Vec<HWND>,
@@ -62,15 +98,22 @@ fn capture(identity: &ProcessIdentity) -> Option<Vec<u8>> {
         let [hwnd] = search.windows.as_slice() else {
             return None;
         };
+        capture_window(*hwnd, identity.pid)
+    }
+}
+
+#[cfg(windows)]
+fn capture_window(hwnd: windows_sys::Win32::Foundation::HWND, pid: u32) -> Option<Vec<u8>> {
+    use windows_sys::Win32::{Foundation::*, Graphics::Gdi::*, UI::WindowsAndMessaging::*};
+    let _dpi = PhysicalPixels::enter()?;
+    unsafe {
         let mut rect: RECT = std::mem::zeroed();
-        if GetClientRect(*hwnd, &mut rect) == 0 {
+        if GetClientRect(hwnd, &mut rect) == 0 {
             return None;
         }
         let (width, height) = (rect.right, rect.bottom);
-        if width <= 0 || height <= 0 || width > 4096 || height > 4096 {
-            return None;
-        }
-        let dc = GetDC(*hwnd);
+        let buffer_len = pixel_buffer_len(width, height)?;
+        let dc = GetDC(hwnd);
         if dc.is_null() {
             return None;
         }
@@ -83,18 +126,22 @@ fn capture(identity: &ProcessIdentity) -> Option<Vec<u8>> {
             if !bitmap.is_null() {
                 DeleteObject(bitmap);
             }
-            ReleaseDC(*hwnd, dc);
+            ReleaseDC(hwnd, dc);
             return None;
         }
         let previous = SelectObject(mem, bitmap);
-        // PW_CLIENTONLY | PW_RENDERFULLCONTENT. This never copies the desktop
-        // or another window even when the client is obscured.
+        // PW_CLIENTONLY | PW_RENDERFULLCONTENT. Never copy the desktop or another window.
         let mut owner = 0;
-        GetWindowThreadProcessId(*hwnd, &mut owner);
-        let ok = owner == identity.pid
-            && windows_sys::Win32::Storage::Xps::PrintWindow(*hwnd, mem, 3) != 0;
-        GetWindowThreadProcessId(*hwnd, &mut owner);
-        let ok = ok && owner == identity.pid;
+        GetWindowThreadProcessId(hwnd, &mut owner);
+        let ok = owner == pid && windows_sys::Win32::Storage::Xps::PrintWindow(hwnd, mem, 3) != 0;
+        GetWindowThreadProcessId(hwnd, &mut owner);
+        // A resize during PrintWindow can otherwise deliver a cropped frame.
+        let mut after: RECT = std::mem::zeroed();
+        let ok = ok
+            && owner == pid
+            && GetClientRect(hwnd, &mut after) != 0
+            && after.right == width
+            && after.bottom == height;
         SelectObject(mem, previous);
         let mut info: BITMAPINFO = std::mem::zeroed();
         info.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
@@ -103,7 +150,7 @@ fn capture(identity: &ProcessIdentity) -> Option<Vec<u8>> {
         info.bmiHeader.biPlanes = 1;
         info.bmiHeader.biBitCount = 32;
         info.bmiHeader.biCompression = BI_RGB;
-        let mut pixels = vec![0u8; width as usize * height as usize * 4];
+        let mut pixels = vec![0u8; buffer_len];
         let rows = if ok {
             GetDIBits(
                 dc,
@@ -119,7 +166,7 @@ fn capture(identity: &ProcessIdentity) -> Option<Vec<u8>> {
         };
         DeleteObject(bitmap);
         DeleteDC(mem);
-        ReleaseDC(*hwnd, dc);
+        ReleaseDC(hwnd, dc);
         if rows != height {
             return None;
         }
@@ -198,4 +245,107 @@ fn capture(identity: &ProcessIdentity) -> Option<Vec<u8>> {
 #[cfg(not(any(windows, target_os = "linux")))]
 fn capture(_: &ProcessIdentity) -> Option<Vec<u8>> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn physical_capture_sizes_are_bounded_by_memory() {
+        for (width, height) in [
+            (1920, 1080),
+            (2880, 1800),
+            (3840, 2160),
+            (5120, 1440),
+            (7680, 4320),
+        ] {
+            assert_eq!(
+                pixel_buffer_len(width, height),
+                Some(width as usize * height as usize * 4)
+            );
+        }
+        for (width, height) in [(0, 1800), (2880, -1), (i32::MAX, i32::MAX), (16384, 16384)] {
+            assert_eq!(pixel_buffer_len(width, height), None);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn physical_client_geometry_and_dpi_restoration_from_unaware_thread() {
+        use windows_sys::Win32::{
+            Foundation::*,
+            UI::{HiDpi::*, WindowsAndMessaging::*},
+        };
+        // Measure only our hidden test window; no desktop or Roblox access.
+        std::thread::spawn(|| unsafe {
+            let original = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+            let hwnd = CreateWindowExW(
+                0,
+                class.as_ptr(),
+                class.as_ptr(),
+                WS_POPUP,
+                0,
+                0,
+                2880,
+                1800,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            );
+            assert!(!hwnd.is_null());
+            let mut pid = 0;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_UNAWARE);
+            for (width, height) in [(2880, 1800), (5120, 1440)] {
+                {
+                    let _dpi = PhysicalPixels::enter().unwrap();
+                    assert_ne!(
+                        SetWindowPos(
+                            hwnd,
+                            std::ptr::null_mut(),
+                            0,
+                            0,
+                            width,
+                            height,
+                            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE
+                        ),
+                        0
+                    );
+                    let mut rect: RECT = std::mem::zeroed();
+                    assert_ne!(GetClientRect(hwnd, &mut rect), 0);
+                    assert_eq!((rect.right, rect.bottom), (width, height));
+                    assert_ne!(
+                        AreDpiAwarenessContextsEqual(
+                            GetThreadDpiAwarenessContext(),
+                            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+                        ),
+                        0
+                    );
+                }
+                assert_ne!(
+                    AreDpiAwarenessContextsEqual(
+                        GetThreadDpiAwarenessContext(),
+                        DPI_AWARENESS_CONTEXT_UNAWARE
+                    ),
+                    0
+                );
+            }
+            // Ownership rejection must restore DPI context on early returns too.
+            assert!(capture_window(hwnd, pid.wrapping_add(1)).is_none());
+            assert_ne!(
+                AreDpiAwarenessContextsEqual(
+                    GetThreadDpiAwarenessContext(),
+                    DPI_AWARENESS_CONTEXT_UNAWARE
+                ),
+                0
+            );
+            DestroyWindow(hwnd);
+            SetThreadDpiAwarenessContext(original);
+        })
+        .join()
+        .unwrap();
+    }
 }

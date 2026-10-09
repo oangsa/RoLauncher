@@ -18,6 +18,7 @@ def notices(directory):
         "--filter-platform", "x86_64-unknown-linux-gnu"], cwd=root))
     licenses = directory / "licenses"
     licenses.mkdir(exist_ok=True)
+    shutil.copy2(root / "licenses/inter-OFL.txt", licenses)
     for package in metadata["packages"]:
         source = Path(package["manifest_path"]).parent
         destination = licenses / f'{package["name"]}-{package["version"]}'

@@ -24,6 +24,30 @@ public sealed partial class MainWindow
             Check(_rows.Count == 3 && !_refreshing, "Simulated accounts load through the authenticated API.");
             Check(_config.Version == GetType().Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false).Cast<System.Reflection.AssemblyInformationalVersionAttribute>().Single().InformationalVersion.Split('+')[0], "Version matches the supervisor.");
             Root.UpdateLayout();
+            var fontUri = "ms-appx:///Assets/Fonts/Inter-Regular.ttf";
+            Check(((FontFamily)Application.Current.Resources["ContentControlThemeFontFamily"]).Source == fontUri,
+                "Linux selects bundled Inter for controls and dialogs.");
+            using var regularFace = SKTypeface.FromFile(Path.Combine(AppContext.BaseDirectory, "Assets/Fonts/Inter-Regular.ttf"));
+            using var semiboldFace = SKTypeface.FromFile(Path.Combine(AppContext.BaseDirectory, "Assets/Fonts/Inter-SemiBold.ttf"));
+            Check(regularFace?.FamilyName == "Inter" && semiboldFace?.FontWeight == 600,
+                "The Linux bundle contains real Inter regular and semibold faces.");
+            var sample = "WWW iii 0123456789";
+            using var regularFont = new SKFont(regularFace, 20) { Subpixel = true, LinearMetrics = true };
+            using var semiboldFont = new SKFont(semiboldFace, 20) { Subpixel = true, LinearMetrics = true };
+            var regularText = new TextBlock { Text = sample, FontSize = 20 };
+            var semiboldText = new TextBlock { Text = sample, FontSize = 20, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold };
+            var unconstrained = new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity);
+            for (var i = 0; i < 20; i++)
+            {
+                regularText.Measure(unconstrained); semiboldText.Measure(unconstrained);
+                if (Math.Abs(regularText.DesiredSize.Width - regularFont.MeasureText(sample)) < 2 &&
+                    Math.Abs(semiboldText.DesiredSize.Width - semiboldFont.MeasureText(sample)) < 2) break;
+                await Task.Delay(50);
+                regularText.InvalidateMeasure(); semiboldText.InvalidateMeasure();
+            }
+            Check(Math.Abs(regularText.DesiredSize.Width - regularFont.MeasureText(sample)) < 2 &&
+                Math.Abs(semiboldText.DesiredSize.Width - semiboldFont.MeasureText(sample)) < 2,
+                $"Linux text uses Inter's actual regular/semibold metrics ({regularText.DesiredSize.Width}/{semiboldText.DesiredSize.Width} versus {regularFont.MeasureText(sample)}/{semiboldFont.MeasureText(sample)}).");
             Check(Math.Abs(GroupFilter.ActualHeight - BulkEditButton.ActualHeight) < 0.5 && GroupFilter.ActualHeight > 0, "The group dropdown matches the adjacent button height.");
             await CaptureLinuxAsync(directory, "accounts.png");
             Tab_Click(PresetsTab, new RoutedEventArgs());

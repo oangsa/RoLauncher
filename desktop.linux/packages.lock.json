@@ -43,12 +43,6 @@
           "Uno.WinUI": "5.2.175"
         }
       },
-      "Uno.Fonts.OpenSans": {
-        "type": "Direct",
-        "requested": "[2.9.4, )",
-        "resolved": "2.9.4",
-        "contentHash": "EmCs4jIFEPPLsFNzVMhhlXxOLRP6TgoW+TOp6Nyy7NAMdUmTTJkK+RelDew2W+UocyUC+Odd0Hm3YLWB83JbWg=="
-      },
       "Uno.Resizetizer": {
         "type": "Direct",
         "requested": "[1.12.7, )",

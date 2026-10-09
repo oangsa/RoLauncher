@@ -276,7 +276,7 @@ public sealed partial class MainWindow
         var lines = text.Split('\n'); var versions = 0;
         var recent = string.Join("\n", lines.TakeWhile(line => !System.Text.RegularExpressions.Regex.IsMatch(line, @"^\d+\.\d+\.\d+\s") || ++versions <= 2));
         var content = new StackPanel { Spacing = 16 };
-        content.Children.Add(new ScrollViewer { MaxHeight = 400, Content = FormatChangelog(recent) });
+        content.Children.Add(new ScrollViewer { Name = "ChangelogScroll", MaxHeight = 400, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, HorizontalScrollMode = ScrollMode.Disabled, HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Content = new Border { Padding = new Thickness(0, 0, 20, 0), Child = FormatChangelog(recent) } });
         content.Children.Add(new HyperlinkButton { Content = "Full changelog on GitHub", NavigateUri = new Uri("https://github.com/oangsa/RoLauncher/blob/main/CHANGELOG.md") });
         var dialog = new ContentDialog { XamlRoot = Root.XamlRoot, Title = "What’s new", Content = content, CloseButtonText = "Done", RequestedTheme = Root.ActualTheme };
         ApplyDialogTheme(dialog); _modalOpen = true; _changelogDialog = dialog;

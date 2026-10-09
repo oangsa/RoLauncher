@@ -38,6 +38,61 @@ public sealed partial class MainWindow
             for (var i = 0; i < 100 && _refreshing; i++) await Task.Delay(50);
             Assert(!_refreshing, "Initial account and settings refresh finishes before layout measurements.");
             Root.UpdateLayout();
+            var face = (FontFamily)Application.Current.Resources["ContentControlThemeFontFamily"];
+            var specimen = "Hamburgefontsiv WWW iii 0123456789";
+            var nativeText = new TextBlock { Text = specimen, FontSize = 20, FontFamily = face };
+            var semibold = new TextBlock { Text = specimen, FontSize = 20, FontFamily = face, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold };
+            var unconstrained = new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity);
+            foreach (var text in new[] { nativeText, semibold }) text.Measure(unconstrained);
+            Assert(face.Source == "XamlAutoFontFamily" || face.Source.StartsWith("Segoe UI", StringComparison.Ordinal),
+                $"Windows uses WinUI's native font selection without a bundled font override ({face.Source}).");
+            Assert(Math.Abs(nativeText.DesiredSize.Width - semibold.DesiredSize.Width) > .5,
+                "The native font supplies distinct regular and semibold metrics.");
+            foreach (var destination in Destinations)
+            {
+                SwitchPage(destination.Tab, false);
+                Root.UpdateLayout();
+                var position = destination.Tab.TransformToVisual(SidebarNavigation).TransformPoint(new Windows.Foundation.Point()).Y;
+                Assert(Destinations.Count(d => d.Tab.IsChecked == true) == 1 && Destinations.Count(d => d.Page.Visibility == Visibility.Visible) == 1,
+                    "Each destination has one selected tab and one immediately interactive page.");
+                Assert(NavigationSelection.Visibility == Visibility.Visible && Math.Abs(NavigationSelectionTransform.TranslateY - position) < .5 &&
+                    Math.Abs(NavigationSelection.Height - destination.Tab.ActualHeight) < .5,
+                    "The selection pill follows the actual row across all sidebar groups.");
+                Assert(_pageTransition is null && _selectionTransition is null && PageContent.Opacity == 1 && PageTransitionTransform.TranslateY == 0,
+                    "Reduced-motion navigation settles immediately without leaving a hidden or offset page.");
+            }
+            SwitchPage(RecoveryTab, false);
+            // Guarantee overflow regardless of monitor size or native font metrics.
+            var viewportMaxHeight = PageScroll.MaxHeight;
+            PageScroll.MaxHeight = 320;
+            Root.UpdateLayout();
+            await Task.Delay(80); // Let the destination's deferred scroll reset finish.
+            PageScroll.ChangeView(null, 180, null, true); await Task.Delay(80);
+            var retainedScroll = PageScroll.VerticalOffset;
+            RecoveryTab.IsChecked = false; // A real ToggleButton click toggles itself first.
+            Tab_Click(RecoveryTab, new RoutedEventArgs());
+            Assert(RecoveryTab.IsChecked == true && retainedScroll > 0 && Math.Abs(PageScroll.VerticalOffset - retainedScroll) < .5,
+                $"Clicking the current destination retains its selection and scroll position (before {retainedScroll}, after {PageScroll.VerticalOffset}).");
+            PageScroll.MaxHeight = viewportMaxHeight;
+            Root.UpdateLayout();
+            if (NavigationAnimationsEnabled())
+            {
+                SwitchPage(AccountsTab, true);
+                await Task.Delay(50);
+                Assert(PageContent.Opacity >= .78 && PageContent.Opacity < 1 && Math.Abs(PageTransitionTransform.TranslateY) > .01,
+                    $"Page fade and translation actually animate before settling (opacity {PageContent.Opacity}, offset {PageTransitionTransform.TranslateY}, state {_pageTransition?.GetCurrentState()}, time {_pageTransition?.GetCurrentTime()}).");
+                foreach (var destination in Destinations.Reverse())
+                {
+                    SwitchPage(destination.Tab, true); await Task.Delay(16);
+                }
+                await Task.Delay(350);
+                var position = AccountsTab.TransformToVisual(SidebarNavigation).TransformPoint(new Windows.Foundation.Point()).Y;
+                Assert(AccountsPage.Visibility == Visibility.Visible && AccountsTab.IsChecked == true && Math.Abs(PageContent.Opacity - 1) < .001 &&
+                    Math.Abs(PageTransitionTransform.TranslateY) < .01 && Math.Abs(NavigationSelectionTransform.TranslateY - position) < .5,
+                    "Rapid navigation cancels earlier transitions and settles at the latest selected page.");
+            }
+            SwitchPage(AccountsTab, false);
+            PageScroll.ChangeView(0, 0, null, true);
             var cookiePosition = CookieInput.TransformToVisual(AccountsPage).TransformPoint(new Windows.Foundation.Point());
             var loginPosition = LoginButton.TransformToVisual(AccountsPage).TransformPoint(new Windows.Foundation.Point());
             Assert(loginPosition.Y > cookiePosition.Y && CookieInput.AcceptsReturn && CookieInput.ActualWidth > 200, "Multiline cookie input has a separate action row.");
@@ -61,11 +116,11 @@ public sealed partial class MainWindow
             Root.UpdateLayout();
             var hoverBorder = FindVisual<ContentPresenter>(PresetsTab, "ContentPresenter");
             var checkedHoverBorder = FindVisual<ContentPresenter>(RecoveryTab, "ContentPresenter");
-            Assert(hoverBorder?.Background is SolidColorBrush hoverFill && hoverFill.Color.A == 0 &&
+            Assert(hoverBorder?.Background is SolidColorBrush hoverFill && hoverFill.Color.A > 0 &&
                 hoverBorder.BorderBrush is SolidColorBrush hoverStroke && hoverStroke.Color.A == 0 &&
                 checkedHoverBorder?.Background is SolidColorBrush checkedFill && checkedFill.Color.A == 0 &&
                 checkedHoverBorder.BorderBrush is SolidColorBrush checkedStroke && checkedStroke.Color.A == 0,
-                "Selected and unselected sidebar hover states have transparent fill and border.");
+                "Unselected sidebar hover has a subtle fill; the selected row preserves the shared pill and transparent border.");
             await CaptureAsync(directory, "sidebar-hover.png");
             VisualStateManager.GoToState(PresetsTab, "Normal", false);
             VisualStateManager.GoToState(RecoveryTab, "Checked", false);
@@ -122,7 +177,7 @@ public sealed partial class MainWindow
             await Task.Delay(150);
             Assert(Feedback.IsOpen && Feedback.Message == "Test queued. Check recent activity for delivery status.", "Send test displays the toast.");
             var toastPosition = Feedback.TransformToVisual(Root).TransformPoint(new Windows.Foundation.Point());
-            Assert(toastPosition.Y == 12 && Math.Abs(toastPosition.X + Feedback.ActualWidth / 2 - (Root.ActualWidth + 224) / 2) < 1,
+            Assert(toastPosition.Y == 12 && Math.Abs(toastPosition.X + Feedback.ActualWidth / 2 - (Root.ActualWidth + Root.ColumnDefinitions[0].ActualWidth) / 2) < 1,
                 "Toast overlays the top center of the window.");
             Assert(SettingsPage.ActualHeight == pageHeight, "Toast does not move or resize page content.");
             await CaptureAsync(directory, "toast.png");
@@ -170,6 +225,9 @@ public sealed partial class MainWindow
             await Task.Delay(500);
             Assert(_modalOpen && _editorRow!.Id == "0", "Row details open a modal independent of selection.");
             AliasInput.Text = "Studio account";
+            Assert(FindVisual<Button>(OpenDialog(), "PrimaryButton")!.ActualWidth < 240 &&
+                FindVisual<Button>(OpenDialog(), "CloseButton")!.ActualWidth < 180,
+                "The inline account editor uses compact actions in its visible popup.");
             await CaptureAsync(directory, "account-modal.png", _accountDialog);
             PlaceInput.Text = "incomplete";
             InvokeDialogButton("PrimaryButton");
@@ -305,6 +363,7 @@ public sealed partial class MainWindow
             Assert(commands.Contains("/v1/login"), "Browser sign-in uses the authenticated bridge.");
             var changelog = ShowChangelogAsync();
             await Task.Delay(500);
+            AssertChangelogLayout();
             await CaptureAsync(directory, "changelog.png", OpenDialog());
             InvokeDialogButton("CloseButton"); await changelog;
             Tab_Click(SettingsTab, new RoutedEventArgs());
@@ -316,6 +375,26 @@ public sealed partial class MainWindow
             FindVisual<TextBox>(_gameDialog!, "GameProfileName")!.Text = "Private fixture";
             FindVisual<TextBox>(_gameDialog!, "GamePlace")!.Text = "123";
             await CaptureAsync(directory, "game-editor.png", _gameDialog);
+            AssertInputTypography(FindVisual<TextBox>(_gameDialog!, "GameProfileName")!);
+            AssertInputTypography(FindVisual<TextBox>(_gameDialog!, "GamePlace")!);
+            var gameNameInput = FindVisual<TextBox>(_gameDialog!, "GameProfileName")!;
+            var gamePlaceInput = FindVisual<TextBox>(_gameDialog!, "GamePlace")!;
+            gameNameInput.Text = "TEST";
+            gamePlaceInput.Text = "16205713724";
+            foreach (var theme in new[] { ElementTheme.Dark, ElementTheme.Light })
+            {
+                _gameDialog!.RequestedTheme = theme;
+                await Task.Delay(100);
+                Root.UpdateLayout();
+                AssertInputTypography(gameNameInput);
+                AssertInputTypography(gamePlaceInput);
+                gamePlaceInput.Focus(FocusState.Programmatic);
+                gamePlaceInput.SelectAll();
+                await CaptureAsync(directory, $"game-editor-inputs-{theme.ToString().ToLowerInvariant()}.png", _gameDialog);
+            }
+            _gameDialog!.RequestedTheme = Root.ActualTheme;
+            gameNameInput.Text = "Private fixture";
+            gamePlaceInput.Text = "123";
             InvokeDialogButton("PrimaryButton"); await game.WaitAsync(TimeSpan.FromSeconds(5));
             Assert(_gameProfiles.Length == 1 && _gameProfiles[0].GameName == "Fixture game", "Saving a game resolves metadata and persists its destination.");
             await CaptureAsync(directory, "games.png");
@@ -504,6 +583,10 @@ public sealed partial class MainWindow
             InvokeDialogButton("CloseButton"); await themedGame;
             ThemePicker.SelectedIndex = 1; await Task.Delay(200);
             Assert(Root.ActualTheme == ElementTheme.Light, "Light theme applies immediately.");
+            changelog = ShowChangelogAsync(); await Task.Delay(350);
+            AssertChangelogLayout();
+            await CaptureAsync(directory, "changelog-light.png", OpenDialog());
+            InvokeDialogButton("CloseButton"); await changelog;
             await CaptureAsync(directory, "appearance-light.png");
             ThemePicker.SelectedIndex = 0; await Task.Delay(200);
             Assert(Root.RequestedTheme == ElementTheme.Default, "System theme follows device preference.");
@@ -517,6 +600,10 @@ public sealed partial class MainWindow
             await CaptureAsync(directory, "accounts-wide.png");
             AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(hwnd)).Resize(new Windows.Graphics.SizeInt32((int)(1020 * scale), (int)(780 * scale)));
             await Task.Delay(350);
+            changelog = ShowChangelogAsync(); await Task.Delay(350);
+            AssertChangelogLayout();
+            await CaptureAsync(directory, "changelog-small.png", OpenDialog());
+            InvokeDialogButton("CloseButton"); await changelog;
             foreach (var tab in new[] { AccountsTab, GamesTab, RecoveryTab, PresetsTab, SettingsTab, DiscordTab, BackupsTab, UpdatesTab, SupportTab })
             {
                 Tab_Click(tab, new RoutedEventArgs()); await Task.Delay(80); Root.UpdateLayout();
@@ -568,7 +655,7 @@ public sealed partial class MainWindow
             _rows.Clear();
             ApplyFilters();
             await CaptureAsync(directory, "empty.png");
-            File.WriteAllText(Path.Combine(directory, "result.txt"), "WinUI smoke passed: header select/clear, saved bot controls and status, game hover animation, sidebar scroll reset, saved game create/edit/account selection, close preference, changelog modal; bulk settings Save/Cancel, atomic invalid/rejected saves, alias patterns, selected/all account scopes, groups and filtering, saved profile review/apply, backup picker, recovery/history and account filtering; inherited toast, modal, deletion, selection, bulk-action, sign-in, resize and rendering checks.");
+            File.WriteAllText(Path.Combine(directory, "result.txt"), "WinUI smoke passed: animated page fade/slide, rapid navigation cancellation, sliding selection across all sidebar groups, reduced-motion path and current-page scroll retention; header select/clear, saved bot controls and status, game hover animation, sidebar scroll reset, saved game create/edit/account selection, close preference, changelog modal; bulk settings Save/Cancel, atomic invalid/rejected saves, alias patterns, selected/all account scopes, groups and filtering, saved profile review/apply, backup picker, recovery/history and account filtering; inherited toast, modal, deletion, selection, bulk-action, sign-in, resize and rendering checks.");
         }
         catch (Exception ex)
         {
@@ -615,12 +702,54 @@ public sealed partial class MainWindow
         var button = FindVisual<Button>(commands, name) ?? throw new InvalidOperationException($"Dialog button missing: {name}");
         ((IInvokeProvider)new ButtonAutomationPeer(button).GetPattern(PatternInterface.Invoke)).Invoke();
     }
+    private static void AssertInputTypography(TextBox field)
+    {
+        var reference = new TextBlock { Text = field.Text, FontSize = field.FontSize,
+            FontFamily = (FontFamily)Application.Current.Resources["ContentControlThemeFontFamily"] };
+        reference.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
+        var leading = field.GetRectFromCharacterIndex(0, false);
+        var trailing = field.GetRectFromCharacterIndex(field.Text.Length - 1, true);
+        var width = trailing.X - leading.X;
+        File.AppendAllText(Path.Combine(Environment.GetEnvironmentVariable("ROLAUNCHER_UI_SMOKE_DIR")!, "input-font-metrics.txt"),
+            $"{field.Name}: editor {width:F2}, label {reference.DesiredSize.Width:F2}\n");
+        Assert(Math.Abs(width - reference.DesiredSize.Width) <= Math.Max(3, reference.DesiredSize.Width * .05),
+            $"{field.Name} input text matches the label's native font (editor {width:F2}, label {reference.DesiredSize.Width:F2}).");
+    }
+    private void AssertChangelogLayout()
+    {
+        var scroll = DialogControl<ScrollViewer>(_changelogDialog!, "ChangelogScroll")!;
+        Assert(scroll.ScrollableWidth < 1, "Release notes wrap without horizontal scrolling.");
+        var notes = (StackPanel)((Border)scroll.Content).Child;
+        foreach (var row in notes.Children.OfType<Grid>())
+        {
+            var body = (TextBlock)row.Children[1];
+            var right = body.TransformToVisual(scroll).TransformPoint(new Windows.Foundation.Point(body.ActualWidth, 0)).X;
+            Assert(right <= scroll.ActualWidth - 18, "Release-note text leaves a gutter for the scrollbar.");
+        }
+        var button = DialogControl<Button>(_changelogDialog!, "CloseButton")!;
+        Assert(button.ActualWidth < 180 && button.ActualHeight >= 39 && button.ActualHeight <= 41,
+            "The single Done action remains a compact workspace-sized button.");
+        var bottom = button.TransformToVisual(OpenDialog()).TransformPoint(new Windows.Foundation.Point(0, button.ActualHeight)).Y;
+        Assert(bottom <= ((FrameworkElement)OpenDialog()).ActualHeight, "The dialog action remains visible at the current window size.");
+    }
+
     private async Task CaptureAsync(string directory, string name, UIElement? element = null)
     {
         await Task.Delay(150);
+        if (_pageTransition?.GetCurrentState() == Microsoft.UI.Xaml.Media.Animation.ClockState.Active ||
+            _selectionTransition?.GetCurrentState() == Microsoft.UI.Xaml.Media.Animation.ClockState.Active) await Task.Delay(160);
         var bitmap = new RenderTargetBitmap();
         if (element is ContentDialog) element = OpenDialog();
-        await bitmap.RenderAsync(element ?? Root);
+        // RenderTargetBitmap omits the OS Mica backdrop. Preview its neutral fallback
+        // so transparent XAML layers remain legible in standalone fixture PNGs.
+        var background = Root.Background;
+        try
+        {
+            if (element is null) Root.Background = new SolidColorBrush(Root.ActualTheme == ElementTheme.Dark
+                ? Windows.UI.Color.FromArgb(255, 32, 32, 32) : Windows.UI.Color.FromArgb(255, 243, 243, 243));
+            await bitmap.RenderAsync(element ?? Root);
+        }
+        finally { Root.Background = background; }
         Assert(bitmap.PixelWidth > 0 && bitmap.PixelHeight > 0, $"Rendered element has no pixels: {element?.GetType().Name} ({(element as FrameworkElement)?.ActualWidth} x {(element as FrameworkElement)?.ActualHeight}).");
         var pixels = (await bitmap.GetPixelsAsync()).ToArray();
         using var stream = File.Create(Path.Combine(directory, name));

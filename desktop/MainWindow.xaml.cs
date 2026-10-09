@@ -41,6 +41,7 @@ public sealed partial class MainWindow : Window
         AccountList.ItemsSource = _visibleRows;
         PresetAccounts.ItemsSource = _presetVisibleRows;
         InitializeTheme();
+        InitializeNavigation();
         Root.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler(Workspace_PointerPressed), true);
 
         _tray = ConfigureDesktop();
@@ -355,7 +356,19 @@ public sealed partial class MainWindow : Window
     }
     private void ApplyDialogTheme(ContentDialog dialog)
     {
+        dialog.Style = (Style)Application.Current.Resources["WorkspaceDialogStyle"];
         dialog.RequestedTheme = Root.ActualTheme;
+        // Explicit text avoids the native template's baked-in Segoe UI presenter.
+        if (dialog.Content is string text)
+            dialog.Content = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap,
+                FontFamily = (Microsoft.UI.Xaml.Media.FontFamily)Application.Current.Resources["ContentControlThemeFontFamily"] };
+        // Share the shell's rhythm without replacing the native dialog template.
+        // Keep per-dialog width limits and scrolling for narrow windows.
+        dialog.Resources["OverlayCornerRadius"] = Application.Current.Resources["SurfaceCornerRadius"];
+        dialog.Resources["ContentDialogPadding"] = Application.Current.Resources["SurfacePadding"];
+        dialog.Resources["ContentDialogTopOverlay"] = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        dialog.Resources["ContentDialogTitleMargin"] = new Thickness(0, 0, 0, 16);
+        dialog.Resources["ContentDialogButtonSpacing"] = 12d;
         // WinUI's default-action visual state forcibly replaces that button's style.
         if (dialog.DefaultButton == ContentDialogButton.Close)
         {
@@ -364,6 +377,8 @@ public sealed partial class MainWindow : Window
         }
         dialog.PrimaryButtonStyle = (Style)Application.Current.Resources[dialog.PrimaryButtonText is "Delete" or "Remove" ? "DangerButtonStyle" : "PrimaryActionButtonStyle"];
         dialog.CloseButtonStyle = (Style)Application.Current.Resources["ActionButtonStyle"];
+        dialog.Opened -= Dialog_Opened;
+        dialog.Opened += Dialog_Opened;
         if (dialog.PrimaryButtonText is "Delete" or "Remove")
             dialog.Opened += (_, _) =>
             {
@@ -372,31 +387,31 @@ public sealed partial class MainWindow : Window
 
     }
 
-    private void Tab_Click(object sender, RoutedEventArgs e)
+    private void Dialog_Opened(ContentDialog dialog, ContentDialogOpenedEventArgs args)
     {
-        var page = int.Parse((string)((ToggleButton)sender).Tag);
-        var destinations = new (ToggleButton Tab, FrameworkElement Page, int Id)[]
+        // Inline XAML dialogs can retain a hidden template tree when WinUI moves
+        // their content into a popup. Style the visible footer, not that placeholder.
+        var commands = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetOpenPopupsForXamlRoot(dialog.XamlRoot)
+            .Select(popup => DialogControl<Grid>(popup.Child, "CommandSpace")).FirstOrDefault(grid => grid is not null)
+            ?? DialogControl<Grid>(dialog, "CommandSpace");
+        if (commands is null) return;
+        // One acrylic layer paints the dialog; the footer uses that same surface.
+        commands.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        commands.HorizontalAlignment = HorizontalAlignment.Right;
+        foreach (var (name, column) in new[] { ("PrimaryButton", 0), ("SecondaryButton", 2), ("CloseButton", 4) })
         {
-            (AccountsTab, AccountsPage, 0), (SettingsTab, SettingsPage, 1),
-            (RecoveryTab, RecoveryPage, 3), (GamesTab, GamesPage, 4),
-            (PresetsTab, PresetsPage, 6),
-            (DiscordTab, DiscordPage, 7), (BackupsTab, BackupsPage, 8),
-            (UpdatesTab, UpdatesPage, 9), (SupportTab, SupportPage, 10)
-        };
-        foreach (var destination in destinations)
-        {
-            destination.Tab.IsChecked = page == destination.Id;
-            destination.Tab.FontWeight = page == destination.Id ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal;
-            destination.Page.Visibility = page == destination.Id ? Visibility.Visible : Visibility.Collapsed;
+            if (DialogControl<Button>(commands, name) is not { } button) continue;
+            if (column < commands.ColumnDefinitions.Count && button.Visibility == Visibility.Visible)
+                commands.ColumnDefinitions[column].Width = GridLength.Auto;
+            button.FontFamily = (Microsoft.UI.Xaml.Media.FontFamily)Application.Current.Resources["ContentControlThemeFontFamily"];
+            button.MinWidth = 104;
+            button.Height = 40;
+            button.Padding = new Thickness(16, 8, 16, 8);
+            button.CornerRadius = new CornerRadius(8);
         }
-        UpdateSelectionSettings();
-        PageContent.MinWidth = 0;
-        PageScroll.UpdateLayout();
-        PageScroll.ChangeView(0, 0, null, true);
-        DispatcherQueue.TryEnqueue(() => PageScroll.ChangeView(0, 0, null, true));
-        if (page == 3) _ = GuardAsync(RefreshHistoryAsync);
-        if (page == 8) _ = GuardAsync(RefreshBackupsAsync);
     }
+
+    private void Tab_Click(object sender, RoutedEventArgs e) => SwitchPage((ToggleButton)sender, NavigationAnimationsEnabled());
     private void SelectAll_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs e)
     {
         if (_presetLookupDraftIds is not null && Root.XamlRoot is { } lookupRoot && Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(lookupRoot) is not (TextBox or PasswordBox))

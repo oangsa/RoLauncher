@@ -39,6 +39,9 @@ with tarfile.open(archive, "r:gz") as package:
         assert package.extractfile(f"{name}/{path}").read(4) == b"\x7fELF", "Expected Linux ELF"
     for path in ("README.md", "AGENTS.md", "docs/LINUX.md", "install-linux.py"):
         assert package.extractfile(f"{name}/{path}").read() == (directory / path).read_bytes(), path
+    for font in ("Inter-Regular.ttf", "Inter-SemiBold.ttf", "Inter-Bold.ttf", "Inter-Italic.ttf", "Inter-Regular.ttf.manifest"):
+        assert package.extractfile(f"{name}/desktop/Assets/Fonts/{font}").read() == (root / "assets/fonts" / font).read_bytes(), font
+    assert package.extractfile(f"{name}/licenses/inter-OFL.txt").read() == (root / "licenses/inter-OFL.txt").read_bytes()
     assert not any("/bin/" in path or "/obj/" in path or "/.tools/" in path for path in entries)
     assembly = package.extractfile(f"{name}/desktop/RoLauncher.Desktop.dll").read()
     assert b"LinuxSmokeAsync" not in assembly, "Smoke code must not be shipped"
