@@ -370,6 +370,26 @@ public sealed partial class MainWindow
             FindVisual<TextBox>(_gameDialog!, "GameProfileName")!.Text = "Private fixture";
             FindVisual<TextBox>(_gameDialog!, "GamePlace")!.Text = "123";
             await CaptureAsync(directory, "game-editor.png", _gameDialog);
+            AssertInputTypography(FindVisual<TextBox>(_gameDialog!, "GameProfileName")!);
+            AssertInputTypography(FindVisual<TextBox>(_gameDialog!, "GamePlace")!);
+            var gameNameInput = FindVisual<TextBox>(_gameDialog!, "GameProfileName")!;
+            var gamePlaceInput = FindVisual<TextBox>(_gameDialog!, "GamePlace")!;
+            gameNameInput.Text = "TEST";
+            gamePlaceInput.Text = "16205713724";
+            foreach (var theme in new[] { ElementTheme.Dark, ElementTheme.Light })
+            {
+                _gameDialog!.RequestedTheme = theme;
+                await Task.Delay(100);
+                Root.UpdateLayout();
+                AssertInputTypography(gameNameInput);
+                AssertInputTypography(gamePlaceInput);
+                gamePlaceInput.Focus(FocusState.Programmatic);
+                gamePlaceInput.SelectAll();
+                await CaptureAsync(directory, $"game-editor-inputs-{theme.ToString().ToLowerInvariant()}.png", _gameDialog);
+            }
+            _gameDialog!.RequestedTheme = Root.ActualTheme;
+            gameNameInput.Text = "Private fixture";
+            gamePlaceInput.Text = "123";
             InvokeDialogButton("PrimaryButton"); await game.WaitAsync(TimeSpan.FromSeconds(5));
             Assert(_gameProfiles.Length == 1 && _gameProfiles[0].GameName == "Fixture game", "Saving a game resolves metadata and persists its destination.");
             await CaptureAsync(directory, "games.png");
@@ -676,6 +696,19 @@ public sealed partial class MainWindow
         var commands = FindVisual<Grid>(OpenDialog(), "CommandSpace") ?? throw new InvalidOperationException("Dialog footer missing.");
         var button = FindVisual<Button>(commands, name) ?? throw new InvalidOperationException($"Dialog button missing: {name}");
         ((IInvokeProvider)new ButtonAutomationPeer(button).GetPattern(PatternInterface.Invoke)).Invoke();
+    }
+    private static void AssertInputTypography(TextBox field)
+    {
+        var reference = new TextBlock { Text = field.Text, FontSize = field.FontSize,
+            FontFamily = (FontFamily)Application.Current.Resources["ContentControlThemeFontFamily"] };
+        reference.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
+        var leading = field.GetRectFromCharacterIndex(0, false);
+        var trailing = field.GetRectFromCharacterIndex(field.Text.Length - 1, true);
+        var width = trailing.X - leading.X;
+        File.AppendAllText(Path.Combine(Environment.GetEnvironmentVariable("ROLAUNCHER_UI_SMOKE_DIR")!, "input-font-metrics.txt"),
+            $"{field.Name}: editor {width:F2}, label {reference.DesiredSize.Width:F2}\n");
+        Assert(Math.Abs(width - reference.DesiredSize.Width) <= Math.Max(3, reference.DesiredSize.Width * .05),
+            $"{field.Name} input text matches the label's normal-width Open Sans (editor {width:F2}, label {reference.DesiredSize.Width:F2}).");
     }
     private void AssertChangelogLayout()
     {

@@ -14,6 +14,7 @@ public partial class App : Application
         InitializeComponent();
         Resources["ContentControlThemeFontFamily"] = new Microsoft.UI.Xaml.Media.FontFamily(
             "ms-appx:///Uno.Fonts.OpenSans/Fonts/OpenSans.ttf");
+        Resources["InputControlThemeFontFamily"] = Resources["ContentControlThemeFontFamily"];
     }
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)

@@ -71,6 +71,8 @@
       </ResourceDictionary.ThemeDictionaries>
       <!-- Linux replaces this URI with its bundled Uno Open Sans family. -->
       <FontFamily x:Key="ContentControlThemeFontFamily">ms-appx:///Assets/Fonts/OpenSans.ttf#Open Sans</FontFamily>
+      <!-- Native edit controls render the variable face condensed; use its normal-width static face. -->
+      <FontFamily x:Key="InputControlThemeFontFamily">ms-appx:///Assets/Fonts/OpenSans-Regular.ttf#Open Sans</FontFamily>
       <Style TargetType="TextBlock"><Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/></Style>
       <CornerRadius x:Key="ControlCornerRadius">8</CornerRadius>
       <Thickness x:Key="InfoBarActionHorizontalOrientationMargin">16,4,0,4</Thickness>
@@ -130,12 +132,12 @@
         <Setter Property="CornerRadius" Value="8"/>
       </Style>
       <Style TargetType="TextBox">
-        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/>
+        <Setter Property="FontFamily" Value="{ThemeResource InputControlThemeFontFamily}"/>
         <Setter Property="CornerRadius" Value="8"/>
         <Setter Property="Padding" Value="12,9"/>
       </Style>
       <Style TargetType="PasswordBox">
-        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/>
+        <Setter Property="FontFamily" Value="{ThemeResource InputControlThemeFontFamily}"/>
         <Setter Property="CornerRadius" Value="8"/>
         <Setter Property="Padding" Value="12,9"/>
       </Style>

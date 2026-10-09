@@ -62,7 +62,7 @@ with zipfile.ZipFile(dist / f"{name}-source.zip") as source:
     assert f'version = "{version}"'.encode() in source.read(paths["Cargo.toml"])
     assert re.search(r'name = "rolauncher"\s+version = "' + re.escape(version) + '"', source.read(paths["Cargo.lock"]).decode())
     assert source.read(paths["README.md"]).decode().startswith(f"# RoLauncher {version}")
-    for filename in ["assets/fonts/OpenSans.ttf", "assets/fonts/README.md", "licenses/open-sans-OFL.txt"]:
+    for filename in ["assets/fonts/OpenSans.ttf", "assets/fonts/OpenSans-Regular.ttf", "assets/fonts/README.md", "licenses/open-sans-OFL.txt"]:
         assert source.read(paths[filename]) == (root / filename).read_bytes(), filename
     assert not any("RbxTools.Desktop" in p for p in paths)
 with zipfile.ZipFile(dist / f"{name}-windows-x64.zip") as package:
@@ -75,6 +75,7 @@ with zipfile.ZipFile(dist / f"{name}-windows-x64.zip") as package:
     assert package.read(paths[f"{name}/AGENTS.md"]) == (root / "AGENTS.md").read_bytes()
     assert package.read(paths[f"{name}/README.md"]) == (root / "README.md").read_bytes()
     assert package.read(paths[f"{name}/desktop/Assets/Fonts/OpenSans.ttf"]) == (root / "assets/fonts/OpenSans.ttf").read_bytes()
+    assert package.read(paths[f"{name}/desktop/Assets/Fonts/OpenSans-Regular.ttf"]) == (root / "assets/fonts/OpenSans-Regular.ttf").read_bytes()
     assert package.read(paths[f"{name}/licenses/open-sans-OFL.txt"]) == (root / "licenses/open-sans-OFL.txt").read_bytes()
     for filename in ["API.md", "USAGE.md", "DEVELOPMENT.md", "PERFORMANCE.md"]:
         assert package.read(paths[f"{name}/docs/{filename}"]) == (root / "docs" / filename).read_bytes()
