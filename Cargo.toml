@@ -1,6 +1,6 @@
 [package]
 name = "rolauncher"
-version = "1.5.0"
+version = "1.5.1-dev.fe90bb3d5199"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "Roblox account launcher and recovery supervisor for Windows and Linux"
@@ -28,7 +28,7 @@ zeroize = "1"
 
 [target.'cfg(windows)'.dependencies]
 wmi = "0.18"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_System_Memory", "Win32_System_Threading", "Win32_System_RestartManager", "Win32_System_LibraryLoader", "Win32_System_Com", "Win32_UI_WindowsAndMessaging", "Win32_UI_Controls", "Win32_UI_Controls_Dialogs", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_Storage_Xps"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_System_Memory", "Win32_System_Threading", "Win32_System_RestartManager", "Win32_System_LibraryLoader", "Win32_System_Com", "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi", "Win32_UI_Controls", "Win32_UI_Controls_Dialogs", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_Storage_Xps"] }
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com"] }
 webview2-com = "0.39"
 

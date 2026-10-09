@@ -1,3 +1,7 @@
+1.5.1 — Upcoming release
+
+- Fix cropped instance screenshots on scaled high-resolution displays. Capture dimensions follow the client window after resizing or moving between monitors.
+
 1.5.0 — Discord controls and running records
 
 - Add Discord Stop/Restart slash commands, username autocomplete and /status-register for a saved status message that updates automatically, restricted to configured server/users. Separate Save, Start, Stop and Restart controls retain bot credentials, with a colored connection status. The bot resumes on app launch if it was previously started; Stop keeps it off until started again.

@@ -1,5 +1,11 @@
 # Validation
 
+## Upcoming 1.5.1 capture fix — 2026-10-10
+
+Windows: 67 Rust tests plus the separately invoked authenticated Rust/WinUI bootstrap fixture passed. The new OS fixture checks 2880×1800 and 5120×1440 physical client dimensions after resizing a hidden window from a DPI-unaware worker, restores the prior DPI context, and rejects a different owner. Allocation checks cover FHD, 2.8K, 4K, ultrawide and 8K sizes, invalid dimensions and oversized buffers. Formatting, Clippy with warnings denied, release consistency, 71 desktop checks and the complete WinUI interaction/rendering fixture passed.
+
+The fixtures do not prove GPU screenshot rendering in a real Roblox session. Verify the full client, particularly the bottom-right corner, at 100%, 150%, 175% and 200% scaling, after resizing, and after moving between monitors with different scaling. Minimized/protected or unsupported windows may still refuse capture; capture never falls back to copying the desktop.
+
 ## 1.3.0 workspace, saved games and Linux interactions — 2026-10-06
 
 Windows: 50 Rust tests and the separately invoked authenticated Rust/WinUI bootstrap check passed. Linux in Arch WSL: 52 Rust tests passed, plus the separately invoked disposable Flatpak isolation probe. Formatting and Clippy with warnings denied passed on both platforms; 60 desktop model/editor/update checks passed on Windows. Installer fixtures passed checksum rejection, cancellation, complete installation, process waiting, relaunch, and data preservation.

@@ -1,10 +1,10 @@
-# RoLauncher 1.5.0
+# RoLauncher 1.5.1-dev.fe90bb3d5199
 
 A Roblox account launcher. Manage your accounts, save launch profiles, and reconnect automatically when a session disconnects. Windows uses native WinUI; the Linux development port reuses the same views through Uno and targets Sober on Ubuntu and Arch with GNOME and KDE.
 
 Linux is a **beta**, with live Sober account/recovery behavior still awaiting testing on GNOME and KDE. See [Linux setup and acceptance criteria](docs/LINUX.md). Windows keeps its native WinUI interface.
 
-See [the 1.5.0 release notes](docs/RELEASE-1.5.0.md) for changes since stable 1.4.0 and [development versioning](docs/DEVELOPMENT.md#releases) for local build identities.
+This development build targets the upcoming 1.5.1 capture fix. See [upcoming release notes](docs/RELEASE-1.5.1.md), [stable 1.5.0 notes](docs/RELEASE-1.5.0.md), and [development versioning](docs/DEVELOPMENT.md#releases).
 
 ## Download
 

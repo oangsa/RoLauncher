@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.5.1] — Unreleased
+
+- Capture the complete Roblox client at physical-pixel dimensions on scaled displays, including 2.8K, 4K and ultrawide windows. Re-measure each capture and skip frames resized during capture.
+
 ## [1.5.0] — 2026-10-08
 
 - Add Discord Stop/Restart slash commands, username autocomplete and /status-register for a saved status message that updates automatically, restricted to configured server/users. Separate Save, Start, Stop and Restart controls retain bot credentials, with a colored connection status. The bot resumes on app launch if it was previously started; Stop keeps it off until started again.
