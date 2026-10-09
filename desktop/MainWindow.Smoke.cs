@@ -62,13 +62,19 @@ public sealed partial class MainWindow
                     "Reduced-motion navigation settles immediately without leaving a hidden or offset page.");
             }
             SwitchPage(RecoveryTab, false);
+            // Guarantee overflow regardless of monitor size or native font metrics.
+            var viewportMaxHeight = PageScroll.MaxHeight;
+            PageScroll.MaxHeight = 320;
+            Root.UpdateLayout();
             await Task.Delay(80); // Let the destination's deferred scroll reset finish.
             PageScroll.ChangeView(null, 180, null, true); await Task.Delay(80);
             var retainedScroll = PageScroll.VerticalOffset;
             RecoveryTab.IsChecked = false; // A real ToggleButton click toggles itself first.
             Tab_Click(RecoveryTab, new RoutedEventArgs());
             Assert(RecoveryTab.IsChecked == true && retainedScroll > 0 && Math.Abs(PageScroll.VerticalOffset - retainedScroll) < .5,
-                "Clicking the current destination retains its selection and scroll position.");
+                $"Clicking the current destination retains its selection and scroll position (before {retainedScroll}, after {PageScroll.VerticalOffset}).");
+            PageScroll.MaxHeight = viewportMaxHeight;
+            Root.UpdateLayout();
             if (NavigationAnimationsEnabled())
             {
                 SwitchPage(AccountsTab, true);
