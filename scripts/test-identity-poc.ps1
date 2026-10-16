@@ -5,6 +5,8 @@ $taskPreviousRecovery = $env:ROLAUNCHER_IDENTITY_POC_RECOVERY_DIR
 Push-Location -LiteralPath $taskRoot
 try {
     . "$PSScriptRoot/environment.ps1"
+    & python "$PSScriptRoot/test-identity-lab.py"
+    if ($LASTEXITCODE -ne 0) { throw 'Portable receipt/source isolation checks failed' }
     $taskEvidence = [IO.Path]::GetFullPath((Join-Path $taskRoot $EvidenceDirectory))
     New-Item -ItemType Directory -Force -Path $taskEvidence | Out-Null
     $taskLocal = Join-Path $taskRoot ('target/identity-poc-local/' + [guid]::NewGuid().ToString())
@@ -43,11 +45,12 @@ try {
         measurements=[ordered]@{}
     }
     foreach ($taskProvider in @('software','tpm')) {
-        foreach ($taskScope in @('user','machine')) {
+        foreach ($taskScope in @('user')) {
             $taskReport.measurements["$taskProvider-$taskScope"] = Invoke-Poc @('key-probe',$taskProvider,$taskScope)
         }
+        $taskReport.measurements["$taskProvider-machine"] = [ordered]@{ status='Pending manual disposable-lab provisioning; never attempted by hosted CI' }
     }
-    foreach ($taskCandidate in @('A','B','C')) {
+    foreach ($taskCandidate in @('B')) {
         $taskState = Join-Path $taskLocal ("private-local-public-state-$taskCandidate-" + [guid]::NewGuid().ToString() + '.json')
         $taskTrial = [ordered]@{ create=(Invoke-Poc @('measure',$taskCandidate,$taskState)) }
         # Failed creation explicitly accounts cleanup and preserves partial state locally.
@@ -63,6 +66,9 @@ try {
             }
         }
         $taskReport.measurements["candidate-$taskCandidate"] = $taskTrial
+    }
+    foreach ($taskCandidate in @('A','C')) {
+        $taskReport.measurements["candidate-$taskCandidate"] = [ordered]@{ status='Pending manual disposable-lab provisioning'; enrollment_accepted=$false }
     }
     $taskReport.recovery_accounting = Invoke-Poc @('recovery-summary')
     # Only this sanitized report is uploadable. Never upload PoC public state, SID references,

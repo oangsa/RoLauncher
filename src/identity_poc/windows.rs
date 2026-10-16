@@ -11,6 +11,9 @@ use windows_sys::Win32::{
 #[path = "recovery.rs"]
 pub mod recovery;
 
+#[path = "lab.rs"]
+mod lab;
+
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()
 }
@@ -284,7 +287,7 @@ pub enum Scope {
     Machine,
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublicKey {
     pub name: String,
@@ -665,6 +668,12 @@ impl Key {
         enforce_acl: bool,
         purpose: ContextPurpose,
     ) -> Result<Self, String> {
+        if scope == Scope::Machine {
+            return Err(
+                "machine-key provisioning requires the human-confirmed disposable lab command"
+                    .into(),
+            );
+        }
         let suffix = name
             .strip_prefix("RoLauncher.IdentityPoC.")
             .ok_or("not a PoC name")?;
@@ -1339,6 +1348,9 @@ fn probe_state(path: &std::path::Path) -> Result<serde_json::Value, String> {
 
 pub fn run() -> Result<(), String> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.is_empty() || args[0].starts_with("lab-") {
+        return lab::run(&args);
+    }
     let report = match args.as_slice() {
         [command] if command == "context" => context()?,
         [command] if command == "capabilities" => capabilities(),
