@@ -30,6 +30,7 @@ This is the project's release convention. It is inspired by Semantic Versioning;
 - Write changelog bullets as one short sentence per user-visible change; aim for 25 words or fewer. State the action and user impact.
 - Keep versions newest first, retain release dates/status, and use Added, Changed, or Fixed only when needed. Mark the upcoming release Unreleased/Upcoming.
 - Describe net changes since the latest published stable. Omit local iterations, commit narratives, implementation details, test logs, and fixes to unshipped features.
+- Do not put test counts, checks run, or pass/fail results in changelogs (for example, "50 tests passed"). Keep verification details in docs/VALIDATION.md.
 - Keep CHANGELOG.md and desktop/CHANGELOG.txt aligned. Put detailed setup and validation in linked docs instead of repeating them in release history.
 - Shorten historical wording without dropping released changes, version entries, dates, or compatibility limits. Never modify published release artifacts.
 
