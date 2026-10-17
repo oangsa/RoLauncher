@@ -180,6 +180,16 @@ pub struct ProcessIdentity {
     pub generation: Uuid,
 }
 
+/// Runtime evidence is never restored from a database or backup.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RecoveryEvidence {
+    #[default]
+    Unavailable,
+    SuspectedDisconnect,
+    ConfirmedTerminalDisconnect,
+    RecoveryStarted,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Account {
     pub id: String,
@@ -205,6 +215,10 @@ pub struct Account {
     #[serde(default)]
     pub longest_streak_seconds: u64,
     pub disconnected_since: Option<DateTime<Utc>>,
+    #[serde(skip)]
+    pub recovery_evidence: RecoveryEvidence,
+    #[serde(skip)]
+    pub(crate) recovery_process: Option<ProcessIdentity>,
     #[serde(default)]
     pub disconnect_notified: bool,
     pub last_error: Option<String>,
@@ -239,6 +253,8 @@ impl Account {
             running_since: None,
             longest_streak_seconds: 0,
             disconnected_since: None,
+            recovery_evidence: RecoveryEvidence::Unavailable,
+            recovery_process: None,
             disconnect_notified: false,
             last_error: None,
             operation_id: None,
@@ -286,6 +302,10 @@ pub struct SavedAccount {
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Database {
+    #[serde(default)]
+    pub external_background_cleanup_enabled: bool,
+    #[serde(default = "default_close_to_tray")]
+    pub multi_instance_enabled: bool,
     #[serde(default)]
     pub server_selection: ServerSelection,
     #[serde(default)]
@@ -338,6 +358,9 @@ pub struct Operation {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Snapshot {
+    pub external_background_cleanup_enabled: bool,
+    pub multi_instance_enabled: bool,
+    pub active_multi_instance: bool,
     pub server_selection: ServerSelection,
     pub join_type: JoinType,
     pub game_profiles: Vec<GameProfile>,
@@ -361,6 +384,19 @@ pub fn retry_seconds(failures: u32) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn old_databases_default_multiple_instances_on() {
+        let mut value = serde_json::to_value(Database::default()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("multi_instance_enabled");
+        assert!(
+            serde_json::from_value::<Database>(value)
+                .unwrap()
+                .multi_instance_enabled
+        );
+    }
     #[test]
     fn targets_reject_external_urls_and_conflicting_destinations() {
         let mut t = Target {

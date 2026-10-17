@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.7.1] — Unreleased
+
+### Fixed
+
+- Pause recovery for Roblox update error 280 and ban error 600; preserve duplicate-session error details.
+- Ignore fake connection events inside oversized game output and detect join failures with spaced HTTP status fields.
+- Handle malformed JSON and empty responses without leaving desktop refresh locked.
+- Validate imports four at a time, save in submitted order, and give large batches longer to finish.
+- Start controlled recovery immediately for confirmed disconnects, including 273 and 279; verify process exit before replacement.
+- Keep RAM-only hints, ambiguous transport events, and isolated HTTP failures from closing healthy clients; pause bans, access restrictions, and updates.
+- Detect recent disconnects through large log backlogs; replay took 93.1% less time in the 3.7 MB fixture.
+- Keep crash detection responsive during slow discovery; exit polling took 99.3% less time in a 50-handle fixture.
+- Search beyond 500 servers with capacity checks; retain 90% fewer ranking candidates in the 500-server fixture.
+- Offer opt-in cleanup for conflicting background Roblox clients; default Off, preserving visible games and saved managed clients.
+- Make multiple Roblox instances optional, default On; preference changes apply after restarting RoLauncher.
+
+[Benchmark scope, CPU/memory and limits](https://github.com/oangsa/RoLauncher/blob/codex/hotfix-supporting-files/docs/PERFORMANCE.md#171-hotfix-measurements).
+
 Newest first; local builds use unique dev suffixes.
 1.0.0 was first public stable; earlier builds were local, and 1.1.0 was a Linux beta.
 [Validation and limits](docs/VALIDATION.md).

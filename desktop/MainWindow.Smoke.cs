@@ -100,6 +100,9 @@ public sealed partial class MainWindow
             Import_Click(ImportButton, new RoutedEventArgs());
             for (var i = 0; i < 100 && !ImportButton.IsEnabled; i++) await Task.Delay(50);
             Assert(CookieInput.Text.Length == 0 && await _api.GetAsync<int>("test/import-count") == 2, "Cookie paste imports each distinct nonblank line and clears the field.");
+            Assert(Feedback.Message.StartsWith("Imported 2 accounts.", StringComparison.Ordinal) && Feedback.Severity == InfoBarSeverity.Success,
+                "The batched import response reports every saved account successfully.");
+            await ImportFailureSmokeAsync();
             Tab_Click(RecoveryTab, new RoutedEventArgs()); await RefreshAsync();
             Assert(TotalMetric.Text == "3" && RunningMetric.Text == "1" && RejoiningMetric.Text == "1" && AttentionMetric.Text == "1", "Dashboard counts actual account states.");
             Assert(RecoveryList.ItemsSource is AccountRow[] { Length: 1 } attention && attention[0].Id == "2", "Dashboard attention queue excludes healthy accounts and automatic retries.");
@@ -436,6 +439,11 @@ public sealed partial class MainWindow
             GameJoinType.SelectedIndex = 0; await Task.Delay(300);
             var gameSettings = await _api.GetAsync<Snapshot>("status");
             Assert(gameSettings.ServerSelection == "highest" && gameSettings.JoinType == "friend", "Game preferences save through the API.");
+            Assert(MultiInstance.SelectedIndex == 0, "Multiple instances default on.");
+            MultiInstance.SelectedIndex = 1; await Task.Delay(300);
+            var instances = await _api.GetAsync<Snapshot>("status");
+            Assert(!instances.MultiInstanceEnabled && instances.ActiveMultiInstance && MultiInstanceHint.Text.Contains("Restart"), "Multiple instances save off with an explicit restart notice.");
+            MultiInstance.SelectedIndex = 0; await Task.Delay(300);
             await CaptureAsync(directory, "game-joining-settings.png");
             ServerSelector.SelectedIndex = 0; await Task.Delay(300);
             GameJoinType.SelectedIndex = 1; await Task.Delay(300);

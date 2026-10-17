@@ -71,6 +71,8 @@ public sealed partial class MainWindow : Window
         catch (ApiException e) { Report(e.Message, InfoBarSeverity.Error); }
         catch (HttpRequestException) { Report("Cannot reach RoLauncher. Check that it is running.", InfoBarSeverity.Error); }
         catch (TaskCanceledException) { Report("Request timed out. Check account status before retrying.", InfoBarSeverity.Warning); }
+        catch (JsonException) { Report("RoLauncher returned an invalid response. Try again.", InfoBarSeverity.Error); }
+        catch (ObjectDisposedException) when (_disposed) { }
         catch (IOException) { Report("Cannot read this file.", InfoBarSeverity.Error); }
         catch (UnauthorizedAccessException) { Report("File access denied.", InfoBarSeverity.Error); }
         catch (System.Runtime.InteropServices.COMException) { Report("Close other dialogs, then try again.", InfoBarSeverity.Error); }
@@ -90,6 +92,8 @@ public sealed partial class MainWindow : Window
     {
         if (_refreshing || _disposed || _exiting) return;
         _refreshing = true;
+        try
+        {
         await GuardAsync(async () =>
         {
             var snapshot = await _api.GetAsync<Snapshot>("status");
@@ -147,7 +151,8 @@ public sealed partial class MainWindow : Window
             }
             _lastRefreshFeedback = null;
         }, backgroundFeedback: true);
-        _refreshing = false;
+        }
+        finally { _refreshing = false; }
     }
 
     private void Filters_Changed(object sender, RoutedEventArgs e)
@@ -457,25 +462,29 @@ public sealed partial class MainWindow : Window
         CookieInput.Text = "";
         await ImportAsync(cookies);
     }
+    private bool _importing;
     private async Task ImportAsync(string[] cookies)
     {
+        if (_importing) { Array.Clear(cookies); return; }
+        _importing = true;
         ImportButton.IsEnabled = FileButton.IsEnabled = false;
-        await GuardAsync(async () =>
+        try
         {
-            if (cookies.Length == 0 || cookies.All(string.IsNullOrWhiteSpace)) { FeedbackMessage("Paste a session cookie first.", InfoBarSeverity.Warning); return; }
-            int success = 0; var errors = new List<string>();
-            // One cookie per request keeps each import within the request timeout, even for large files.
-            foreach (var batch in cookies.Chunk(1))
+            await GuardAsync(async () =>
             {
-                var result = (await _api.SendAsync(HttpMethod.Post, "accounts", new { cookies = batch }))!.Value;
-                success += result.GetProperty("accounts").GetArrayLength();
-                foreach (var error in result.GetProperty("errors").EnumerateArray()) errors.Add(error.GetProperty("error").GetString() ?? "Import failed.");
-            }
-            FeedbackMessage($"Imported {success} accounts. {string.Join(" ", errors)}", errors.Count == 0 ? InfoBarSeverity.Success : InfoBarSeverity.Warning);
-            await RefreshAsync();
-        });
-        Array.Clear(cookies);
-        ImportButton.IsEnabled = FileButton.IsEnabled = true;
+                var result = await CookieBatch.ImportAsync(cookies,
+                    batch => _api.SendAsync(HttpMethod.Post, "accounts", new { cookies = batch }));
+                await RefreshAsync();
+                FeedbackMessage($"Imported {result.Imported} accounts. {string.Join(" ", result.Errors)}",
+                    result.Errors.Count == 0 ? InfoBarSeverity.Success : InfoBarSeverity.Warning);
+            });
+        }
+        finally
+        {
+            Array.Clear(cookies);
+            _importing = false;
+            ImportButton.IsEnabled = FileButton.IsEnabled = true;
+        }
     }
     private async void File_Click(object sender, RoutedEventArgs e)
     {
