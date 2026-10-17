@@ -2,13 +2,13 @@
 
 2026-10-08 · Changes since stable 1.4.0. Linux remains a preview.
 
-- Click account row/game card to edit; checkboxes select bulk accounts.
+- Click account rows/game cards to edit; use account checkboxes for bulk selection.
 - Discord `/action username action` supports Stop/Restart with autocomplete.
 - `/status-register channel` shows ten accounts/page with Previous/Refresh/Next; refreshes changed data every 15 seconds and retains page/message across reconnects/restarts.
 - Bot Save keeps credentials without starting; Start/Stop/Restart show Online/Starting/Offline. Previously started bots resume on app launch; explicit Stop keeps them off.
 - Account/Dashboard running-time records survive app restarts. Timing begins on confirmed connection, includes automatic rejoins, and ends on Stop/manual Restart.
-- General disconnect alerts wait 30 seconds; confirmed errors alert promptly. Stop/normal exits silent.
-- Error alerts: error/code, available game link, affected window screenshot.
+- Generic disconnect alerts wait through 30-second grace; confirmed errors notify promptly. Stop/clean exits are silent.
+- Error alerts include error/code, game link when available, and the affected window's screenshot.
 - Linux forwards HOME into Flatpak and reads verified logs across mount namespaces, rejecting reused descriptors.
 
 ## Bot setup
@@ -31,4 +31,7 @@
 
 ## Validation
 
-[Checks](VALIDATION.md#150--2026-10-08). Native KDE concurrent games, correct status/screenshots, live Discord delivery unverified.
+- Windows: 65 Rust tests, separate bootstrap, Clippy, UI smoke, 71 desktop checks, installer/package checks, and versioning/beta fixtures passed.
+- Discord fixtures covered pagination IDs, legacy buttons, and error classification; no live messages were sent.
+- Arch WSL: 64 Rust tests, Clippy, isolation adapter, and Linux updater checks passed.
+- Native KDE concurrent games, status/screenshot attribution, and live configured Discord delivery remain unverified.

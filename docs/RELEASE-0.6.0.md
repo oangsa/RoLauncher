@@ -2,8 +2,8 @@
 
 2026-10-05 · Windows x64
 
-- Added account dialog with Save/Cancel.
-- Added search, status/rejoin filters, row edit/delete.
-- Bulk actions use selected visible accounts; confirm deletion.
+- Added an account details dialog with explicit Save and Cancel.
+- Added search, status/rejoin filters, and per-row edit/delete actions.
+- Limited bulk actions to selected visible accounts and confirmed deletion.
 
-[Checks](VALIDATION.md#historical-pre-100-checks).
+34 Rust tests, 20 desktop checks, and real-window/bridge fixtures passed.

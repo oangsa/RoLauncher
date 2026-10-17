@@ -2,6 +2,6 @@
 
 2026-10-05 · Windows x64
 
-- Aligned status/rejoin filter heights with Accounts toolbar.
+- Matched status and rejoin filter heights to the Accounts toolbar.
 
-[Checks](VALIDATION.md#historical-pre-100-checks).
+Normal and smaller-window previews were checked; existing tests passed.
