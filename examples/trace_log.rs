@@ -12,10 +12,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             counts[match signal {
                 Signal::Connected => 0,
                 Signal::Disconnected => 1,
+                Signal::SessionLost(Some(280)) => 5,
                 Signal::ConnectionFailed | Signal::JoinRequestFailed | Signal::SessionLost(_) => 2,
                 Signal::TargetUnavailable => 3,
                 Signal::PermissionDenied => 4,
-                Signal::ClientUpdateRequired => 5,
             }] += 1;
         }
         if tail.offset == before {
