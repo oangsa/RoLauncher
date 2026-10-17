@@ -1,0 +1,222 @@
+{
+  "measuredAtUtc": "2026-10-16T18:31:25.2587211Z",
+  "logicalProcessors": 16,
+  "microbenchmarks": [
+    {
+      "log_bytes": 3700052,
+      "reports": [
+        {
+          "elapsed_ms": 647.3248,
+          "mode": "baseline",
+          "polls_per_client": 15
+        },
+        {
+          "elapsed_ms": 44.9122,
+          "mode": "new",
+          "polls_per_client": 1
+        }
+      ],
+      "workload": "50 sequential replays of the same cached log; no live Roblox clients"
+    },
+    {
+      "reports": [
+        {
+          "mean_ns_per_50": 1454607.9272727272,
+          "mode": "baseline",
+          "rounds": 1375
+        },
+        {
+          "mean_ns_per_50": 10019.741291638069,
+          "mode": "new",
+          "rounds": 199607
+        }
+      ],
+      "workload": "50 Windows process-handle polls against this fixture process; excludes Roblox, discovery, persistence and log parsing"
+    },
+    {
+      "reports": [
+        {
+          "mean_ns": 14512.703538153426,
+          "mode": "baseline",
+          "rounds": 137812
+        },
+        {
+          "mean_ns": 14986.162584203152,
+          "mode": "new",
+          "rounds": 133457
+        }
+      ],
+      "servers": 500,
+      "workload": "ranking only; excludes HTTP, pagination and JSON decoding"
+    },
+    {
+      "reports": [
+        {
+          "mean_ns": 296817.6880842855,
+          "mode": "baseline",
+          "rounds": 6739
+        },
+        {
+          "mean_ns": 285555.9109080525,
+          "mode": "new",
+          "rounds": 7004
+        }
+      ],
+      "servers": 10000,
+      "workload": "ranking only; excludes HTTP, pagination and JSON decoding"
+    },
+    {
+      "log_bytes": 3700052,
+      "reports": [
+        {
+          "elapsed_ms": 635.0203,
+          "mode": "baseline",
+          "polls_per_client": 15
+        },
+        {
+          "elapsed_ms": 44.7248,
+          "mode": "new",
+          "polls_per_client": 1
+        }
+      ],
+      "workload": "50 sequential replays of the same cached log; no live Roblox clients"
+    },
+    {
+      "reports": [
+        {
+          "mean_ns_per_50": 1068696.047008547,
+          "mode": "baseline",
+          "rounds": 1872
+        },
+        {
+          "mean_ns_per_50": 9791.298068685286,
+          "mode": "new",
+          "rounds": 204265
+        }
+      ],
+      "workload": "50 Windows process-handle polls against this fixture process; excludes Roblox, discovery, persistence and log parsing"
+    },
+    {
+      "reports": [
+        {
+          "mean_ns": 15254.589276180306,
+          "mode": "baseline",
+          "rounds": 131110
+        },
+        {
+          "mean_ns": 14906.89886484754,
+          "mode": "new",
+          "rounds": 134167
+        }
+      ],
+      "servers": 500,
+      "workload": "ranking only; excludes HTTP, pagination and JSON decoding"
+    },
+    {
+      "reports": [
+        {
+          "mean_ns": 284315.42288557213,
+          "mode": "baseline",
+          "rounds": 7035
+        },
+        {
+          "mean_ns": 280937.48595505615,
+          "mode": "new",
+          "rounds": 7120
+        }
+      ],
+      "servers": 10000,
+      "workload": "ranking only; excludes HTTP, pagination and JSON decoding"
+    },
+    {
+      "log_bytes": 3700052,
+      "reports": [
+        {
+          "elapsed_ms": 650.7835,
+          "mode": "baseline",
+          "polls_per_client": 15
+        },
+        {
+          "elapsed_ms": 48.7941,
+          "mode": "new",
+          "polls_per_client": 1
+        }
+      ],
+      "workload": "50 sequential replays of the same cached log; no live Roblox clients"
+    },
+    {
+      "reports": [
+        {
+          "mean_ns_per_50": 1461234.5507669833,
+          "mode": "baseline",
+          "rounds": 1369
+        },
+        {
+          "mean_ns_per_50": 9842.4022164918,
+          "mode": "new",
+          "rounds": 203204
+        }
+      ],
+      "workload": "50 Windows process-handle polls against this fixture process; excludes Roblox, discovery, persistence and log parsing"
+    },
+    {
+      "reports": [
+        {
+          "mean_ns": 14652.015003553088,
+          "mode": "baseline",
+          "rounds": 136501
+        },
+        {
+          "mean_ns": 26972.2269423204,
+          "mode": "new",
+          "rounds": 74151
+        }
+      ],
+      "servers": 500,
+      "workload": "ranking only; excludes HTTP, pagination and JSON decoding"
+    },
+    {
+      "reports": [
+        {
+          "mean_ns": 528930.9095716552,
+          "mode": "baseline",
+          "rounds": 3782
+        },
+        {
+          "mean_ns": 658234.3534057256,
+          "mode": "new",
+          "rounds": 3039
+        }
+      ],
+      "servers": 10000,
+      "workload": "ranking only; excludes HTTP, pagination and JSON decoding"
+    }
+  ],
+  "scope": "Separate serial headless runs, empty isolated databases, zero Roblox clients; excludes desktop and active-client monitoring. Small CPU differences are not improvement percentages.",
+  "reports": [
+    {
+      "version": "1.7.0",
+      "binaryVersion": "1.7.0",
+      "sample": {
+        "processId": 33812,
+        "elapsedSeconds": 20.7198142,
+        "cpuPercentOfMachine": 0.018844898718842616,
+        "meanWorkingSetBytes": 21089484.8,
+        "meanPrivateBytes": 2129100.8,
+        "scope": "This process only; measure Roblox and temporary WebView2 processes separately"
+      }
+    },
+    {
+      "version": "1.7.1 development",
+      "binaryVersion": "1.7.1-dev.be7b3852f8fb",
+      "sample": {
+        "processId": 10556,
+        "elapsedSeconds": 20.7063016,
+        "cpuPercentOfMachine": 0.018864884915533224,
+        "meanWorkingSetBytes": 22073344.0,
+        "meanPrivateBytes": 2174976.0,
+        "scope": "This process only; measure Roblox and temporary WebView2 processes separately"
+      }
+    }
+  ]
+}

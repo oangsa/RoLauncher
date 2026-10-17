@@ -1,0 +1,520 @@
+{
+  "measuredAtUtc": "2026-10-16T19:30:09.574121+00:00",
+  "baseline": "1.7.1-dev.be7b3852f8fb before this audit; not a stable-release speed claim",
+  "candidate": "1.7.1-dev.ee9b80524a47",
+  "scope": "Optimized isolated replay. Parser: 2,000,000 calls per input per run. Import: production method extracted verbatim, simulated validation and save adapters, no HTTP, real accounts or disk writes. Five rounds. No total-app or live Roblox speed claim.",
+  "beforeLogsSha256": "c68b745e2f1fb42c00365e40202a01702d08157d554e1a554a4b4f5075e6c6fd",
+  "afterLogsSha256": "4c55932a2c532557e5a582e09c8f7bf06a5ca1be78012ecb5c6be26ac26db8b2",
+  "runs": [
+    {
+      "round": 1,
+      "parser": {
+        "before": {
+          "cases": [
+            "CASE \"[FLog::GameJoinUtil] GameJoinFailed errorCode: 600\" Some(SessionLost(Some(600)))",
+            "CASE \"[FLog::GameJoinUtil] GameJoinFailed errorCode: 280\" Some(SessionLost(Some(280)))",
+            "CASE \"[FLog::Network] Sending disconnect with reason: 264\" Some(Disconnected)",
+            "CASE \"[FLog::Network] Sending disconnect with reason: 600\" Some(Disconnected)",
+            "CASE \"[FLog::HttpTraceError] HttpResponse(#1) status: 503 Error url:{ \\\"https://gamejoin.roblox.com/v1/join-game\\\" }\" None",
+            "OVERSIZE_CONTINUATION [Connected]"
+          ],
+          "measurements": [
+            {
+              "line": "[FLog::Output] player text [FLog::Network] Connection accepted",
+              "elapsedNs": 125437500
+            },
+            {
+              "line": "[FLog::AssetProvider] unrelated asset error",
+              "elapsedNs": 115001400
+            },
+            {
+              "line": "2026-10-17T00:00:00Z,1,1,7 [FLog::Output] unrelated game output",
+              "elapsedNs": 135320900
+            },
+            {
+              "line": "[FLog::Network] Sending disconnect with reason: 273",
+              "elapsedNs": 257306900
+            },
+            {
+              "line": "[DFLog::NetworkClient] Connection accepted",
+              "elapsedNs": 444865800
+            },
+            {
+              "line": "[FLog::GameJoinUtil] GameJoinFailed errorCode: 279",
+              "elapsedNs": 211996600
+            }
+          ]
+        },
+        "after": {
+          "cases": [
+            "CASE \"[FLog::GameJoinUtil] GameJoinFailed errorCode: 600\" Some(PermissionDenied)",
+            "CASE \"[FLog::GameJoinUtil] GameJoinFailed errorCode: 280\" Some(ClientUpdateRequired)",
+            "CASE \"[FLog::Network] Sending disconnect with reason: 264\" Some(SessionLost(Some(264)))",
+            "CASE \"[FLog::Network] Sending disconnect with reason: 600\" Some(PermissionDenied)",
+            "CASE \"[FLog::HttpTraceError] HttpResponse(#1) status: 503 Error url:{ \\\"https://gamejoin.roblox.com/v1/join-game\\\" }\" Some(JoinRequestFailed)",
+            "OVERSIZE_CONTINUATION []"
+          ],
+          "measurements": [
+            {
+              "line": "[FLog::Output] player text [FLog::Network] Connection accepted",
+              "elapsedNs": 45114000
+            },
+            {
+              "line": "[FLog::AssetProvider] unrelated asset error",
+              "elapsedNs": 19740200
+            },
+            {
+              "line": "2026-10-17T00:00:00Z,1,1,7 [FLog::Output] unrelated game output",
+              "elapsedNs": 44155300
+            },
+            {
+              "line": "[FLog::Network] Sending disconnect with reason: 273",
+              "elapsedNs": 239447500
+            },
+            {
+              "line": "[DFLog::NetworkClient] Connection accepted",
+              "elapsedNs": 387219800
+            },
+            {
+              "line": "[FLog::GameJoinUtil] GameJoinFailed errorCode: 279",
+              "elapsedNs": 143012300
+            }
+          ]
+        }
+      },
+      "imports": {
+        "before": {
+          "elapsedNs": 1545018400,
+          "peakConcurrent": 1
+        },
+        "after": {
+          "elapsedNs": 398315300,
+          "peakConcurrent": 4
+        }
+      }
+    },
+    {
+      "round": 2,
+      "parser": {
+        "after": {
+          "cases": [
+            "CASE \"[FLog::GameJoinUtil] GameJoinFailed errorCode: 600\" Some(PermissionDenied)",
+            "CASE \"[FLog::GameJoinUtil] GameJoinFailed errorCode: 280\" Some(ClientUpdateRequired)",
+            "CASE \"[FLog::Network] Sending disconnect with reason: 264\" Some(SessionLost(Some(264)))",
+            "CASE \"[FLog::Network] Sending disconnect with reason: 600\" Some(PermissionDenied)",
+            "CASE \"[FLog::HttpTraceError] HttpResponse(#1) status: 503 Error url:{ \\\"https://gamejoin.roblox.com/v1/join-game\\\" }\" Some(JoinRequestFailed)",
+            "OVERSIZE_CONTINUATION []"
+          ],
+          "measurements": [
+            {
+              "line": "[FLog::Output] player text [FLog::Network] Connection accepted",
+              "elapsedNs": 29056000
+            },
+            {
+              "line": "[FLog::AssetProvider] unrelated asset error",
+              "elapsedNs": 20607500
+            },
+            {
+              "line": "2026-10-17T00:00:00Z,1,1,7 [FLog::Output] unrelated game output",
+              "elapsedNs": 43737700
+            },
+            {
+              "line": "[FLog::Network] Sending disconnect with reason: 273",
+              "elapsedNs": 231963800
+            },
+            {
+              "line": "[DFLog::NetworkClient] Connection accepted",
+              "elapsedNs": 383505300
+            },
+            {
+              "line": "[FLog::GameJoinUtil] GameJoinFailed errorCode: 279",
+              "elapsedNs": 140915600
+            }
+          ]
+        },
+        "before": {
+          "cases": [
+            "CASE \"[FLog::GameJoinUtil] GameJoinFailed errorCode: 600\" Some(SessionLost(Some(600)))",
+            "CASE \"[FLog::GameJoinUtil] GameJoinFailed errorCode: 280\" Some(SessionLost(Some(280)))",
+            "CASE \"[FLog::Network] Sending disconnect with reason: 264\" Some(Disconnected)",
+            "CASE \"[FLog::Network] Sending disconnect with reason: 600\" Some(Disconnected)",
+            "CASE \"[FLog::HttpTraceError] HttpResponse(#1) status: 503 Error url:{ \\\"https://gamejoin.roblox.com/v1/join-game\\\" }\" None",
+            "OVERSIZE_CONTINUATION [Connected]"
+          ],
+          "measurements": [
+            {
+              "line": "[FLog::Output] player text [FLog::Network] Connection accepted",
+              "elapsedNs": 116492700
+            },
+            {
+              "line": "[FLog::AssetProvider] unrelated asset error",
+              "elapsedNs": 128253700
+            },
+            {
+              "line": "2026-10-17T00:00:00Z,1,1,7 [FLog::Output] unrelated game output",
+              "elapsedNs": 136999600
+            },
+            {
+              "line": "[FLog::Network] Sending disconnect with reason: 273",
+              "elapsedNs": 304487300
+            },
+            {
+              "line": "[DFLog::NetworkClient] Connection accepted",
+              "elapsedNs": 453534100
+            },
+            {
+              "line": "[FLog::GameJoinUtil] GameJoinFailed errorCode: 279",
+              "elapsedNs": 213084900
+            }
+          ]
+        }
+      },
+      "imports": {
+        "before": {
+          "elapsedNs": 1537164400,
+          "peakConcurrent": 1
+        },
+        "after": {
+          "elapsedNs": 400802700,
+          "peakConcurrent": 4
+        }
+      }
+    },
+    {
+      "round": 3,
+      "parser": {
+        "before": {
+          "cases": [
+            "CASE \"[FLog::GameJoinUtil] GameJoinFailed errorCode: 600\" Some(SessionLost(Some(600)))",
+            "CASE \"[FLog::GameJoinUtil] GameJoinFailed errorCode: 280\" Some(SessionLost(Some(280)))",
+            "CASE \"[FLog::Network] Sending disconnect with reason: 264\" Some(Disconnected)",
+            "CASE \"[FLog::Network] Sending disconnect with reason: 600\" Some(Disconnected)",
+            "CASE \"[FLog::HttpTraceError] HttpResponse(#1) status: 503 Error url:{ \\\"https://gamejoin.roblox.com/v1/join-game\\\" }\" None",
+            "OVERSIZE_CONTINUATION [Connected]"
+          ],
+          "measurements": [
+            {
+              "line": "[FLog::Output] player text [FLog::Network] Connection accepted",
+              "elapsedNs": 129949200
+            },
+            {
+              "line": "[FLog::AssetProvider] unrelated asset error",
+              "elapsedNs": 115121500
+            },
+            {
+              "line": "2026-10-17T00:00:00Z,1,1,7 [FLog::Output] unrelated game output",
+              "elapsedNs": 134277300
+            },
+            {
+              "line": "[FLog::Network] Sending disconnect with reason: 273",
+              "elapsedNs": 259523900
+            },
+            {
+              "line": "[DFLog::NetworkClient] Connection accepted",
+              "elapsedNs": 440853200
+            },
+            {
+              "line": "[FLog::GameJoinUtil] GameJoinFailed errorCode: 279",
+              "elapsedNs": 220951400
+            }
+          ]
+        },
+        "after": {
+          "cases": [
+            "CASE \"[FLog::GameJoinUtil] GameJoinFailed errorCode: 600\" Some(PermissionDenied)",
+            "CASE \"[FLog::GameJoinUtil] GameJoinFailed errorCode: 280\" Some(ClientUpdateRequired)",
+            "CASE \"[FLog::Network] Sending disconnect with reason: 264\" Some(SessionLost(Some(264)))",
+            "CASE \"[FLog::Network] Sending disconnect with reason: 600\" Some(PermissionDenied)",
+            "CASE \"[FLog::HttpTraceError] HttpResponse(#1) status: 503 Error url:{ \\\"https://gamejoin.roblox.com/v1/join-game\\\" }\" Some(JoinRequestFailed)",
+            "OVERSIZE_CONTINUATION []"
+          ],
+          "measurements": [
+            {
+              "line": "[FLog::Output] player text [FLog::Network] Connection accepted",
+              "elapsedNs": 40642700
+            },
+            {
+              "line": "[FLog::AssetProvider] unrelated asset error",
+              "elapsedNs": 19936400
+            },
+            {
+              "line": "2026-10-17T00:00:00Z,1,1,7 [FLog::Output] unrelated game output",
+              "elapsedNs": 44860400
+            },
+            {
+              "line": "[FLog::Network] Sending disconnect with reason: 273",
+              "elapsedNs": 234034400
+            },
+            {
+              "line": "[DFLog::NetworkClient] Connection accepted",
+              "elapsedNs": 383923700
+            },
+            {
+              "line": "[FLog::GameJoinUtil] GameJoinFailed errorCode: 279",
+              "elapsedNs": 142244700
+            }
+          ]
+        }
+      },
+      "imports": {
+        "before": {
+          "elapsedNs": 1545355700,
+          "peakConcurrent": 1
+        },
+        "after": {
+          "elapsedNs": 407957500,
+          "peakConcurrent": 4
+        }
+      }
+    },
+    {
+      "round": 4,
+      "parser": {
+        "after": {
+          "cases": [
+            "CASE \"[FLog::GameJoinUtil] GameJoinFailed errorCode: 600\" Some(PermissionDenied)",
+            "CASE \"[FLog::GameJoinUtil] GameJoinFailed errorCode: 280\" Some(ClientUpdateRequired)",
+            "CASE \"[FLog::Network] Sending disconnect with reason: 264\" Some(SessionLost(Some(264)))",
+            "CASE \"[FLog::Network] Sending disconnect with reason: 600\" Some(PermissionDenied)",
+            "CASE \"[FLog::HttpTraceError] HttpResponse(#1) status: 503 Error url:{ \\\"https://gamejoin.roblox.com/v1/join-game\\\" }\" Some(JoinRequestFailed)",
+            "OVERSIZE_CONTINUATION []"
+          ],
+          "measurements": [
+            {
+              "line": "[FLog::Output] player text [FLog::Network] Connection accepted",
+              "elapsedNs": 27199600
+            },
+            {
+              "line": "[FLog::AssetProvider] unrelated asset error",
+              "elapsedNs": 20015600
+            },
+            {
+              "line": "2026-10-17T00:00:00Z,1,1,7 [FLog::Output] unrelated game output",
+              "elapsedNs": 45794900
+            },
+            {
+              "line": "[FLog::Network] Sending disconnect with reason: 273",
+              "elapsedNs": 238767400
+            },
+            {
+              "line": "[DFLog::NetworkClient] Connection accepted",
+              "elapsedNs": 393363200
+            },
+            {
+              "line": "[FLog::GameJoinUtil] GameJoinFailed errorCode: 279",
+              "elapsedNs": 211542200
+            }
+          ]
+        },
+        "before": {
+          "cases": [
+            "CASE \"[FLog::GameJoinUtil] GameJoinFailed errorCode: 600\" Some(SessionLost(Some(600)))",
+            "CASE \"[FLog::GameJoinUtil] GameJoinFailed errorCode: 280\" Some(SessionLost(Some(280)))",
+            "CASE \"[FLog::Network] Sending disconnect with reason: 264\" Some(Disconnected)",
+            "CASE \"[FLog::Network] Sending disconnect with reason: 600\" Some(Disconnected)",
+            "CASE \"[FLog::HttpTraceError] HttpResponse(#1) status: 503 Error url:{ \\\"https://gamejoin.roblox.com/v1/join-game\\\" }\" None",
+            "OVERSIZE_CONTINUATION [Connected]"
+          ],
+          "measurements": [
+            {
+              "line": "[FLog::Output] player text [FLog::Network] Connection accepted",
+              "elapsedNs": 126956100
+            },
+            {
+              "line": "[FLog::AssetProvider] unrelated asset error",
+              "elapsedNs": 120820900
+            },
+            {
+              "line": "2026-10-17T00:00:00Z,1,1,7 [FLog::Output] unrelated game output",
+              "elapsedNs": 137020800
+            },
+            {
+              "line": "[FLog::Network] Sending disconnect with reason: 273",
+              "elapsedNs": 262903100
+            },
+            {
+              "line": "[DFLog::NetworkClient] Connection accepted",
+              "elapsedNs": 403682100
+            },
+            {
+              "line": "[FLog::GameJoinUtil] GameJoinFailed errorCode: 279",
+              "elapsedNs": 181541900
+            }
+          ]
+        }
+      },
+      "imports": {
+        "before": {
+          "elapsedNs": 1533731700,
+          "peakConcurrent": 1
+        },
+        "after": {
+          "elapsedNs": 407539100,
+          "peakConcurrent": 4
+        }
+      }
+    },
+    {
+      "round": 5,
+      "parser": {
+        "before": {
+          "cases": [
+            "CASE \"[FLog::GameJoinUtil] GameJoinFailed errorCode: 600\" Some(SessionLost(Some(600)))",
+            "CASE \"[FLog::GameJoinUtil] GameJoinFailed errorCode: 280\" Some(SessionLost(Some(280)))",
+            "CASE \"[FLog::Network] Sending disconnect with reason: 264\" Some(Disconnected)",
+            "CASE \"[FLog::Network] Sending disconnect with reason: 600\" Some(Disconnected)",
+            "CASE \"[FLog::HttpTraceError] HttpResponse(#1) status: 503 Error url:{ \\\"https://gamejoin.roblox.com/v1/join-game\\\" }\" None",
+            "OVERSIZE_CONTINUATION [Connected]"
+          ],
+          "measurements": [
+            {
+              "line": "[FLog::Output] player text [FLog::Network] Connection accepted",
+              "elapsedNs": 128009700
+            },
+            {
+              "line": "[FLog::AssetProvider] unrelated asset error",
+              "elapsedNs": 112636900
+            },
+            {
+              "line": "2026-10-17T00:00:00Z,1,1,7 [FLog::Output] unrelated game output",
+              "elapsedNs": 135783000
+            },
+            {
+              "line": "[FLog::Network] Sending disconnect with reason: 273",
+              "elapsedNs": 263329500
+            },
+            {
+              "line": "[DFLog::NetworkClient] Connection accepted",
+              "elapsedNs": 447762600
+            },
+            {
+              "line": "[FLog::GameJoinUtil] GameJoinFailed errorCode: 279",
+              "elapsedNs": 208875600
+            }
+          ]
+        },
+        "after": {
+          "cases": [
+            "CASE \"[FLog::GameJoinUtil] GameJoinFailed errorCode: 600\" Some(PermissionDenied)",
+            "CASE \"[FLog::GameJoinUtil] GameJoinFailed errorCode: 280\" Some(ClientUpdateRequired)",
+            "CASE \"[FLog::Network] Sending disconnect with reason: 264\" Some(SessionLost(Some(264)))",
+            "CASE \"[FLog::Network] Sending disconnect with reason: 600\" Some(PermissionDenied)",
+            "CASE \"[FLog::HttpTraceError] HttpResponse(#1) status: 503 Error url:{ \\\"https://gamejoin.roblox.com/v1/join-game\\\" }\" Some(JoinRequestFailed)",
+            "OVERSIZE_CONTINUATION []"
+          ],
+          "measurements": [
+            {
+              "line": "[FLog::Output] player text [FLog::Network] Connection accepted",
+              "elapsedNs": 41308800
+            },
+            {
+              "line": "[FLog::AssetProvider] unrelated asset error",
+              "elapsedNs": 19632200
+            },
+            {
+              "line": "2026-10-17T00:00:00Z,1,1,7 [FLog::Output] unrelated game output",
+              "elapsedNs": 44209900
+            },
+            {
+              "line": "[FLog::Network] Sending disconnect with reason: 273",
+              "elapsedNs": 234288700
+            },
+            {
+              "line": "[DFLog::NetworkClient] Connection accepted",
+              "elapsedNs": 389082100
+            },
+            {
+              "line": "[FLog::GameJoinUtil] GameJoinFailed errorCode: 279",
+              "elapsedNs": 148651300
+            }
+          ]
+        }
+      },
+      "imports": {
+        "before": {
+          "elapsedNs": 1534870700,
+          "peakConcurrent": 1
+        },
+        "after": {
+          "elapsedNs": 402163900,
+          "peakConcurrent": 4
+        }
+      }
+    }
+  ],
+  "summary": [
+    {
+      "workload": "[FLog::Output] player text [FLog::Network] Connection accepted",
+      "beforeMedianMs": 126.9561,
+      "afterMedianMs": 40.6427,
+      "lessElapsedPercent": 67.98680803836916
+    },
+    {
+      "workload": "[FLog::AssetProvider] unrelated asset error",
+      "beforeMedianMs": 115.1215,
+      "afterMedianMs": 19.9364,
+      "lessElapsedPercent": 82.68229653018767
+    },
+    {
+      "workload": "2026-10-17T00:00:00Z,1,1,7 [FLog::Output] unrelated game output",
+      "beforeMedianMs": 135.783,
+      "afterMedianMs": 44.2099,
+      "lessElapsedPercent": 67.4407694630403
+    },
+    {
+      "workload": "[FLog::Network] Sending disconnect with reason: 273",
+      "beforeMedianMs": 262.9031,
+      "afterMedianMs": 234.2887,
+      "lessElapsedPercent": 10.884010116274778
+    },
+    {
+      "workload": "[DFLog::NetworkClient] Connection accepted",
+      "beforeMedianMs": 444.8658,
+      "afterMedianMs": 387.2198,
+      "lessElapsedPercent": 12.958065106375905
+    },
+    {
+      "workload": "[FLog::GameJoinUtil] GameJoinFailed errorCode: 279",
+      "beforeMedianMs": 211.9966,
+      "afterMedianMs": 143.0123,
+      "lessElapsedPercent": 32.54028602345509
+    },
+    {
+      "workload": "50 simulated session validations, each awaits 20ms; timer scheduling affects actual delay",
+      "beforeMedianMs": 1537.1644,
+      "afterMedianMs": 402.1639,
+      "lessElapsedPercent": 73.83728767072671
+    }
+  ],
+  "idleComparison": {
+    "measuredAtUtc": "2026-10-16T19:30:56.1654719Z",
+    "logicalProcessors": 16,
+    "scope": "Separate serial 20-second headless runs; empty isolated databases; zero desktop and Roblox clients. No total-app or loaded-PC saving claim.",
+    "reports": [
+      {
+        "version": "1.7.0",
+        "binaryVersion": "1.7.0",
+        "sample": {
+          "processId": 2320,
+          "elapsedSeconds": 20.3280205,
+          "cpuPercentOfMachine": 0.0,
+          "meanWorkingSetBytes": 21049548.8,
+          "meanPrivateBytes": 2109440.0,
+          "scope": "This process only; measure Roblox and temporary WebView2 processes separately"
+        }
+      },
+      {
+        "version": "1.7.1-dev.ee9b80524a47",
+        "binaryVersion": "1.7.1-dev.ee9b80524a47",
+        "sample": {
+          "processId": 13480,
+          "elapsedSeconds": 20.2835902,
+          "cpuPercentOfMachine": 0.01925813374704743,
+          "meanWorkingSetBytes": 22791372.8,
+          "meanPrivateBytes": 2154496.0,
+          "scope": "This process only; measure Roblox and temporary WebView2 processes separately"
+        }
+      }
+    ]
+  }
+}

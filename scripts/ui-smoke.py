@@ -23,7 +23,7 @@ imported_cookies = []
 profiles = []
 game_profiles = []
 close_to_tray = True
-game_settings = dict(server_selection="smart", join_type="random")
+game_settings = dict(server_selection="smart", join_type="random", multi_instance_enabled=True, active_multi_instance=True)
 backups = []
 include_beta_updates = False
 bot = dict(enabled=True, configured=True, guild_id="42", allowed_users=["123"], status="Bot stopped. Use Start to connect.", connection_state="offline")
@@ -109,6 +109,8 @@ class Fixture(BaseHTTPRequestHandler):
         if self.path == "/v1/settings/window":
             close_to_tray = patch["close_to_tray"]; self.reply({}); return
         if self.path == "/v1/settings/game":
+            game_settings.update(patch); self.reply({}); return
+        if self.path == "/v1/settings/instances":
             game_settings.update(patch); self.reply({}); return
         if self.path == "/v1/settings/updates":
             include_beta_updates = patch["include_beta"]

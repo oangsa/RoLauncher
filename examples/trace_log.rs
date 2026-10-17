@@ -5,7 +5,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .ok_or("A local log path is required")?;
     let mut tail = Tail::new(path.into(), false)?;
-    let mut counts = [0u64; 5];
+    let mut counts = [0u64; 6];
     loop {
         let before = tail.offset;
         for signal in tail.read()? {
@@ -15,6 +15,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Signal::ConnectionFailed | Signal::JoinRequestFailed | Signal::SessionLost(_) => 2,
                 Signal::TargetUnavailable => 3,
                 Signal::PermissionDenied => 4,
+                Signal::ClientUpdateRequired => 5,
             }] += 1;
         }
         if tail.offset == before {
@@ -22,8 +23,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     println!(
-        "connected={} disconnected={} connection_failed={} unavailable={} permission={}",
-        counts[0], counts[1], counts[2], counts[3], counts[4]
+        "connected={} disconnected={} connection_failed={} unavailable={} permission={} update_required={}",
+        counts[0], counts[1], counts[2], counts[3], counts[4], counts[5]
     );
     Ok(())
 }

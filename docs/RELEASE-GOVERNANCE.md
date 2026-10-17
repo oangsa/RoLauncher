@@ -1,112 +1,112 @@
 # Release governance
 
-Status: preparation only; publication hard-disabled pending independent review and owner activation.
-See [Hotfix strategy](HOTFIX-RELEASE-STRATEGY.md) for transition, settings, evidence and owner decisions.
+Preparation only; publishing disabled until independent review and owner activation.
+[Hotfix strategy](HOTFIX-RELEASE-STRATEGY.md): transition, settings, evidence, owner decisions.
 
 ## Trust boundary
 
-1. CI builds and tests candidate code with contents-read and nonpersisted checkout credentials.
-2. A separate `workflow_run` publisher checks out the trusted default-branch event SHA, never the candidate SHA.
-3. It reads candidate files and archives as data, verifies authority and evidence, then uploads without executing candidate code.
+1. CI builds/tests proposed code with contents-read; checkout credentials not saved.
+2. Separate `workflow_run` publisher checks out trusted default-branch event SHA, never proposed-code SHA.
+3. It checks proposed files/archives as data, verifies approval/evidence, uploads without running proposed code.
 
-Only the publishing job requests contents-write, Actions-read and PR-read.
-The workflow's literal `false` guard and missing/false `RELEASE_PROMOTION_ENABLED` each prevent activation.
-Neither successful CI nor a branch name grants publication authority.
+Only publishing job requests contents-write, Actions-read, PR-read.
+Literal `false` guard and missing/false `RELEASE_PROMOTION_ENABLED` each block activation.
+Passing CI or matching branch name cannot approve publication.
 
-The default-branch and token separation follow GitHub's [workflow_run security model](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_run).
-Do not expose repository secrets, write credentials or shared executable caches to build jobs.
+Follow GitHub's [workflow_run security model](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_run).
+Never give build jobs repository secrets, write credentials, or shared executable caches.
 
 ## Feature intent: schema 1
 
-The existing PR01 contract remains unchanged: one newly added `.github/release-intents/<UUIDv4>.json`.
-Its exact fields are `schema=1`, `id=<UUIDv4>`, `version=<MAJOR.MINOR.PATCH>` and `channel=stable`.
-Only an official `dev` PR merged into official `main` by repository owner `oangsa` qualifies.
+PR01 contract unchanged: add one fresh `.github/release-intents/<UUIDv4>.json` with exactly:
+`schema=1`, `id=<UUIDv4>`, `version=<MAJOR.MINOR.PATCH>`, `channel=stable`.
+Only official `dev` PR merged into official `main` by owner `oangsa` qualifies.
 
-The intent must first appear in that promotion, with exactly one path-history entry.
-Development versions, changed/reintroduced intents, foreign PRs and ambiguous evidence fail closed.
-Future Premium feature releases still require this independent feature path after development is complete.
+Intent must first appear in that merge, with one path-history entry.
+Reject dev versions, edited/reintroduced intents, foreign PRs, uncertain evidence.
+Future Premium releases still need this separate path after development finishes.
 
 ## Hotfix intent: schema 2
 
-Only official `hotfix/<version>` PRs merged into `main` by the owner qualify.
-Merge commits are required: ordered parents must equal authorized main base and PR head; merged tree must equal head tree.
-Squash/rebase promotion requires a separately reviewed policy change.
+Only owner-merged official `hotfix/<version>` PRs into `main` qualify.
+Require merge commit: ordered parents equal approved main base then PR head; merged tree equals head tree.
+Squash/rebase needs a separately reviewed policy change.
 
-| Field | Exact requirement |
-|---|---|
+| Field | Required value |
+| --- | --- |
 | `schema`, `source`, `channel` | Integer `2`, `hotfix`, `stable` |
-| `id` | Fresh canonical UUIDv4; filename matches; never edited/reused |
-| `version` | Plain stable version, exactly baseline PATCH + 1 |
-| `baseline_tag`, `baseline_sha` | Published stable tag and its resolved commit |
-| `base_sha` | Exact authorized main base; only reviewed governance history may follow baseline |
-| `reviewed_sha` | Final reviewed application/version/docs commit, before intent-only commit |
-| `commits` | Ordered complete commit list from base through reviewed SHA |
-| `paths` | Sorted complete net changed-file list |
-| `patch_sha256` | Hash of canonical reviewed patch records, as printed by Branch flow |
-| `review.bug` | Concrete approved bug and scope, at least 20 characters |
-| `review.dependencies` | Explicit prerequisite/cherry-pick and dependency analysis, at least 20 characters |
-| `review.premium_excluded` | Boolean `true`, attested by owner's merge |
+| `id` | Fresh canonical UUIDv4; matching filename; never edit/reuse |
+| `version` | Plain stable version; baseline PATCH + 1 |
+| `baseline_tag`, `baseline_sha` | Published stable tag/resolved commit |
+| `base_sha` | Exact approved main base; only reviewed release-rule commits after baseline |
+| `reviewed_sha` | Last reviewed app/version/docs commit before intent-only commit |
+| `commits` | Complete ordered commits from base through reviewed SHA |
+| `paths` | Complete sorted net changed-file list |
+| `patch_sha256` | Canonical reviewed-patch hash from Branch flow |
+| `review.bug` | Approved bug/scope, at least 20 characters |
+| `review.dependencies` | Required changes/cherry-picks/dependencies reviewed; at least 20 characters |
+| `review.premium_excluded` | Boolean `true`, confirmed by owner's merge |
 
-No additional fields are accepted.
-The final hotfix commit must add only that intent file, with sole parent `reviewed_sha`.
-This avoids a self-referencing commit hash while binding approval to the actual promotion and exact reviewed source.
+Reject extra fields. Final commit adds only intent file; only parent is `reviewed_sha`.
+This avoids hashing a commit into itself while tying approval to exact source/merge.
 
-Branch flow prints commit IDs, paths and patch hash before intent creation.
-The owner reviews complete blobs/dependencies at those IDs, adds the intent in a separate final commit, and authorizes its merge.
-No executable intent or patch-version metadata exists in this preparation.
+Branch flow prints commits, paths, patch hash before intent creation.
+Owner reviews full files/dependencies at those commits, adds final intent commit, approves merge.
+Original preparation contained no executable intent or patch-version metadata.
 
 ## Scope evidence
 
-The patch hash covers JSON records containing `filename`, `status`, blob `sha` and GitHub `patch`, sorted by filename.
-Serialization uses sorted keys and separators `(',', ':')`, UTF-8, without a newline.
-`scripts/hotfix_policy.py` exposes `patch_report` and `hotfix_report`; Branch flow emits their reviewable report.
+- Hash JSON records containing `filename`, `status`, blob `sha`, GitHub `patch`, sorted by filename.
+- Serialize UTF-8 with sorted keys, separators `(',', ':')`, no newline.
+- `scripts/hotfix_policy.py`: `patch_report`/`hotfix_report`; Branch flow prints report for review.
+- Check net diff and every commit; reverting experiments cannot hide unrelated history.
+- Hotfix history must be linear from approved base and separate from `dev`; reject dev ancestors/merges.
+- Check each main commit after published stable for release-rule paths only.
+- Reject unexpected paths, missing patches, renames, binary-only diffs, oversized evidence, known Premium/identity/licensing/payment markers.
+- Cargo manifests/lockfiles may change root version only. Reject desktop project/package-lock edits.
+- Broader compatibility work needs a separate reviewed rules PR, never bypass.
 
-Both net patch and each individual commit are checked; reverted experimental commits cannot hide in a clean net diff.
-Hotfix commits must be linear descendants of authorized base and diverge from `dev`; dev ancestors/merges are denied.
-Main history since published stable is separately checked for governance-only paths, including each commit.
-
-Unexpected paths, missing patches, renamed files, binary-only diffs, oversized evidence and known Premium/identity/licensing/payment markers are denied.
-Cargo manifests and lockfiles may change only the root version; desktop project/package-lock changes are denied.
-Compatibility changes outside this narrow policy need a separate reviewed governance PR, never a bypass.
-
-These controls do not prove program semantics or detect every missing prerequisite.
-The owner must inspect full source blobs, call paths, dependency closure and tests; API patch previews may omit detail.
-The explicit review attestation flags partial cherry-picks for human review and is not an automated proof of dependency completeness.
+Checks cannot prove program behavior or every required change.
+Owner must read full source, callers, all dependencies, tests; API diff previews may omit detail.
+Required review statement flags partial cherry-picks for human review; not proof of complete dependencies.
 
 ## Checks and artifacts
 
-- Required main CI jobs: Branch flow, Windows checks, Linux checks and package (Ubuntu 24.04).
-- Separate Linux workflow: Linux checks (Ubuntu) and Linux checks (Arch), same exact main SHA.
-- All runs must be official successful pushes; exact latest attempts and named successful jobs are rechecked before final publication.
-- Artifacts must match run ID/SHA/attempt, fixed basenames and mandatory GitHub archive SHA256 digests.
-- ZIP budgets reject duplicate/path/link/encrypted/unsupported entries; payload checksum sets must match exactly.
-- Hotfix source ZIP inventory and every Git blob hash must equal the exact promoted commit tree.
-- Stable source packaging uses `git archive HEAD` from a clean committed tree; local development packaging retains working changes.
-- Existing package verification retains executable, WebView2Loader.dll, source, AGENTS.md, GPL/attribution and dependency-license checks.
+- Main CI: Branch flow, Windows checks, Linux checks and package (Ubuntu 24.04).
+- Separate Linux workflow: Linux checks (Ubuntu), Linux checks (Arch); exact same main SHA.
+- Require successful official push runs; recheck latest attempts and named jobs before publishing.
+- Artifacts must match run ID/SHA/attempt, fixed filenames, required GitHub archive SHA256 digests.
+- Reject duplicate/path/link/encrypted/unsupported ZIP entries. Payload checksum set must match exactly.
+- Hotfix source ZIP file list/every Git blob hash must match exact promoted commit tree.
+- Stable source: `git archive HEAD`, clean committed tree. Local dev packages include working edits.
+- Package checks retain executable, WebView2Loader.dll, source, AGENTS.md, GPL/attribution, dependency licenses.
 
-Outer archives are limited to 256 MiB each, 512 MiB total expansion, 256 MiB per entry and 1 MiB per checksum file.
-Hotfix source has a separate 256 MiB expansion budget, fewer than 5,000 directory entries and a 2 MiB central-directory limit.
-Truncated/oversized collections fail closed; limits need review before increasing.
+| Archive limit | Maximum |
+| --- | --- |
+| Each outer archive / total expansion | 256 MiB / 512 MiB |
+| Each entry / checksum file | 256 MiB / 1 MiB |
+| Separate hotfix-source expansion | 256 MiB |
+| Hotfix-source directory entries | Fewer than 5,000 |
+| Hotfix-source central directory | 2 MiB |
+
+Reject truncated/oversized lists. Review any limit increase first.
 
 ## Publication and recovery
 
-`release-promotion.json` binds intent, source, channel, run/attempt, artifact IDs/digests and final file hashes.
-Its hash binds the draft body; identical completed publication returns `consumed` without writes.
-Matching interrupted drafts upload only missing assets; conflicting bytes or identity are quarantined, never replaced.
-
-Only exact checked tags qualify; stable tags created by this publisher are lightweight.
-Existing wrong/stale tags, historical releases without matching receipt, development versions and nonadvancing versions are denied.
-The published baseline may advance to the exact target solely to reconcile its matching consumed receipt.
-
-The final gate repeats authority, main-head, active Rulesets, workflow state and source-run checks.
-GitHub API operations are not atomic; emergency disable must cancel running jobs as well as disable the workflow.
-Native release immutability, owner/default-branch trust and independent activation proof remain required.
+- `release-promotion.json` records intent, source, channel, run/attempt, artifact IDs/digests, final file hashes.
+- Receipt hash binds draft body. Identical finished release returns `consumed` without writes.
+- Matching interrupted drafts get missing assets only. Set aside conflicting bytes/identity; never replace.
+- Require exact checked tags. Publisher creates lightweight stable tags.
+- Reject wrong/stale tags, historical releases without matching receipt, dev versions, versions that do not advance.
+- Baseline may advance to exact target only to reconcile its matching consumed receipt.
+- Final check repeats approval, main head, active Rulesets, workflow state, source-run checks.
+- GitHub API changes are not atomic: emergency disable must also cancel running jobs.
+- Native release immutability, trusted owner/default branch, independent activation proof still required.
 
 ## Beta compatibility
 
-Beta builds remain read-only; tag-local publication is removed.
-The trusted publisher retains PR01's owner-pushed `beta-vMAJOR.MINOR.PATCH`, dev-history and prerelease/never-latest policy.
-Historical beta tags retain legacy workflows; restrict new beta tag creation and never rerun old privileged jobs.
-
-The legacy beta library seam remains solely for compatibility tests; its CLI delegates to the protected boundary.
-No workflow calls that library directly or gives it candidate build credentials with write access.
+- Beta builds stay read-only; no tag-local publishing.
+- Trusted publisher keeps PR01's owner-pushed `beta-vMAJOR.MINOR.PATCH`, dev-history, prerelease/never-latest rules.
+- Historical tags still contain old workflows. Restrict new beta tags; never rerun old privileged jobs.
+- Legacy beta library kept only for compatibility tests; CLI uses protected publisher.
+- No workflow calls that library directly or gives it build credentials with write access.

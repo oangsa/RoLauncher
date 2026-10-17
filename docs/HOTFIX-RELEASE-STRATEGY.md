@@ -1,97 +1,96 @@
 # Isolated stable hotfix release lane
 
-Status: governance preparation, October 16, 2026; **not activated**.
-Application remains `1.7.0`; no bug fix, 1.7.1 metadata, release intent, tag or release is prepared.
-The Draft PR must receive independent security review before any merge or activation.
+Historical record: October 16, 2026 release-rule preparation; **not activated**.
+At that point app stayed `1.7.0`: no fix, 1.7.1 metadata, release intent, tag, or release prepared.
+Draft PR requires independent security review before merge/activation.
 
 ## Verified baseline and separation
 
 | Reference | Verified value |
-|---|---|
+| --- | --- |
 | Latest published stable | `v1.7.0` |
 | Stable tag and live main | `4daae1bfc14db1336e1366134367ccb16efb7d4d` |
 | Premium dev | `c4d1c73d12dd4a4307871e62db79fe82fda7002a` |
 | Draft PR #27 head | `49026dc7a470e1d8ea814a60ec7986a31c656f87` |
-| Preparation branch | `codex/hotfix-release-lane`, based directly on stable SHA above |
-| Proposed future patch | `1.7.1`, only after a specific bug is approved |
+| Preparation branch | `codex/hotfix-release-lane`, from stable SHA above |
+| Proposed future patch | `1.7.1`, after specific bug approval only |
 
-Live release, branch/tag and PR evidence were refreshed before editing.
-Local `main` was stale; it was not used as the preparation base or moved.
-Premium local/remote branch references and PR #27 remain untouched; Premium work is paused in this task.
+Live release/branch/tag/PR evidence refreshed before edits. Stale local `main` neither used nor moved.
+Premium branches/PR #27 unchanged; Premium work paused for this task.
+Unfinished identity/licensing code in `dev` cannot supply stable hotfixes.
 
-`dev` contains unfinished identity/licensing work and cannot supply immediate stable hotfixes.
-Feature releases retain `feature/* → dev → main`; isolated patches use verified stable history, reviewed governance, then `hotfix/* → main`.
-After transition, a hotfix base may follow stable only through reviewed governance commits, never application changes from dev.
+Features keep `feature/* → dev → main`; isolated fixes use verified stable history, reviewed release rules, then `hotfix/* → main`.
+Post-stable hotfix bases may include reviewed release-rule commits only, never dev app changes.
 
 ## Legacy versus guarded behavior
 
-| Concern | Stable v1.7.0 workflow | Proposed lane |
-|---|---|---|
-| Main updates | Successful main builds invoke stable publisher automatically | CI-only; missing intent returns without writes |
-| Write credentials | Candidate build checkout runs publication code | Separate trusted default-branch publisher; candidate data only |
-| Main PR flow | Only dev accepted | Dev unchanged; narrow preparation/hotfix scope checked independently |
-| Release authority | Main event and successful builds | Owner-merged, fresh source-specific intent |
-| Hotfix source | No isolated policy | Published baseline, governance ancestry, exact commits/patch and semantic review |
-| Retry | Legacy draft asset replacement possible | Matching receipt resumes missing assets; published/conflicting bytes preserved |
-| Activation | Legacy publishing already present | Literal false guard plus separate owner variable and control verification |
+| Area | Stable v1.7.0 | Proposed lane |
+| --- | --- | --- |
+| Main updates | Successful builds publish automatically | CI only; missing intent means no writes |
+| Write credentials | Proposed checkout runs publisher | Separate trusted default-branch publisher; proposed files treated as data |
+| Main PR flow | Dev only | Dev unchanged; separate narrow preparation/hotfix check |
+| Approval | Main event plus passing builds | Owner-merged fresh intent tied to exact source |
+| Hotfix source | No separate policy | Published base, reviewed release-rule history, exact commits/patch, human code review |
+| Retry | Old drafts may replace assets | Matching receipt adds missing assets only; preserve published/conflicting bytes |
+| Activation | Old automatic publisher present | Literal false guard, separate owner variable, verified controls |
 
 ## Selective PR01 audit and port
 
-Reference: dev at `c4d1c73d12dd4a4307871e62db79fe82fda7002a`.
-Files were read individually with `git show`; no dev merge/cherry-pick or whole-tree import occurred.
+Reference: dev `c4d1c73d12dd4a4307871e62db79fe82fda7002a`.
+Read files individually with `git show`; no dev merge/cherry-pick/full-tree import.
 
 | Component | Decision |
-|---|---|
-| CI, Linux and beta workflows | Port removal of write publishers, nonpersisted credentials, attempt-qualified artifacts and tests; add scoped hotfix admission |
-| release-promotion workflow | Port trusted workflow-run separation and serialization; add hard-disabled activation guard |
-| release_promotion.py | Port intent, owner, exact-source/check/artifact, Ruleset, bounded archive and idempotency controls; add schema 2 |
-| test-release-promotion.py | Port all 30 synthetic regressions, including unchanged feature/beta contracts |
-| Publishing entry points/test.ps1 | Port common trusted gate and Windows policy regression hook |
-| prepare-release.py/check-release.py | Reviewed and retained byte-for-byte from stable; existing patch/version consistency behavior sufficient |
-| release_files.py | Retained stable checksum/payload validator; reused by trusted publisher |
-| package.ps1 | Narrow stable-source archive change: exact committed Git tree; development packaging preserved |
-| Governance documentation | Replace dev-specific assumptions with concise dual-source contracts and this transition plan |
-| PR02 inventory, security tools, identity PoC, provisioning, Premium app code | Excluded; no runtime/dependency/license behavior imported |
+| --- | --- |
+| CI/Linux/beta workflows | Remove write publishers; don't save checkout credentials; artifacts identify run attempt; add tests/narrow hotfix checks |
+| release-promotion workflow | Separate trusted workflow-run publisher, serialize runs, add hard-disabled guard |
+| release_promotion.py | Keep intent/owner/exact-source/check/artifact/Ruleset/archive/retry controls; add schema 2 |
+| test-release-promotion.py | All 30 synthetic tests, including unchanged feature/beta rules |
+| Publishing entry points/test.ps1 | Shared trusted gate and Windows policy tests |
+| prepare-release.py/check-release.py | Read; keep stable bytes unchanged: patch/version checks sufficient |
+| release_files.py | Keep stable checksum/payload validator; reuse in trusted publisher |
+| package.ps1 | Stable source from exact committed Git tree; dev packaging unchanged |
+| Release docs | Replace dev-only assumptions with both source contracts/transition plan |
+| PR02 inventory/security tools/identity PoC/provisioning/Premium app code | Exclude; no runtime/dependency/license changes imported |
 
 ## Safe main transition
 
-1. Independently review this exact preparation head, source diff and both policy suites; retain `1.7.0` throughout.
-2. Owner audits/cancels queued or running legacy privileged jobs and forbids reruns of pre-transition jobs/tags.
-3. Owner separately authorizes required repository protections below; keep publisher hard-disabled and variable false/unset.
-4. Review PR's Branch flow, Windows and both Linux-platform checks; merge only through reviewed PR, with no direct-push/bypass.
-5. Confirm merged main has no stable/beta write job, unchanged version and no intent; ordinary completion events cannot publish.
-6. Complete disposable-repository permission/digest/immutability/rerun proof and independent security review.
-7. Only a later owner-approved activation PR may remove literal `false`; enable the variable only after verified controls and approval.
-8. Approve a specific bug before creating hotfix branch, version metadata or executable patch intent.
+1. Independently review exact preparation head/diff/both policy suites; retain `1.7.0`.
+2. Owner audits/cancels queued/running old privileged jobs; forbids pre-transition job/tag reruns.
+3. Owner separately approves repository protections below. Keep publisher disabled and variable false/unset.
+4. Require PR's Branch flow, Windows, both Linux-platform checks. Merge reviewed PR only; no direct push/bypass.
+5. Verify merged main: no stable/beta write job, version change, or intent. Ordinary completion events cannot publish.
+6. Prove permissions/digests/unchanged assets/reruns in disposable repository; obtain independent security review.
+7. Only later owner-approved activation PR may remove literal `false`. Verify controls/approval before enabling variable.
+8. Approve specific bug before hotfix branch, version metadata, executable patch intent.
 
-The first main push uses the replacement CI-only workflow; the new workflow-run publisher remains hard-disabled even if a variable already exists.
-Old queued/rerun workflows retain old code and cannot be retroactively secured by this change.
-If owner cannot fence those runs or satisfy reviewed PR checks, stop migration; do not restore automatic publishing or bypass protection.
+First main push uses new CI-only workflow; workflow-run publisher stays disabled even with variable already set.
+Old queued/rerun jobs keep old code. If owner cannot stop those runs or satisfy PR checks, stop migration.
+Never restore automatic publishing or bypass protection.
 
 ## Owner settings and activation blockers
 
-Read-only GitHub inspection found `main.protected=false` and zero Rulesets.
-Repository-variable state was not available through the connector; do not infer false/unset from missing administrative access.
-No setting was changed, and activation remains blocked.
+Inspection then found `main.protected=false`, zero Rulesets.
+Connector could not read repository variables; missing admin access does not mean false/unset.
+No settings changed; activation blocked.
 
-1. Audit owner/admins, collaborators, Apps, deploy keys, workflow-edit rights and repository secrets; keep build jobs free of production credentials.
-2. Set default Actions token to contents-read; disable write tokens/secrets for fork PRs.
-3. Create active branch Rulesets for `refs/heads/main` and `refs/heads/dev`: require PR, prevent force-push/deletion, require up-to-date branches.
-4. Require Branch flow, Windows checks, Linux checks and package (Ubuntu 24.04), Linux checks (Ubuntu), Linux checks (Arch), each from GitHub Actions App ID `15368`.
-5. Use merge commits for hotfix promotion; keep branch bypass lists empty and separately review workflow/governance changes.
-6. Create stable tag Ruleset `refs/tags/v*`: restrict updates/deletion, empty bypass list, permit initial publisher tag creation.
-7. Create separate beta tag Ruleset `refs/tags/beta-v*`: restrict creation/update/deletion; creation bypass only sole trusted owner/admin role (`RepositoryRole=5`, `always`).
-8. Enable/test native release immutability separately; preserve historical releases/assets and record owner verification.
-9. Export effective Ruleset IDs, scope, checks, integration IDs, strictness, bypass lists, reviewer and date; reverify after access/control changes.
-10. Prove runtime token can read required evidence without Administration/write secrets; then separately approve activation PR and `RELEASE_PROMOTION_ENABLED=true`.
+1. Audit owner/admins, collaborators, Apps, deploy keys, workflow-edit rights, secrets. Build jobs get no production credentials.
+2. Default Actions token: contents-read. No fork-PR write tokens/secrets.
+3. Active branch Rulesets: `refs/heads/main`, `refs/heads/dev`; require PR/up-to-date branch; block force-push/deletion.
+4. Required checks: Branch flow, Windows checks, Linux checks and package (Ubuntu 24.04), Linux checks (Ubuntu), Linux checks (Arch); GitHub Actions App ID `15368`.
+5. Hotfix promotion uses merge commits. Empty branch bypass lists; separate review for workflow/release-rule changes.
+6. Stable tag Ruleset `refs/tags/v*`: block update/deletion, empty bypass list, allow publisher's initial tag creation.
+7. Separate beta tag Ruleset `refs/tags/beta-v*`: restrict creation/update/deletion. Creation bypass only sole trusted owner/admin role (`RepositoryRole=5`, `always`).
+8. Separately enable/test native release immutability. Preserve old releases/assets; record owner verification.
+9. Record effective Ruleset IDs/scope/checks/integration IDs/strictness/bypasses/reviewer/date. Recheck after access/control changes.
+10. Prove runtime token can read evidence without Administration/write secrets. Then separately approve activation PR and `RELEASE_PROMOTION_ENABLED=true`.
 
-Hotfix runtime denies omitted branch/tag bypass evidence, unlike PR01 feature-mode's explicit administrative-attestation boundary.
-GitHub documents that [bypass lists require ruleset write access](https://docs.github.com/en/rest/repos/rules#get-a-repository-ruleset); minimal publisher credentials may therefore be insufficient.
-**Unresolved activation blocker:** prove a least-privilege evidence route in a disposable repository; do not add an admin token or weaken this guard to force activation.
+Hotfix checks reject missing branch/tag bypass evidence; PR01 feature mode instead accepts explicit admin confirmation.
+[Reading bypass lists requires ruleset write access](https://docs.github.com/en/rest/repos/rules#get-a-repository-ruleset); minimal publishing credentials may not suffice.
+**Still blocked:** prove a minimal-access evidence path in disposable repository. Never add admin token or weaken guard to enable publishing.
 
 ## Future patch procedure — commands not executed
 
-After approved governance migration, verified unchanged stable and specific bug approval:
+Only after approved rules migration, verified unchanged stable, specific bug approval:
 
 ```powershell
 git fetch origin main --tags
@@ -101,73 +100,73 @@ git diff --name-status v1.7.0..origin/main
 git switch --create hotfix/1.7.1 origin/main
 ```
 
-Require `v1.7.0` to resolve to the verified SHA above and latest stable still to be `v1.7.0`.
-Review every post-stable main commit as governance-only; if stable/main changed unexpectedly, stop and reassess.
-Never branch from or merge dev, or reuse another Premium branch for this work.
+Require latest stable `v1.7.0`, resolving to verified SHA above.
+Review every later main commit as release-rule-only; unexpected stable/main changes mean stop/reassess.
+Never branch from/merge dev or reuse a Premium branch.
 
-1. Implement only approved fix and related tests; inspect prerequisites before any selective backport/cherry-pick.
-2. Use `python scripts/prepare-release.py fix` for local development, retaining target `1.7.1` with fresh development identities per AGENTS.md.
-3. When an actual release is authorized, use `python scripts/prepare-release.py fix --stable`; complete README, both changelogs and consolidated `docs/RELEASE-1.7.1.md`.
-4. Verify Cargo/lockfile, desktop informational version and artifact references; desktop runtime derives full version from existing build metadata.
-5. Open reviewed hotfix PR; Branch flow prints exact commits, paths and patch hash, while missing intent cannot publish.
-6. Owner reviews full patch/blobs, call paths, tests and dependencies; record approved bug, prerequisite analysis and Premium exclusion.
-7. Add schema-2 intent alone in final commit, using preceding reviewed SHA and exact main base; no edits/reuse of its UUID path.
-8. Obtain passing exact-source checks; owner merges with unchanged reviewed tree and authorized base; activated publisher independently verifies promotion.
-9. Verify published receipt, source, checksums and package contents; stable must supersede development builds of same numeric target.
+1. Approved fix/tests only. Check prerequisites before selective backport/cherry-pick.
+2. `python scripts/prepare-release.py fix`: target `1.7.1`, fresh local dev identities per AGENTS.md.
+3. Authorized release only: `python scripts/prepare-release.py fix --stable`; finish README, both changelogs, `docs/RELEASE-1.7.1.md`.
+4. Verify Cargo/lockfile, desktop informational version, artifact references. Desktop runtime uses full existing build version.
+5. Reviewed hotfix PR: Branch flow prints exact commits/paths/patch hash. Missing intent cannot publish.
+6. Owner reviews full patch/files/callers/tests/dependencies; records approved bug, prerequisites, Premium exclusion.
+7. Final commit adds schema-2 intent only: preceding reviewed SHA, exact main base. Never edit/reuse UUID path.
+8. Pass exact-source checks. Owner merges unchanged reviewed tree onto approved base; activated publisher checks independently.
+9. Verify published receipt/source/checksums/package. Stable must update dev builds of same numeric target.
 
-The complete intent contract and hash algorithm are in [Release governance](RELEASE-GOVERNANCE.md).
-Version selection still anchors latest published stable, not development identities or unfinished features.
-No release-note entry is added for this preparation because it changes no shipped application behavior.
+[Release governance](RELEASE-GOVERNANCE.md) defines full intent/hash contract.
+Versions follow latest published stable, never dev identities/unfinished features.
+Original rules preparation had no shipped app change, so no release-note entry.
 
 ## Backport, rollback and recovery
 
-1. After publication, create a separate dev-targeted branch for approved application fix/tests only.
-2. Review prerequisites and cherry-pick those commits individually; resolve compatibility and test against dev independently.
-3. Do not merge hotfix release metadata, intent or governance history blindly into Premium development.
+1. After publishing, create separate dev-targeted branch for approved app fix/tests only.
+2. Review prerequisites; cherry-pick individually; resolve/test against dev separately.
+3. Never blindly merge hotfix metadata, intent, or release-rule history into Premium dev.
 
-For emergency disable, disable Protected release promotion, cancel running/queued publishers, and remove/set activation variable false.
-Keep CI-only workflows; revert faulty governance through reviewed PR without reinstating legacy publishers.
-Retain drafts, tags, receipts and artifacts for investigation; never delete/move published versions as rollback.
+Emergency: disable Protected release promotion, cancel running/queued publishers, remove activation variable or set false.
+Keep CI-only workflows; revert faulty rules through reviewed PR. Never restore old publishers.
+Keep drafts/tags/receipts/artifacts for investigation; never delete/move published versions to roll back.
 
-Rerun only trusted promotion with the same source run/attempt to reconcile matching interrupted publication.
-Changed main, attempts, expired artifacts, conflicting tags/assets or stale intent require owner investigation and fresh reviewed authority.
-Published corrections require a new patch; partial drafts with mismatched receipt stay quarantined.
+Rerun trusted publisher only with same source run/attempt to finish matching interrupted release.
+Changed main/attempt, expired artifacts, conflicting tags/assets, or stale intent need owner investigation and fresh approval.
+Published corrections need new patch; leave mismatched-receipt drafts set aside.
 
 ## Independent security-review checklist
 
-- [ ] Verify live stable/tag/main and exact Draft PR head; compare every changed file against stable.
-- [ ] Confirm Premium branch/PR references, runtime code, dependencies, version and published history remain unchanged.
-- [ ] Trace PR admission versus publication authority; verify ordinary main/hotfix merges cannot authorize themselves.
-- [ ] Review both intent schemas, UUID freshness, merge parents/tree, full patch blobs and dependency/prerequisite attestations.
-- [ ] Check each commit and net diff for hidden/reverted Premium changes and unrelated refactors.
-- [ ] Trace build-token isolation, trusted checkout, redirects, archive bounds, source-tree hashes and payload checksum sets.
-- [ ] Exercise missing/failed Windows/Linux evidence, stale/replayed events/tags, races, interrupted uploads and consumed receipts.
-- [ ] Review legacy queued/rerun/tag fencing and hard-disabled migration with no 1.7.1 metadata or intent.
-- [ ] Independently inspect all active Rulesets/bypasses, token permissions, native immutability and activation evidence.
-- [ ] Keep activation blocked until real least-privilege/digest/immutable-draft proof succeeds; no production release for testing.
+- [ ] Verify live stable/tag/main/exact Draft PR head; compare every changed file with stable.
+- [ ] Confirm Premium branches/PRs, runtime, dependencies, version, published history unchanged.
+- [ ] Separate PR admission from publishing approval; ordinary main/hotfix merges cannot approve themselves.
+- [ ] Check both intent schemas, UUID freshness, merge parents/tree, full files, dependency/prerequisite review statements.
+- [ ] Check each commit/net diff for hidden/reverted Premium changes or unrelated refactors.
+- [ ] Trace build-token separation, trusted checkout, redirects, archive limits, source hashes, payload checksums.
+- [ ] Test failed/missing Windows/Linux evidence, old/replayed events/tags, races, interrupted uploads, consumed receipts.
+- [ ] Check old queued/rerun/tag jobs blocked; migration disabled, without 1.7.1 metadata/intent.
+- [ ] Independently inspect active Rulesets/bypasses, token permissions, native immutability, activation proof.
+- [ ] Keep disabled until real minimal-access/digest/immutable-draft proof passes. No production release for testing.
 
-Remaining trust includes GitHub/hosted runners, trusted owner/default-branch governance and pinned checkout.
-Pattern checks and review attestations cannot establish arbitrary program semantics or reproducible binary provenance.
-API check/write races cannot be made atomic; final rechecks and native protections narrow that risk.
+Still trust GitHub/hosted runners, owner/default-branch rules, pinned checkout.
+Pattern checks/review statements cannot prove arbitrary code behavior or reproducible builds.
+API check/write races remain; final rechecks/native protections reduce risk.
 
 ## Validation evidence
 
 | Local check | Result |
-|---|---|
-| Existing promotion fixtures | 30 passed; feature/beta authority and replay behavior retained |
-| Hotfix policy fixtures | 14 passed, including 27 denial scenarios and migration/source/history checks |
-| Existing beta/archive fixtures | 6 beta and 3 Linux update/archive tests passed |
-| Version fixtures/check-release | Passed; repository remains 1.7.0 |
-| Rust tests | 75 passed; one WinUI bridge test initially ignored, then passed separately |
-| Desktop and native WinUI | 74 checks, UI smoke and Rust/WinUI bridge passed |
-| Formatting/Clippy | Passed, locked all-target Clippy with warnings denied |
-| Workflow/Python validation | Four workflows pass actionlint 1.7.12; Python modules compile; shellcheck unavailable |
-| Linux-only Sober adapter locally | Windows cannot execute its POSIX entry point (`WinError 193`); native hosted Linux required |
-| Production publication/settings | Not run or changed; synthetic API fixtures only |
+| --- | --- |
+| Promotion tests | 30 passed; feature/beta approval and replay rules retained |
+| Hotfix policy tests | 14 passed, including 27 rejection cases and migration/source/history checks |
+| Beta/archive tests | 6 beta, 3 Linux update/archive tests passed |
+| Version/check-release | Passed; preparation stays 1.7.0 |
+| Rust | 75 passed; WinUI connection test initially ignored, passed separately |
+| Desktop/WinUI | 74 checks, UI tests, Rust/WinUI connection passed |
+| Formatting/Clippy | Passed; locked all-target Clippy, warnings denied |
+| Workflow/Python | Four workflows: actionlint 1.7.12 passed; Python compiles; shellcheck unavailable |
+| Linux Sober adapter locally | Windows rejects POSIX entry point (`WinError 193`); native hosted Linux required |
+| Production publication/settings | Never run/changed; synthetic API tests only |
 
-New hotfix authority, merge-tree, per-commit scope, source-byte, branch-admission and hidden-bypass cases were exercised red before their guards passed.
-Native Linux/Windows packaging and exact hosted checkout evidence belong with the Draft PR's current head checks.
-Local fixtures do not prove real publisher token permissions, artifact digest availability or immutable-release completion.
+New approval/merge-tree/per-commit/source-byte/branch/hidden-bypass tests failed before guards, then passed.
+Draft PR's current-head checks must supply native Linux/Windows packaging and exact hosted checkout evidence.
+Local tests do not prove real token permissions, artifact-digest availability, or immutable-release completion.
 
 ## Exact preparation file list
 
