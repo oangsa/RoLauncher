@@ -2,8 +2,8 @@
 
 2026-10-05 · Windows x64
 
-- Added top-center feedback toasts that close after five seconds or on demand.
-- Kept repeated background warnings from extending the timeout.
-- Preserved the page layout when toasts appear.
+- Added top-center notices: close after five seconds or on demand.
+- Repeated background warnings cannot extend timeout.
+- Notices keep page layout fixed.
 
-Existing tests and real-window toast checks passed.
+[Checks](VALIDATION.md#historical-pre-100-checks).
