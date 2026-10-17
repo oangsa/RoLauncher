@@ -63,9 +63,14 @@ class Fixture(BaseHTTPRequestHandler):
             bot.update(connection_state="offline" if action == "stop" else "online", status="Bot stopped." if action == "stop" else "Connected.")
             self.reply(dict(bot=bot)); return
         if self.path == "/v1/accounts":
-            assert body["cookies"] in (["fixture-cookie-a"], ["fixture-cookie-b"])
+            if body["cookies"] == ["fixture-malformed"]:
+                self.reply(dict(accounts=None, errors=[])); return
+            if body["cookies"] == ["fixture-failure"]:
+                self.reply(dict(error="Simulated import request failure."), 408); return
+            assert 1 <= len(body["cookies"]) <= 50
+            assert all(cookie in ("fixture-cookie-a", "fixture-cookie-b") for cookie in body["cookies"])
             imported_cookies.extend(body["cookies"])
-            self.reply(dict(accounts=[{}], errors=[])); return
+            self.reply(dict(accounts=[{} for _ in body["cookies"]], errors=[])); return
         if self.path == "/v1/updates/official/check":
             major, minor, patch = map(int, version.split('-')[0].split('.'))
             newer = f"{major}.{minor}.{patch + 1}"
