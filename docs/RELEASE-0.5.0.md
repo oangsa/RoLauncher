@@ -2,8 +2,8 @@
 
 2026-10-05 · Windows x64
 
-- Added monochrome WinUI 3 desktop.
-- Kept account controls, browser sign-in, Discord, tray.
-- Bundled desktop runtime; passed API access through inherited pipe.
+- Introduced the WinUI 3 desktop with a monochrome interface.
+- Kept account controls, browser sign-in, Discord, and tray behavior.
+- Included the desktop runtime and passed API access through an inherited pipe.
 
-Live Roblox/Discord checks not repeated. [Checks](VALIDATION.md#historical-pre-100-checks).
+34 Rust tests, 14 desktop checks, and real-window/bridge fixtures passed. Live Roblox and Discord checks were not repeated.

@@ -9,15 +9,17 @@
 
 ## Changed
 
-- Separate settings pages; Dashboard shows more status/rejoin/network/attention details.
-- Separate preset use/creation; search/filter accounts, confirm/cancel selection.
+- Dedicated sidebar settings pages; richer Dashboard status, rejoin, connectivity, and attention summaries.
+- Separate preset use/creation with searchable, filtered account selection and confirm/cancel.
 - Rejoin controls move to individual/bulk editors; saved-game fields lock until **Custom destination** is chosen.
-- Account table fills wide windows, scrolls in small ones; empty clicks clear selection.
+- Account table fills wide windows and scrolls in small ones; empty-space clicks clear selection.
 
 ## Fixed
 
-- Roblox already open at startup: close clients, retry Start; no RoLauncher restart needed.
+- After startup with Roblox already open, close those clients and retry Start without restarting RoLauncher.
 
-Accounts/destinations/rejoin/presets/recovery unchanged.
+Accounts, destinations, rejoin preferences, presets, and recovery behavior are preserved.
 
-Native live Sober untested. Hosted Windows/Ubuntu/package checks gate publishing. [Checks](VALIDATION.md#140--2026-10-07).
+Validation: Rust/Clippy/formatting, desktop checks, WinUI pages/interactions, imports/preset dialogs, and installer handoff passed.
+Linux built and passed native-input/Save/Cancel smoke under WSL; native live Sober remains pending.
+Hosted Windows/Ubuntu checks and package verification gate publication.

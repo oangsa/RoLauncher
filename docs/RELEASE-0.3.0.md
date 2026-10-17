@@ -3,7 +3,7 @@
 2026-10-05 · Windows x64
 
 - Added Accounts, Settings, and Changelog tabs.
-- Added multi-select and bulk Start/Stop/Restart/Remove/rejoin.
-- Added valid-edit autosave; replaced by Save/Cancel in 0.6.0.
+- Added multi-selection and bulk Start, Stop, Restart, Remove, and rejoin controls.
+- Added autosave for valid account edits; 0.6.0 later replaced it with Save/Cancel.
 
-Live multi-account recovery unverified. [Checks](VALIDATION.md#historical-pre-100-checks).
+27 tests passed. Live multi-account recovery remained unverified.
