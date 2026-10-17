@@ -436,6 +436,11 @@ public sealed partial class MainWindow
             GameJoinType.SelectedIndex = 0; await Task.Delay(300);
             var gameSettings = await _api.GetAsync<Snapshot>("status");
             Assert(gameSettings.ServerSelection == "highest" && gameSettings.JoinType == "friend", "Game preferences save through the API.");
+            Assert(MultiInstance.SelectedIndex == 0, "Multiple instances default on.");
+            MultiInstance.SelectedIndex = 1; await Task.Delay(300);
+            var instances = await _api.GetAsync<Snapshot>("status");
+            Assert(!instances.MultiInstanceEnabled && instances.ActiveMultiInstance && MultiInstanceHint.Text.Contains("Restart"), "Multiple instances save off with an explicit restart notice.");
+            MultiInstance.SelectedIndex = 0; await Task.Delay(300);
             await CaptureAsync(directory, "game-joining-settings.png");
             ServerSelector.SelectedIndex = 0; await Task.Delay(300);
             GameJoinType.SelectedIndex = 1; await Task.Delay(300);

@@ -99,6 +99,14 @@ public sealed partial class MainWindow
     }
     private void UpdateWorkspace(Snapshot snapshot)
     {
+        if (!_savingInstanceSettings) {
+            _syncingInstanceSettings = true;
+            MultiInstance.SelectedIndex = snapshot.MultiInstanceEnabled ? 0 : 1;
+            MultiInstanceHint.Text = snapshot.MultiInstanceEnabled != snapshot.ActiveMultiInstance
+                ? "Restart RoLauncher to apply this change. Existing clients stay open."
+                : "Changes apply after restarting RoLauncher. Off launches one managed client at a time.";
+            _syncingInstanceSettings = false; _instanceSettingsReady = true;
+        }
         _closeToTray = snapshot.CloseToTray;
         _syncingWindowSettings = true;
         CloseBehavior.SelectedIndex = _closeToTray ? 0 : 1;
@@ -177,6 +185,15 @@ public sealed partial class MainWindow
         await RefreshAsync();
     }
     private bool _syncingGameSettings, _gameSettingsReady, _savingGameSettings;
+    private bool _syncingInstanceSettings, _instanceSettingsReady, _savingInstanceSettings;
+    private async void MultiInstance_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_instanceSettingsReady || _syncingInstanceSettings || _savingInstanceSettings) return;
+        _savingInstanceSettings = true; MultiInstance.IsEnabled = false;
+        try { await GuardAsync(async () => await _api.SendAsync(HttpMethod.Patch, "settings/instances", new { multi_instance_enabled = MultiInstance.SelectedIndex == 0 })); }
+        finally { _savingInstanceSettings = false; MultiInstance.IsEnabled = true; }
+        await RefreshAsync();
+    }
     private async void GameSettings_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (!_gameSettingsReady || _syncingGameSettings || _savingGameSettings) return;

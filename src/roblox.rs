@@ -49,6 +49,8 @@ pub struct Roblox {
     client: Client,
     #[cfg(test)]
     pub(crate) presence_url: Option<String>,
+    #[cfg(test)]
+    pub(crate) servers_url: Option<String>,
 }
 impl Roblox {
     pub fn new() -> Result<Self, String> {
@@ -62,6 +64,8 @@ impl Roblox {
             client,
             #[cfg(test)]
             presence_url: None,
+            #[cfg(test)]
+            servers_url: None,
         })
     }
     fn cookie_header(cookie: &str) -> Result<HeaderValue, Failure> {

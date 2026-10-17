@@ -2,8 +2,8 @@
 
 2026-10-05 · Windows x64
 
-- Added optional Discord webhook alerts and Send test.
+- Added optional Discord webhook alerts/Send test.
 - Added local Recent activity and optional rejoin/back-online alerts.
-- Encrypted webhook storage and kept credentials out of notifications.
+- Encrypted saved webhooks; no credentials in alerts.
 
-33 tests passed using mock delivery. Real Discord delivery remained unverified.
+Real Discord delivery unverified. [Checks](VALIDATION.md#historical-pre-100-checks).

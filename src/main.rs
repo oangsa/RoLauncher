@@ -78,26 +78,67 @@ fn run() -> Result<(), String> {
         );
         return Ok(());
     }
-    let multi = platform::MultiInstanceGuard::acquire();
+    let store = Store::new(directory)?;
+    let saved = store.load()?;
+    let multi = if saved.multi_instance_enabled {
+        platform::MultiInstanceGuard::acquire().map(Some)
+    } else {
+        Ok(None)
+    };
     #[cfg(windows)]
-    let compatibility = if multi.is_ok() {
-        "OS multi-instance coordination initialized; if an existing client owns the mutex, close it yourself and retry Start. Roblox launch, mapping and log compatibility require live validation".into()
+    let startup_cleanup = if !saved.multi_instance_enabled
+        || multi
+            .as_ref()
+            .ok()
+            .and_then(|guard| guard.as_ref())
+            .is_some_and(|guard| {
+                !guard
+                    .launch_gate()
+                    .load(std::sync::atomic::Ordering::Acquire)
+            }) {
+        let protected: Vec<_> = saved
+            .accounts
+            .iter()
+            .filter_map(|s| s.account.process.clone())
+            .collect();
+        platform::close_startup_background_players(&protected)
+    } else {
+        Ok(0)
+    };
+    #[cfg(windows)]
+    let compatibility = if !saved.multi_instance_enabled {
+        "Multiple instances disabled; one managed client at a time".into()
+    } else if multi.is_ok() {
+        match startup_cleanup {
+            Ok(count) => format!(
+                "OS multi-instance coordination initialized; closed {count} background startup clients. Visible clients are kept open. Read-only RAM log fallback is best effort"
+            ),
+            Err(error) => format!(
+                "OS multi-instance coordination initialized; background startup cleanup unavailable: {error}"
+            ),
+        }
     } else {
         multi.as_ref().err().unwrap().clone()
     };
     #[cfg(target_os = "linux")]
     let compatibility = match &multi {
-        Ok(_) => "Linux / Sober: built-in per-account runtime/IPC isolation; concurrent game sessions and UI parity require live validation".into(),
+        Ok(Some(_)) => "Linux / Sober: built-in per-account runtime/IPC isolation; concurrent game sessions and UI parity require live validation".into(),
+        Ok(None) => "Multiple instances disabled; one managed Sober client at a time".into(),
         Err(error) => error.clone(),
     };
     #[cfg(windows)]
     let launch_gate = multi
         .as_ref()
-        .map(|guard| guard.launch_gate())
+        .map(|guard| {
+            guard
+                .as_ref()
+                .map(|guard| guard.launch_gate())
+                .unwrap_or_else(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)))
+        })
         .unwrap_or_else(|_| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
     #[cfg(target_os = "linux")]
     let launch_gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(multi.is_ok()));
-    let engine = Engine::open_with_launch_gate(Store::new(directory)?, compatibility, launch_gate)?;
+    let engine = Engine::open_with_launch_gate(store, compatibility, launch_gate)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()

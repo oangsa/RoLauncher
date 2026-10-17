@@ -1,14 +1,14 @@
 # RoLauncher 1.3.0
 
-- Sidebar for Accounts, Games, Dashboard, and Settings; secondary actions move into menus.
+- Sidebar: Accounts/Games/Dashboard/Settings; extra actions in menus.
 - Saved games with names, thumbnails, and public/Job ID/private destinations; individual/bulk selection and encrypted backup support.
-- Read-only Dashboard with counts, 24-hour trends, history, and recent activity; recovery actions stay in Accounts.
-- Version icon opens the latest two changelog entries and full-history link.
+- Read-only Dashboard: counts, 24-hour trends, history, recent activity. Recovery controls stay in Accounts.
+- Version icon opens latest two changelog entries/full-history link.
 - Rename Recovery & Access to Auto Rejoin; add saved tray/exit preference and remove header Exit.
-- Reset scroll on page changes, target clicked row actions correctly, and preserve text selection with Ctrl+A.
+- New pages reset scroll; row actions target clicked account; Ctrl+A keeps text selection.
 - Grant input-device access on every isolated Sober launch/retry; requires Flatpak 1.15.6+.
 
 Existing destinations/presets remain available; deleting games retains copied account destinations.
-Existing tray behavior stays; Linux minimizes to taskbar without a tray host.
+Tray behavior unchanged; Linux minimizes to taskbar without tray support.
 
 [Validation and live-player limits](VALIDATION.md)
