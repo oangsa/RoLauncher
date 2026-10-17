@@ -302,6 +302,8 @@ pub struct SavedAccount {
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Database {
+    #[serde(default)]
+    pub external_background_cleanup_enabled: bool,
     #[serde(default = "default_close_to_tray")]
     pub multi_instance_enabled: bool,
     #[serde(default)]
@@ -356,6 +358,7 @@ pub struct Operation {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Snapshot {
+    pub external_background_cleanup_enabled: bool,
     pub multi_instance_enabled: bool,
     pub active_multi_instance: bool,
     pub server_selection: ServerSelection,

@@ -43,6 +43,10 @@ pub fn router(engine: Engine) -> Router {
         .route("/v1/settings/window", patch(window_settings))
         .route("/v1/settings/game", patch(game_settings))
         .route("/v1/settings/instances", patch(instance_settings))
+        .route(
+            "/v1/settings/startup-cleanup",
+            patch(startup_cleanup_settings),
+        )
         .route("/v1/profiles", get(profiles).post(profile_save))
         .route("/v1/profiles/import", post(profile_import))
         .route("/v1/profiles/{id}", axum::routing::delete(profile_delete))
@@ -106,6 +110,7 @@ enum GameSettings {
         join_type: crate::model::JoinType,
     },
     Instances(InstanceSettings),
+    StartupCleanup(StartupCleanupSettings),
 }
 async fn game_settings(
     State(engine): State<Engine>,
@@ -119,6 +124,9 @@ async fn game_settings(
         GameSettings::Instances(settings) => {
             engine.set_multi_instance(settings.multi_instance_enabled)
         }
+        GameSettings::StartupCleanup(settings) => {
+            engine.set_external_background_cleanup(settings.external_background_cleanup_enabled)
+        }
     }
     .map(|_| StatusCode::NO_CONTENT)
     .map_err(error)
@@ -127,6 +135,20 @@ async fn game_settings(
 #[serde(deny_unknown_fields)]
 struct InstanceSettings {
     multi_instance_enabled: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartupCleanupSettings {
+    external_background_cleanup_enabled: bool,
+}
+async fn startup_cleanup_settings(
+    State(engine): State<Engine>,
+    Json(settings): Json<StartupCleanupSettings>,
+) -> Result<StatusCode, ApiError> {
+    engine
+        .set_external_background_cleanup(settings.external_background_cleanup_enabled)
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(error)
 }
 async fn instance_settings(
     State(engine): State<Engine>,

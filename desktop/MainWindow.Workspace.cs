@@ -99,6 +99,7 @@ public sealed partial class MainWindow
     }
     private void UpdateWorkspace(Snapshot snapshot)
     {
+        if (!_savingStartupCleanup) ExternalBackgroundCleanup.IsChecked = snapshot.ExternalBackgroundCleanupEnabled;
         if (!_savingInstanceSettings) {
             _syncingInstanceSettings = true;
             MultiInstance.SelectedIndex = snapshot.MultiInstanceEnabled ? 0 : 1;
@@ -186,6 +187,15 @@ public sealed partial class MainWindow
     }
     private bool _syncingGameSettings, _gameSettingsReady, _savingGameSettings;
     private bool _syncingInstanceSettings, _instanceSettingsReady, _savingInstanceSettings;
+    private bool _savingStartupCleanup;
+    private async void ExternalBackgroundCleanup_Click(object sender, RoutedEventArgs e)
+    {
+        if (_savingStartupCleanup) return;
+        _savingStartupCleanup = true; ExternalBackgroundCleanup.IsEnabled = false;
+        try { await GuardAsync(async () => await _api.SendAsync(HttpMethod.Patch, "settings/game", new { external_background_cleanup_enabled = ExternalBackgroundCleanup.IsChecked == true })); }
+        finally { _savingStartupCleanup = false; ExternalBackgroundCleanup.IsEnabled = true; }
+        await RefreshAsync();
+    }
     private async void MultiInstance_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (!_instanceSettingsReady || _syncingInstanceSettings || _savingInstanceSettings) return;

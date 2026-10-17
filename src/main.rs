@@ -85,40 +85,56 @@ fn run() -> Result<(), String> {
     } else {
         Ok(None)
     };
+    // Runs under InstanceGuard, before Engine/API launch workers exist.
     #[cfg(windows)]
-    let startup_cleanup = if !saved.multi_instance_enabled
-        || multi
-            .as_ref()
-            .ok()
-            .and_then(|guard| guard.as_ref())
-            .is_some_and(|guard| {
-                !guard
-                    .launch_gate()
-                    .load(std::sync::atomic::Ordering::Acquire)
-            }) {
+    let startup_cleanup = (|| -> Result<usize, String> {
+        let conflict = if saved.multi_instance_enabled {
+            multi
+                .as_ref()
+                .ok()
+                .and_then(|guard| guard.as_ref())
+                .is_some_and(|guard| {
+                    !guard
+                        .launch_gate()
+                        .load(std::sync::atomic::Ordering::Acquire)
+                })
+        } else {
+            platform::startup_launch_conflict()?
+        };
+        if conflict
+            && (!saved.retired_launches.is_empty()
+                || saved.accounts.iter().any(|s| s.account.tracker.is_some()))
+        {
+            return Err("Startup conflict: saved launches still need inspection. No external clients closed; quit conflicting Roblox clients and restart RoLauncher.".into());
+        }
         let protected: Vec<_> = saved
             .accounts
             .iter()
             .filter_map(|s| s.account.process.clone())
             .collect();
-        platform::close_startup_background_players(&protected)
-    } else {
-        Ok(0)
-    };
+        platform::close_startup_background_players(
+            &protected,
+            saved.external_background_cleanup_enabled,
+            conflict,
+        )
+    })();
     #[cfg(windows)]
-    let compatibility = if !saved.multi_instance_enabled {
-        "Multiple instances disabled; one managed client at a time".into()
-    } else if multi.is_ok() {
+    let compatibility = {
+        let coordination = if !saved.multi_instance_enabled {
+            "Multiple instances disabled; one managed client at a time".into()
+        } else if let Err(error) = &multi {
+            error.clone()
+        } else {
+            "OS multi-instance coordination initialized; read-only RAM log fallback is best effort"
+                .into()
+        };
         match startup_cleanup {
+            Ok(0) => coordination,
             Ok(count) => format!(
-                "OS multi-instance coordination initialized; closed {count} background startup clients. Visible clients are kept open. Read-only RAM log fallback is best effort"
+                "{coordination}; authorized startup cleanup closed {count} conflicting background clients"
             ),
-            Err(error) => format!(
-                "OS multi-instance coordination initialized; background startup cleanup unavailable: {error}"
-            ),
+            Err(error) => format!("{coordination}; {error}"),
         }
-    } else {
-        multi.as_ref().err().unwrap().clone()
     };
     #[cfg(target_os = "linux")]
     let compatibility = match &multi {

@@ -462,25 +462,29 @@ public sealed partial class MainWindow : Window
         CookieInput.Text = "";
         await ImportAsync(cookies);
     }
+    private bool _importing;
     private async Task ImportAsync(string[] cookies)
     {
+        if (_importing) { Array.Clear(cookies); return; }
+        _importing = true;
         ImportButton.IsEnabled = FileButton.IsEnabled = false;
-        await GuardAsync(async () =>
+        try
         {
-            if (cookies.Length == 0 || cookies.All(string.IsNullOrWhiteSpace)) { FeedbackMessage("Paste a session cookie first.", InfoBarSeverity.Warning); return; }
-            int success = 0; var errors = new List<string>();
-            // One cookie per request keeps each import within the request timeout, even for large files.
-            foreach (var batch in cookies.Chunk(1))
+            await GuardAsync(async () =>
             {
-                var result = (await _api.SendAsync(HttpMethod.Post, "accounts", new { cookies = batch }))!.Value;
-                success += result.GetProperty("accounts").GetArrayLength();
-                foreach (var error in result.GetProperty("errors").EnumerateArray()) errors.Add(error.GetProperty("error").GetString() ?? "Import failed.");
-            }
-            FeedbackMessage($"Imported {success} accounts. {string.Join(" ", errors)}", errors.Count == 0 ? InfoBarSeverity.Success : InfoBarSeverity.Warning);
-            await RefreshAsync();
-        });
-        Array.Clear(cookies);
-        ImportButton.IsEnabled = FileButton.IsEnabled = true;
+                var result = await CookieBatch.ImportAsync(cookies,
+                    batch => _api.SendAsync(HttpMethod.Post, "accounts", new { cookies = batch }));
+                await RefreshAsync();
+                FeedbackMessage($"Imported {result.Imported} accounts. {string.Join(" ", result.Errors)}",
+                    result.Errors.Count == 0 ? InfoBarSeverity.Success : InfoBarSeverity.Warning);
+            });
+        }
+        finally
+        {
+            Array.Clear(cookies);
+            _importing = false;
+            ImportButton.IsEnabled = FileButton.IsEnabled = true;
+        }
     }
     private async void File_Click(object sender, RoutedEventArgs e)
     {

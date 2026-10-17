@@ -48,6 +48,8 @@ pub struct User {
 pub struct Roblox {
     client: Client,
     #[cfg(test)]
+    pub(crate) user_url: Option<String>,
+    #[cfg(test)]
     pub(crate) presence_url: Option<String>,
     #[cfg(test)]
     pub(crate) servers_url: Option<String>,
@@ -63,6 +65,8 @@ impl Roblox {
         Ok(Self {
             client,
             #[cfg(test)]
+            user_url: None,
+            #[cfg(test)]
             presence_url: None,
             #[cfg(test)]
             servers_url: None,
@@ -75,9 +79,12 @@ impl Roblox {
         Ok(value)
     }
     pub async fn user(&self, cookie: &str) -> Result<User, Failure> {
+        let url = "https://users.roblox.com/v1/users/authenticated";
+        #[cfg(test)]
+        let url = self.user_url.as_deref().unwrap_or(url);
         let response = self
             .client
-            .get("https://users.roblox.com/v1/users/authenticated")
+            .get(url)
             .header(COOKIE, Self::cookie_header(cookie)?)
             .send()
             .await

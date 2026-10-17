@@ -91,4 +91,5 @@ Check(retrying.CanRetry && retrying.Retry.Contains("Retry in"), "Scheduled retri
 retrying.Update(retrying.Account with { RecoveryReason = "RateLimit" });
 Check(!retrying.CanRetry, "Rate-limit cooldown disables Retry now.");
 await UpdateDownloadTests.RunAsync(Check);
+await ImportTests.RunAsync(Check);
 Console.WriteLine($"{passed} desktop model/editor/update checks passed.");
