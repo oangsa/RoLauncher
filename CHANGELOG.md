@@ -13,7 +13,7 @@
 - Detect recent disconnects through large log backlogs; replay took 93.1% less time in the 3.7 MB fixture.
 - Keep crash detection responsive during slow discovery; exit polling took 99.3% less time in a 50-handle fixture.
 - Search beyond 500 servers with capacity checks; retain 90% fewer ranking candidates in the 500-server fixture.
-- Automatically close verified background Roblox leftovers that block startup, preserving visible games and saved managed clients.
+- Offer opt-in cleanup for conflicting background Roblox clients; default Off, preserving visible games and saved managed clients.
 - Make multiple Roblox instances optional, default On; preference changes apply after restarting RoLauncher.
 
 [Benchmark scope, CPU/memory and limits](https://github.com/oangsa/RoLauncher/blob/codex/hotfix-supporting-files/docs/PERFORMANCE.md#171-hotfix-measurements).

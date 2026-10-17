@@ -274,15 +274,116 @@ mod imp {
         }
         Ok(visible)
     }
-    /// Recover hidden startup leftovers belonging to this installation and Windows session.
+    pub fn startup_launch_conflict() -> Result<bool, String> {
+        startup_launch_conflict_named("ROBLOX_singletonMutex")
+    }
+    fn startup_launch_conflict_named(name: &str) -> Result<bool, String> {
+        let handle = Handle(unsafe { CreateMutexW(std::ptr::null(), 0, wide(name).as_ptr()) });
+        if handle.0.is_null() {
+            return Err(last_error(
+                "Cannot inspect startup conflict; quit conflicting Roblox clients and restart",
+            ));
+        }
+        match unsafe { WaitForSingleObject(handle.0, 0) } {
+            WAIT_TIMEOUT => Ok(true),
+            WAIT_OBJECT_0 | WAIT_ABANDONED => {
+                unsafe {
+                    ReleaseMutex(handle.0);
+                }
+                Ok(false)
+            }
+            _ => Err(last_error(
+                "Cannot inspect startup conflict; quit conflicting Roblox clients and restart",
+            )),
+        }
+    }
+    /// External cleanup requires separate persisted consent and an observed launch conflict.
     pub fn close_startup_background_players(
         protected: &[ProcessIdentity],
+        authorized: bool,
+        conflict: bool,
     ) -> Result<usize, String> {
+        if !conflict {
+            return Ok(0);
+        }
+        if !authorized {
+            return Err("Roblox startup conflict. Quit conflicting background clients, or enable 'Automatically close conflicting background Roblox instances' in Settings and restart RoLauncher. No external clients closed.".into());
+        }
         let local = std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA unavailable")?;
         close_startup_background_players_at(
             protected,
             &PathBuf::from(local).join("Roblox").join("Versions"),
-        )
+        ).and_then(|count| {
+            if count == 0 {
+                Err("No eligible hidden external clients found; visible and managed clients stay open".into())
+            } else { Ok(count) }
+        }).map_err(|error: String| format!("Startup cleanup incomplete: {error}. Quit conflicting Roblox clients and restart RoLauncher."))
+    }
+    fn close_startup_candidate(
+        identity: &ProcessIdentity,
+        root: &str,
+        session: u32,
+        force: bool,
+    ) -> Result<bool, String> {
+        // Keep this exact process handle through inspection and forced termination.
+        let handle = process_handle(
+            identity.pid,
+            PROCESS_QUERY_LIMITED_INFORMATION
+                | SYNCHRONIZE
+                | if force { PROCESS_TERMINATE } else { 0 },
+        )?;
+        if unsafe { WaitForSingleObject(handle.0, 0) } == WAIT_OBJECT_0 {
+            return Ok(false);
+        }
+        let mut actual_session = 0;
+        let mut path = [0u16; 32768];
+        let mut length = path.len() as u32;
+        if process_time(handle.0)? != identity.creation_time
+            || unsafe { ProcessIdToSessionId(identity.pid, &mut actual_session) } == 0
+            || actual_session != session
+            || unsafe { QueryFullProcessImageNameW(handle.0, 0, path.as_mut_ptr(), &mut length) }
+                == 0
+            || !String::from_utf16_lossy(&path[..length as usize])
+                .to_lowercase()
+                .starts_with(root)
+            || !valid_player_image(handle.0)
+        {
+            return Err(
+                "Background client identity changed or cannot be verified; left open".into(),
+            );
+        }
+        if visible_processes()?.contains(&identity.pid) {
+            return Ok(false);
+        }
+        if force {
+            terminate_verified_handle(handle.0)?;
+            if unsafe { WaitForSingleObject(handle.0, 1000) } != WAIT_OBJECT_0 {
+                return Err("Background client did not exit; quit it manually and restart".into());
+            }
+        } else {
+            unsafe extern "system" fn close_hidden(hwnd: HWND, context: LPARAM) -> i32 {
+                let (pid, handle) = unsafe { &*(context as *const (u32, HANDLE)) };
+                let mut owner = 0;
+                unsafe {
+                    GetWindowThreadProcessId(hwnd, &mut owner);
+                }
+                if owner == *pid
+                    && unsafe { IsWindowVisible(hwnd) } == 0
+                    && unsafe { WaitForSingleObject(*handle, 0) } == WAIT_TIMEOUT
+                    && visible_processes().is_ok_and(|visible| !visible.contains(pid))
+                {
+                    unsafe {
+                        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                    }
+                }
+                1
+            }
+            let context = (identity.pid, handle.0);
+            if unsafe { EnumWindows(Some(close_hidden), &context as *const _ as isize) } == 0 {
+                return Err(last_error("Background client close unavailable"));
+            }
+        }
+        Ok(true)
     }
     fn close_startup_background_players_at(
         protected: &[ProcessIdentity],
@@ -303,6 +404,7 @@ mod imp {
         row.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
         let mut next = unsafe { Process32FirstW(snapshot.0, &mut row) } != 0;
         let mut candidates = Vec::new();
+        let mut inspection_failed = false;
         while next {
             let name = String::from_utf16_lossy(
                 &row.szExeFile[..row
@@ -314,59 +416,77 @@ mod imp {
             if name.eq_ignore_ascii_case("RobloxPlayerBeta.exe")
                 && !visible.contains(&row.th32ProcessID)
             {
-                let mut owner_session = 0;
-                if unsafe { ProcessIdToSessionId(row.th32ProcessID, &mut owner_session) } != 0
-                    && owner_session == session
-                    && let Ok(handle) = process_handle(
+                let candidate = (|| -> Result<Option<ProcessIdentity>, String> {
+                    let mut owner_session = 0;
+                    if unsafe { ProcessIdToSessionId(row.th32ProcessID, &mut owner_session) } == 0 {
+                        return Err(last_error("Background client session unavailable"));
+                    }
+                    if owner_session != session {
+                        return Ok(None);
+                    }
+                    let handle = process_handle(
                         row.th32ProcessID,
                         PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
-                    )
-                    && valid_player_image(handle.0)
-                    && let Ok(creation_time) = process_time(handle.0)
-                    && !protected
+                    )?;
+                    let creation_time = process_time(handle.0)?;
+                    if protected
                         .iter()
                         .any(|id| id.pid == row.th32ProcessID && id.creation_time == creation_time)
-                {
+                    {
+                        return Ok(None);
+                    }
                     let mut path = [0u16; 32768];
                     let mut length = path.len() as u32;
                     if unsafe {
                         QueryFullProcessImageNameW(handle.0, 0, path.as_mut_ptr(), &mut length)
-                    } != 0
-                        && String::from_utf16_lossy(&path[..length as usize])
+                    } == 0
+                    {
+                        return Err(last_error("Background client image unavailable"));
+                    }
+                    if !valid_player_image(handle.0)
+                        || !String::from_utf16_lossy(&path[..length as usize])
                             .to_lowercase()
                             .starts_with(&root)
                     {
-                        candidates.push(
-                            Player {
-                                pid: row.th32ProcessID,
-                                creation_time,
-                                tracker: String::new(),
-                            }
-                            .identity(Uuid::nil()),
-                        );
+                        return Ok(None);
                     }
+                    Ok(Some(
+                        Player {
+                            pid: row.th32ProcessID,
+                            creation_time,
+                            tracker: String::new(),
+                        }
+                        .identity(Uuid::nil()),
+                    ))
+                })();
+                match candidate {
+                    Ok(Some(identity)) => candidates.push(identity),
+                    Ok(None) => {}
+                    Err(_) => inspection_failed = true,
                 }
             }
             next = unsafe { Process32NextW(snapshot.0, &mut row) } != 0;
         }
+        let mut closing = Vec::new();
         for identity in &candidates {
-            if !visible_processes()?.contains(&identity.pid) {
-                close(identity, false)?;
+            if close_startup_candidate(identity, &root, session, false)? {
+                closing.push(identity);
             }
         }
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while std::time::Instant::now() < deadline
-            && candidates.iter().any(|id| alive(id).unwrap_or(false))
+            && closing.iter().any(|id| alive(id).unwrap_or(true))
         {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        let visible = visible_processes()?;
         let mut closed = 0;
-        for identity in &candidates {
-            if !visible.contains(&identity.pid) {
-                close(identity, true)?;
+        for identity in closing {
+            if !alive(identity)? || close_startup_candidate(identity, &root, session, true)? {
                 closed += 1;
             }
+        }
+        if inspection_failed {
+            return Err("Some background clients could not be inspected; left open".into());
         }
         Ok(closed)
     }
@@ -727,6 +847,10 @@ mod imp {
         }
     }
     include!("platform_memory.rs");
+    #[cfg(test)]
+    mod startup_tests {
+        include!("platform_startup_tests.rs");
+    }
     #[cfg(test)]
     mod close_tests {
         use super::*;

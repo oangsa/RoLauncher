@@ -17,6 +17,8 @@ use std::{
 use tokio::sync::{Notify, broadcast};
 use uuid::Uuid;
 
+#[cfg(test)]
+mod import_tests;
 mod management;
 mod server_selection;
 pub use management::{BulkPatch, ProfileSave};
@@ -385,6 +387,12 @@ impl Engine {
     pub fn set_multi_instance(&self, enabled: bool) -> Result<(), String> {
         self.transaction(|s| {
             s.database.multi_instance_enabled = enabled;
+            Ok(())
+        })
+    }
+    pub fn set_external_background_cleanup(&self, enabled: bool) -> Result<(), String> {
+        self.transaction(|s| {
+            s.database.external_background_cleanup_enabled = enabled;
             Ok(())
         })
     }
@@ -1597,6 +1605,7 @@ fn account_mut<'a>(s: &'a mut State, id: &str) -> Result<&'a mut Account, String
 }
 fn snapshot(s: &State) -> Snapshot {
     Snapshot {
+        external_background_cleanup_enabled: s.database.external_background_cleanup_enabled,
         multi_instance_enabled: s.database.multi_instance_enabled,
         active_multi_instance: s.active_multi_instance,
         server_selection: s.database.server_selection,

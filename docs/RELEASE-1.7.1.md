@@ -11,7 +11,8 @@ Patch version explicitly requested; no GitHub release published.
 - Find error 273/disconnects in busy logs; keep confirmed disconnects when log reads fail.
 - Keep Windows exit checks running during slow client/log discovery; reuse verified handles and stop repeating blocked close attempts.
 - Read recent RAM log messages when Windows file logs stall. RAM-only hints cannot close clients; memory and client files stay unchanged.
-- Close hidden startup leftovers from current user's Roblox installation/session when startup is blocked. Keep visible games and saved managed clients.
+- Startup cleanup defaults Off. Enable it in Settings to close hidden external Roblox clients only after a verified launch conflict.
+- Keep visible games, saved managed clients and unresolved launches protected; failed inspection gives manual cleanup guidance.
 - Multiple instances optional, default On for new/existing users. Restart app to apply changes.
 
 ## Immediate recovery policy
@@ -36,7 +37,9 @@ Unknown codes remain unconfirmed; log format alone does not establish terminalit
 ## Desktop and imports
 
 - Report malformed JSON, null roots and invalid error fields without leaving refresh locked.
-- Validate four sessions at once; save accounts/results in submitted order. Large imports get ten minutes; other requests keep 30 seconds.
+- Desktop imports use batches up to 50, validating four sessions at once and saving in submitted order.
+- Report failed entry positions, retain partial successes, clear cookie arrays and restore controls after errors.
+- Large imports get ten minutes; other requests keep 30 seconds.
 
 ## Server selection
 

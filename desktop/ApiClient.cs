@@ -64,5 +64,3 @@ public sealed class ApiClient : IDisposable
     }
     public void Dispose() => _client.Dispose();
 }
-
-public sealed class ApiException(string message) : Exception(message);

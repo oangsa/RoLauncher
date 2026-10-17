@@ -100,6 +100,7 @@ public sealed partial class MainWindow
             Import_Click(ImportButton, new RoutedEventArgs());
             for (var i = 0; i < 100 && !ImportButton.IsEnabled; i++) await Task.Delay(50);
             Assert(CookieInput.Text.Length == 0 && await _api.GetAsync<int>("test/import-count") == 2, "Cookie paste imports each distinct nonblank line and clears the field.");
+            await ImportFailureSmokeAsync();
             Tab_Click(RecoveryTab, new RoutedEventArgs()); await RefreshAsync();
             Assert(TotalMetric.Text == "3" && RunningMetric.Text == "1" && RejoiningMetric.Text == "1" && AttentionMetric.Text == "1", "Dashboard counts actual account states.");
             Assert(RecoveryList.ItemsSource is AccountRow[] { Length: 1 } attention && attention[0].Id == "2", "Dashboard attention queue excludes healthy accounts and automatic retries.");
