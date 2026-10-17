@@ -69,10 +69,10 @@ Runtime evidence is not persisted or exported; tests cover stale identities, RAM
 
 ## Validation and performance
 
-- [Check results](VALIDATION.md#upcoming-171-hotfix--2026-10-17).
+- [Check results](https://github.com/oangsa/RoLauncher/blob/codex/hotfix-supporting-files/docs/VALIDATION.md#upcoming-171-hotfix--2026-10-17).
 - Three optimized runs: 93.1% less log-reading time; 99.3% less exit-check time in stated tests.
 - 500-server test kept 48 entries instead of 480: 90% fewer entries, not measured RAM savings.
 - Final idle build: 21.74 MiB working set, 2.05 MiB private memory, 0.019% machine CPU. Desktop/Roblox excluded; no idle saving proven.
 - Live Roblox, low-end PCs with many clients, native Linux untested. RAM detection not guaranteed.
 
-[Measurements and methodology](PERFORMANCE.md#171-hotfix-measurements) · [Experiment ledger](HOTFIX-1.7.1-EXPERIMENTS.md) · [Usage](USAGE.md).
+[Measurements and methodology](https://github.com/oangsa/RoLauncher/blob/codex/hotfix-supporting-files/docs/PERFORMANCE.md#171-hotfix-measurements) · [Experiment ledger](https://github.com/oangsa/RoLauncher/blob/codex/hotfix-supporting-files/docs/HOTFIX-1.7.1-EXPERIMENTS.md) · [Usage](USAGE.md).

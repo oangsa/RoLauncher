@@ -99,20 +99,32 @@ async fn game_details(
     ))
 }
 #[derive(Deserialize)]
-struct GameSettings {
-    server_selection: crate::model::ServerSelection,
-    join_type: crate::model::JoinType,
+#[serde(untagged)]
+enum GameSettings {
+    Joining {
+        server_selection: crate::model::ServerSelection,
+        join_type: crate::model::JoinType,
+    },
+    Instances(InstanceSettings),
 }
 async fn game_settings(
     State(engine): State<Engine>,
     Json(settings): Json<GameSettings>,
 ) -> Result<StatusCode, ApiError> {
-    engine
-        .set_game_settings(settings.server_selection, settings.join_type)
-        .map(|_| StatusCode::NO_CONTENT)
-        .map_err(error)
+    match settings {
+        GameSettings::Joining {
+            server_selection,
+            join_type,
+        } => engine.set_game_settings(server_selection, join_type),
+        GameSettings::Instances(settings) => {
+            engine.set_multi_instance(settings.multi_instance_enabled)
+        }
+    }
+    .map(|_| StatusCode::NO_CONTENT)
+    .map_err(error)
 }
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct InstanceSettings {
     multi_instance_enabled: bool,
 }
@@ -459,6 +471,9 @@ pub async fn serve_on(engine: Engine, listener: tokio::net::TcpListener) -> Resu
         .await
         .map_err(|_| "Local API stopped unexpectedly".into())
 }
+
+#[cfg(all(test, any(windows, target_os = "linux")))]
+mod compat_tests;
 
 #[cfg(all(test, any(windows, target_os = "linux")))]
 mod tests {
