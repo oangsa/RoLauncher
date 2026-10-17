@@ -13,7 +13,12 @@ pub enum Signal {
     SessionLost(Option<u32>),
     TargetUnavailable,
     PermissionDenied,
-    ClientUpdateRequired,
+}
+
+// Preserve exhaustive matches in existing log consumers: updates use the existing code-bearing signal.
+impl Signal {
+    #[allow(non_upper_case_globals)]
+    pub const ClientUpdateRequired: Self = Self::SessionLost(Some(280));
 }
 
 /// Conservative external-log signatures. An attempted join is NOT a connection.
@@ -159,12 +164,9 @@ pub fn parse_event(line: &str) -> Option<LogEvent> {
         }
         // Only known failed-session codes authorize shutdown. Unknown codes need evidence.
         Signal::SessionLost(code) => {
-            matches!(code, Some(264 | 266 | 267 | 268 | 273 | 277 | 529))
+            matches!(code, Some(264 | 266 | 267 | 268 | 273 | 277 | 280 | 529))
         }
-        Signal::ConnectionFailed
-        | Signal::TargetUnavailable
-        | Signal::PermissionDenied
-        | Signal::ClientUpdateRequired => true,
+        Signal::ConnectionFailed | Signal::TargetUnavailable | Signal::PermissionDenied => true,
     };
     Some(LogEvent {
         signal,

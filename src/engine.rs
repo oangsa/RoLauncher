@@ -100,7 +100,7 @@ fn apply_observation(account: &mut Account, observation: Observation) {
                 "Game denied access; check permissions or bans before restarting",
             ))
         }
-        Signal::ClientUpdateRequired | Signal::SessionLost(Some(280)) => Some(Failure::new(
+        Signal::ClientUpdateRequired => Some(Failure::new(
             FailureKind::Unsupported,
             "Roblox is out of date (280); update Roblox, then use Start",
         )),

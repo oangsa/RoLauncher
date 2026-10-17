@@ -190,7 +190,7 @@ public sealed partial class MainWindow
     {
         if (!_instanceSettingsReady || _syncingInstanceSettings || _savingInstanceSettings) return;
         _savingInstanceSettings = true; MultiInstance.IsEnabled = false;
-        try { await GuardAsync(async () => await _api.SendAsync(HttpMethod.Patch, "settings/instances", new { multi_instance_enabled = MultiInstance.SelectedIndex == 0 })); }
+        try { await GuardAsync(async () => await _api.SendAsync(HttpMethod.Patch, "settings/game", new { multi_instance_enabled = MultiInstance.SelectedIndex == 0 })); }
         finally { _savingInstanceSettings = false; MultiInstance.IsEnabled = true; }
         await RefreshAsync();
     }

@@ -14,7 +14,7 @@ Fixed
 - Automatically close verified background Roblox leftovers that block startup, preserving visible games and saved managed clients.
 - Make multiple Roblox instances optional, default On; preference changes apply after restarting RoLauncher.
 
-Benchmark scope, CPU/memory and limits: docs/PERFORMANCE.md.
+Benchmark scope, CPU/memory and limits: https://github.com/oangsa/RoLauncher/blob/codex/hotfix-supporting-files/docs/PERFORMANCE.md#171-hotfix-measurements
 
 1.7.0 — Server selection and friend joining
 
