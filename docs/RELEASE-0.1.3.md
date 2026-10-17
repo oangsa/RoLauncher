@@ -2,7 +2,7 @@
 
 2026-10-05 · Windows x64
 
-- Fixed false Windows error 5 when a managed client had already exited.
-- Resumed recovery after confirmed exit while preserving genuine access and authentication errors.
+- Fixed false Windows error 5 after managed client exited.
+- Resume recovery after confirmed exit; keep real access/sign-in errors.
 
-22 regression tests passed. Full live recovery remained unverified.
+Full live recovery unverified. [Checks](VALIDATION.md#historical-pre-100-checks).

@@ -286,6 +286,8 @@ pub struct SavedAccount {
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Database {
+    #[serde(default = "default_close_to_tray")]
+    pub multi_instance_enabled: bool,
     #[serde(default)]
     pub server_selection: ServerSelection,
     #[serde(default)]
@@ -338,6 +340,8 @@ pub struct Operation {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Snapshot {
+    pub multi_instance_enabled: bool,
+    pub active_multi_instance: bool,
     pub server_selection: ServerSelection,
     pub join_type: JoinType,
     pub game_profiles: Vec<GameProfile>,
@@ -361,6 +365,19 @@ pub fn retry_seconds(failures: u32) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn old_databases_default_multiple_instances_on() {
+        let mut value = serde_json::to_value(Database::default()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("multi_instance_enabled");
+        assert!(
+            serde_json::from_value::<Database>(value)
+                .unwrap()
+                .multi_instance_enabled
+        );
+    }
     #[test]
     fn targets_reject_external_urls_and_conflicting_destinations() {
         let mut t = Target {

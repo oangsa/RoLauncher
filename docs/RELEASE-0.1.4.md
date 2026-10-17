@@ -2,8 +2,8 @@
 
 2026-10-05 · Windows x64
 
-- Recognized current-client connection failures, including error 279.
-- Allowed the existing reconnect grace period before retrying.
-- Ignored unrelated timeouts; connection failure alone did not allow public fallback.
+- Detect current-client connection failures, including 279.
+- Wait for reconnection before retrying.
+- Ignore unrelated timeouts; connection failure alone cannot allow public fallback.
 
-24 regression tests passed. Full live recovery remained unverified.
+Full live recovery unverified. [Checks](VALIDATION.md#historical-pre-100-checks).

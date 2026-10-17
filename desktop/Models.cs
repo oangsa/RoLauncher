@@ -19,7 +19,7 @@ public sealed record GameProfile(string Id, string Name, string GameName, string
     public string Destination => $"Place {Target.PlaceId} · {(Target.PrivateServerLink is not null ? "Private server" : Target.JobId is not null ? "Specific server" : "Public server")}";
     public override string ToString() => $"{Name} · {GameName}";
 }
-public sealed record Snapshot(Account[] Accounts, bool NetworkSuspended, string Compatibility, LaunchProfile[]? Profiles = null, string UpdateRepository = "", bool IncludeBetaUpdates = false, GameProfile[]? GameProfiles = null, bool CloseToTray = true, string ServerSelection = "smart", string JoinType = "random");
+public sealed record Snapshot(Account[] Accounts, bool NetworkSuspended, string Compatibility, LaunchProfile[]? Profiles = null, string UpdateRepository = "", bool IncludeBetaUpdates = false, GameProfile[]? GameProfiles = null, bool CloseToTray = true, string ServerSelection = "smart", string JoinType = "random", bool MultiInstanceEnabled = true, bool ActiveMultiInstance = true);
 public sealed record UpdateView(bool Available, string Version, string ReleaseUrl, string DownloadUrl, string ChecksumsUrl, string InstallerUrl = "", bool Prerelease = false);
 public sealed record Activity(DateTimeOffset Timestamp, string AccountId, ulong? PlaceId, string Status, uint Failures, string Message)
 {
