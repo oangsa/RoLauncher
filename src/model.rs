@@ -180,6 +180,16 @@ pub struct ProcessIdentity {
     pub generation: Uuid,
 }
 
+/// Runtime evidence is never restored from a database or backup.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RecoveryEvidence {
+    #[default]
+    Unavailable,
+    SuspectedDisconnect,
+    ConfirmedTerminalDisconnect,
+    RecoveryStarted,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Account {
     pub id: String,
@@ -205,6 +215,10 @@ pub struct Account {
     #[serde(default)]
     pub longest_streak_seconds: u64,
     pub disconnected_since: Option<DateTime<Utc>>,
+    #[serde(skip)]
+    pub recovery_evidence: RecoveryEvidence,
+    #[serde(skip)]
+    pub(crate) recovery_process: Option<ProcessIdentity>,
     #[serde(default)]
     pub disconnect_notified: bool,
     pub last_error: Option<String>,
@@ -239,6 +253,8 @@ impl Account {
             running_since: None,
             longest_streak_seconds: 0,
             disconnected_since: None,
+            recovery_evidence: RecoveryEvidence::Unavailable,
+            recovery_process: None,
             disconnect_notified: false,
             last_error: None,
             operation_id: None,

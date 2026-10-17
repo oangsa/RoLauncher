@@ -1,4 +1,4 @@
-# RoLauncher 1.7.1-dev.ee9b80524a47
+# RoLauncher 1.7.1-dev.c0707f5c1f79
 
 Manage Roblox accounts, save destinations, and rejoin disconnected sessions.
 Windows uses native WinUI; the shared Linux/Sober port remains a beta.
@@ -30,7 +30,8 @@ Keep cookies private; never include them in bug reports.
 - Optional beta updates under **Settings → Updates**.
 
 Upcoming 1.7.1 improves disconnect recovery, server searches, and startup cleanup; multiple instances become optional and default On.
-Smart cannot guarantee region or local latency. See [release notes](docs/RELEASE-1.7.1.md).
+Confirmed disconnects begin controlled recovery immediately; replacements wait for verified exit and retry backoff.
+RAM-only hints cannot close clients. Smart cannot guarantee region or local latency. See [release notes](docs/RELEASE-1.7.1.md).
 
 ## Documentation
 

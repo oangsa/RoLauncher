@@ -38,7 +38,7 @@ public sealed class AccountRow(Account account) : INotifyPropertyChanged
     public string Id => Account.Id;
     public string Alias => Account.Alias;
     public string Group => string.IsNullOrEmpty(Account.Group) ? "Ungrouped" : Account.Group;
-    public string Retry => Account.NextRetry is { } time ? $"Retry in {Math.Max(0, (int)(time - DateTimeOffset.UtcNow).TotalSeconds)}s · {time.ToLocalTime():T}" : Account.Status == "reconnecting" ? "Waiting up to 30 seconds to reconnect" : "No retry scheduled";
+    public string Retry => Account.NextRetry is { } time ? $"Retry in {Math.Max(0, (int)(time - DateTimeOffset.UtcNow).TotalSeconds)}s · {time.ToLocalTime():T}" : Account.Status == "reconnecting" ? "Starting controlled recovery" : "No retry scheduled";
     public string Recovery => Account.RecoveryReason switch { "Auth" => "Session expired · sign in again", "Permission" => "Experience denied access", "TargetUnavailable" => "Destination unavailable", "Unsupported" => "Integration needs attention", "RateLimit" => "Rate limited · retry pending", "Network" => "Connection lost", _ => Error };
     public bool CanRetry => Account.Status == "backoff" && Account.NextRetry is not null && Account.AutoRecovery && Account.DesiredRunning && Account.RecoveryReason != "RateLimit";
     public string Fallback => Account.PublicFallbackActive ? "Public fallback active" : Account.FallbackPolicy switch { "stay" => "Stay on destination", "pause" => "Pause and notify", _ => "Public fallback allowed" };
@@ -56,7 +56,7 @@ public sealed class AccountRow(Account account) : INotifyPropertyChanged
     {
         "needs_attention" => "Needs attention",
         "stopped" => "Stopped", "queued" => "Queued", "launching" => "Launching",
-        "running" => "Running", "reconnecting" => "Reconnecting", "backoff" => "Backoff", _ => "Unknown"
+        "running" => "Running", "reconnecting" => "Recovering", "backoff" => "Backoff", _ => "Unknown"
     };
     private string? _gameName;
     public string Destination => Account.Target is null ? "Choose a game" : _gameName ?? $"Place {Account.Target.PlaceId}";

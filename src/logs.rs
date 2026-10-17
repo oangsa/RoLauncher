@@ -140,6 +140,38 @@ pub fn parse_line(line: &str) -> Option<Signal> {
     None
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct LogEvent {
+    pub signal: Signal,
+    pub confirmed_terminal: bool,
+}
+
+/// Disk event semantics; the caller must separately establish process ownership.
+pub fn parse_event(line: &str) -> Option<LogEvent> {
+    let signal = parse_line(line)?;
+    let confirmed_terminal = match signal {
+        Signal::Connected => false,
+        Signal::JoinRequestFailed => false, // One request can fail while the client retries.
+        Signal::Disconnected => {
+            // Bare local disconnect/peer-close events can accompany an intentional transfer.
+            // Explicit connection-lost events establish a lost gameplay connection.
+            line.contains("Connection lost") || line.contains("ID_CONNECTION_LOST")
+        }
+        // Only known failed-session codes authorize shutdown. Unknown codes need evidence.
+        Signal::SessionLost(code) => {
+            matches!(code, Some(264 | 266 | 267 | 268 | 273 | 277 | 529))
+        }
+        Signal::ConnectionFailed
+        | Signal::TargetUnavailable
+        | Signal::PermissionDenied
+        | Signal::ClientUpdateRequired => true,
+    };
+    Some(LogEvent {
+        signal,
+        confirmed_terminal,
+    })
+}
+
 pub struct Tail {
     pub path: PathBuf,
     pub offset: u64,
@@ -171,6 +203,10 @@ impl Tail {
         })
     }
     pub fn read(&mut self) -> std::io::Result<Vec<Signal>> {
+        self.read_events()
+            .map(|events| events.into_iter().map(|event| event.signal).collect())
+    }
+    pub fn read_events(&mut self) -> std::io::Result<Vec<LogEvent>> {
         let mut f = File::open(&self.path)?;
         #[cfg(target_os = "linux")]
         {
@@ -212,12 +248,12 @@ impl Tail {
         if let Some(end) = self.pending.iter().rposition(|b| *b == b'\n') {
             for line in self.pending[..=end].split(|b| *b == b'\n') {
                 let line = String::from_utf8_lossy(line);
-                if let Some(signal) = parse_line(&line) {
+                if let Some(event) = parse_event(&line) {
                     if let Some(time) = timestamp(&line) {
                         self.last_signal_time =
                             Some(self.last_signal_time.map_or(time, |last| last.max(time)));
                     }
-                    signals.push(signal);
+                    signals.push(event);
                 }
             }
             self.pending.drain(..=end);
@@ -240,6 +276,40 @@ pub fn timestamp(line: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn terminal_policy_uses_event_semantics_not_only_valid_log_format() {
+        for line in [
+            "[FLog::Network] Connection lost",
+            "[FLog::NetworkClient] ID_CONNECTION_LOST",
+            "[FLog::Network] Sending disconnect with reason: 273",
+            "[FLog::GameJoinUtil] GameJoinFailed errorCode: 279",
+            "[FLog::GameJoinUtil] GameJoinFailed errorCode: 529",
+        ] {
+            assert!(parse_event(line).unwrap().confirmed_terminal, "{line}");
+        }
+        for line in [
+            "[FLog::Network] Sending disconnect with reason: 0",
+            "[FLog::Network] Sending disconnect with reason: 282",
+            "[FLog::Network] Sending disconnect with reason: 20",
+            "[FLog::Network] Sending disconnect with reason: 285",
+            "[FLog::Network] Client:Disconnect",
+            "[FLog::Network] ID_DISCONNECTION_NOTIFICATION",
+            "[FLog::RbxTransportDummyClient] Connection closed",
+            "[FLog::GameJoinUtil] GameJoinFailed errorCode: 999",
+            "[FLog::GameJoinUtil] GameJoinFailed",
+            "[FLog::Network] Connection accepted",
+            "[FLog::HttpTraceError] HttpResponse(#1) status:503 Error url:{ \"https://gamejoin.roblox.com/v1/join-game\" }",
+        ] {
+            assert!(!parse_event(line).unwrap().confirmed_terminal, "{line}");
+        }
+        for line in [
+            "[FLog::Output] [FLog::Network] Connection lost",
+            "[FLog::HttpTraceError] unrelated network error",
+            "[FLog::Output] GameJoinFailed errorCode: 279",
+        ] {
+            assert!(parse_event(line).is_none());
+        }
+    }
     #[test]
     #[ignore = "release-build backlog replay benchmark"]
     fn hotfix_benchmark_log_backlog() {
