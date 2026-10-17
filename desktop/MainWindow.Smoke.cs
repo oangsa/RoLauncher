@@ -100,6 +100,8 @@ public sealed partial class MainWindow
             Import_Click(ImportButton, new RoutedEventArgs());
             for (var i = 0; i < 100 && !ImportButton.IsEnabled; i++) await Task.Delay(50);
             Assert(CookieInput.Text.Length == 0 && await _api.GetAsync<int>("test/import-count") == 2, "Cookie paste imports each distinct nonblank line and clears the field.");
+            Assert(Feedback.Message.StartsWith("Imported 2 accounts.", StringComparison.Ordinal) && Feedback.Severity == InfoBarSeverity.Success,
+                "The batched import response reports every saved account successfully.");
             await ImportFailureSmokeAsync();
             Tab_Click(RecoveryTab, new RoutedEventArgs()); await RefreshAsync();
             Assert(TotalMetric.Text == "3" && RunningMetric.Text == "1" && RejoiningMetric.Text == "1" && AttentionMetric.Text == "1", "Dashboard counts actual account states.");
