@@ -66,7 +66,10 @@ Hotfix commits must be linear descendants of authorized base and diverge from `d
 Main history since published stable is separately checked for governance-only paths, including each commit.
 
 Unexpected paths, missing patches, renamed files, binary-only diffs, oversized evidence and known Premium/identity/licensing/payment markers are denied.
-Cargo manifests and lockfiles may change only the root version; desktop project/package-lock changes are denied.
+Cargo manifests and lockfiles may change only the root version, except a hotfix may add the allowlisted
+`Win32_System_Diagnostics_Debug`, `Win32_System_Diagnostics_ToolHelp` and `Win32_System_RemoteDesktop` features to
+the existing `windows-sys` 0.61 Windows dependency. Existing features must remain, and dependency versions or other
+dependency metadata must not change; desktop project/package-lock changes are denied.
 Compatibility changes outside this narrow policy need a separate reviewed governance PR, never a bypass.
 
 These controls do not prove program semantics or detect every missing prerequisite.

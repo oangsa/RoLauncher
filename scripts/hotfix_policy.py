@@ -21,6 +21,11 @@ GOVERNANCE_PATHS = {
 }
 HOTFIX_FIELDS = {'schema', 'id', 'version', 'channel', 'source', 'baseline_tag',
                 'baseline_sha', 'base_sha', 'reviewed_sha', 'commits', 'paths', 'patch_sha256', 'review'}
+WINDOWS_SYS_FEATURE_ADDITIONS = {
+    'Win32_System_Diagnostics_Debug',
+    'Win32_System_Diagnostics_ToolHelp',
+    'Win32_System_RemoteDesktop',
+}
 
 
 def require(condition, message):
@@ -129,6 +134,33 @@ def hotfix_report(call, base, reviewed):
     return report
 
 
+def normalize_windows_sys_features(before, after):
+    old = before.get('target', {}).get('cfg(windows)', {}).get('dependencies', {}).get('windows-sys')
+    new = after.get('target', {}).get('cfg(windows)', {}).get('dependencies', {}).get('windows-sys')
+    if old == new:
+        return
+    require(isinstance(old, dict) and isinstance(new, dict),
+            'Cargo.toml dependency changes require separate authorization')
+    require(old.get('version') == new.get('version') == '0.61',
+            'windows-sys dependency version changes require separate authorization')
+    old_features = old.get('features', [])
+    new_features = new.get('features', [])
+    require(isinstance(old_features, list) and isinstance(new_features, list)
+            and all(isinstance(item, str) for item in old_features + new_features)
+            and len(old_features) == len(set(old_features))
+            and len(new_features) == len(set(new_features)),
+            'Invalid windows-sys feature list')
+    old_set, new_set = set(old_features), set(new_features)
+    require(old_set <= new_set and new_set - old_set <= WINDOWS_SYS_FEATURE_ADDITIONS,
+            'Unapproved windows-sys feature change')
+    normalized = new.copy()
+    if 'features' in old:
+        normalized['features'] = old['features']
+    else:
+        normalized.pop('features', None)
+    after['target']['cfg(windows)']['dependencies']['windows-sys'] = normalized
+
+
 def check_branch_flow(event, call):
     """Read-only PR admission; successful admission never authorizes publication."""
     from release_promotion import REPO, content
@@ -214,6 +246,7 @@ def verify_hotfix(call, intent, pr, merge, path, source, content):
             require(before['package']['version'] == tag[1:] and after['package']['version'] == intent['version'],
                     'Hotfix manifest version mismatch')
             after['package']['version'] = before['package']['version']
+            normalize_windows_sys_features(before, after)
         else:
             old = next(p for p in before['package'] if p['name'] == 'rolauncher')
             new = next(p for p in after['package'] if p['name'] == 'rolauncher')
