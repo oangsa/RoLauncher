@@ -91,6 +91,69 @@ class HotfixFixture(reference.GitHubFixture):
         return super().__call__(path, method, body, **kwargs)
 
 
+SOURCE_MERGE = "8" * 40
+INTENT_HEAD = "9" * 40
+GOVERNANCE_HEAD = "7" * 40
+RECOVERY_BASE = "6" * 40
+
+
+class RecoveryFixture(HotfixFixture):
+    """A follow-up intent PR bound to an already owner-merged hotfix PR."""
+    def __init__(self):
+        super().__init__()
+        self.source_pr = copy.deepcopy(self.pr)
+        self.review_commits[0]['commit'] = {'tree': {'sha': '5' * 40}}
+        self.source_pr.update(merge_commit_sha=SOURCE_MERGE,
+                              head={"ref": "hotfix/2.3.4", "sha": REVIEWED,
+                                    "repo": {"full_name": reference.REPO}},
+                              base={"ref": "main", "sha": BASE,
+                                    "repo": {"full_name": reference.REPO}})
+        self.pr.update(merge_commit_sha=SHA,
+                       head={"ref": "hotfix-intent/2.3.4", "sha": INTENT_HEAD,
+                             "repo": {"full_name": reference.REPO}},
+                       base={"ref": "main", "sha": RECOVERY_BASE,
+                             "repo": {"full_name": reference.REPO}})
+        self.intent.update(schema=3, source="hotfix-recovery", source_pr=4,
+                           source_merge_sha=SOURCE_MERGE)
+        self.intent.pop("reviewed_sha", None)
+        self.intent["reviewed_sha"] = REVIEWED
+        self.intent_head_commit = dict(sha=INTENT_HEAD, parents=[{"sha": RECOVERY_BASE}],
+                                       files=[dict(filename=PATH, status="added")],
+                                       commit={"tree": {"sha": "6" * 40}})
+        self.merge_parents = [{"sha": RECOVERY_BASE}, {"sha": INTENT_HEAD}]
+        self.merge_tree = "6" * 40
+
+    def __call__(self, path, method="GET", body=None, **kwargs):
+        if method != "GET": return super().__call__(path, method, body, **kwargs)
+        if path == f"/commits/{SHA}?per_page=100":
+            return dict(files=self.files, parents=self.merge_parents,
+                        commit={"tree": {"sha": self.merge_tree}})
+        if path == f"/commits/{INTENT_HEAD}?per_page=100": return self.intent_head_commit
+        if path == f"/commits/{SOURCE_MERGE}?per_page=100":
+            return dict(parents=[{"sha": BASE}, {"sha": REVIEWED}],
+                        commit={"tree": {"sha": "5" * 40}})
+        if path == f"/commits/{GOVERNANCE_HEAD}?per_page=100":
+            return dict(files=self.governance_files)
+        if path == f"/commits/{RECOVERY_BASE}?per_page=100":
+            return dict(parents=[{"sha": SOURCE_MERGE}, {"sha": GOVERNANCE_HEAD}],
+                        files=self.governance_files, commit={"tree": {"sha": "3" * 40}})
+        if path.startswith(f"/compare/{SOURCE_MERGE}...{GOVERNANCE_HEAD}"):
+            commit = dict(sha=GOVERNANCE_HEAD, parents=[{"sha": SOURCE_MERGE}])
+            return comparison(SOURCE_MERGE, GOVERNANCE_HEAD, [commit], self.governance_files)
+        if path.startswith(f"/compare/{SOURCE_MERGE}...{RECOVERY_BASE}"):
+            commits = [dict(sha=GOVERNANCE_HEAD, parents=[{"sha": SOURCE_MERGE}]),
+                       dict(sha=RECOVERY_BASE, parents=[{"sha": SOURCE_MERGE}, {"sha": GOVERNANCE_HEAD}])]
+            return comparison(SOURCE_MERGE, RECOVERY_BASE, commits, self.governance_files)
+        if path == f"/commits/{SHA}/pulls?per_page=100": return [{"number": 5}]
+        if path == "/pulls/4": return self.source_pr
+        if path == "/pulls/5": return self.pr
+        if path == f"/contents/{PATH}?ref={INTENT_HEAD}":
+            return dict(encoding="base64", content=base64.b64encode(json.dumps(self.intent).encode()).decode())
+        if path == f"/contents/{PATH}?ref={SHA}":
+            return dict(encoding="base64", content=base64.b64encode(json.dumps(self.intent).encode()).decode())
+        return super().__call__(path, method, body, **kwargs)
+
+
 class HotfixTests(unittest.TestCase):
     def test_exact_windows_sys_features_for_process_checks_do_not_change_dependency_versions(self):
         api = HotfixFixture()
@@ -314,6 +377,53 @@ class HotfixTests(unittest.TestCase):
         self.assertEqual(authorize(api, api.run), api.intent)
         self.assertEqual(api.writes, [])
 
+    def test_recovery_intent_promotes_from_exact_already_merged_hotfix(self):
+        api = RecoveryFixture()
+        self.assertEqual(promote(api, api.run), 'published')
+        receipt = json.loads(api.assets['release-promotion.json']['data'])
+        self.assertEqual(receipt['intent'], reference.INTENT)
+        self.assertEqual(receipt['source'], SHA)
+        self.assertEqual(len(receipt['files']), 5)
+
+    def test_recovery_intent_branch_flow_admits_only_intent_commit(self):
+        from hotfix_policy import check_branch_flow
+        api = RecoveryFixture()
+        event = dict(pull_request=dict(
+            head=dict(ref='hotfix-intent/2.3.4', sha=INTENT_HEAD,
+                      repo={'full_name': reference.REPO}),
+            base=dict(ref='main', sha=RECOVERY_BASE, repo={'full_name': reference.REPO})))
+        self.assertIn('semantic_review', check_branch_flow(event, api))
+        api.intent_head_commit['files'].append(dict(filename='src/updates.rs', status='modified'))
+        with self.assertRaises(ValueError): check_branch_flow(event, api)
+
+    def test_recovery_authority_rejects_source_and_binding_drift_before_writes(self):
+        for fault in ('source-owner', 'source-head', 'source-tree', 'recovery-base',
+                      'governance-drift', 'intent-patch', 'intent-commit'):
+            with self.subTest(fault=fault):
+                api = RecoveryFixture()
+                if fault == 'source-owner': api.source_pr['merged_by']['id'] = 8
+                if fault == 'source-head': api.source_pr['head']['sha'] = '7' * 40
+                if fault == 'source-tree': api.review_commits[0]['commit']['tree']['sha'] = '7' * 40
+                if fault == 'recovery-base': api.pr['base']['sha'] = '7' * 40
+                if fault == 'governance-drift': api.governance_files[0]['filename'] = 'src/updates.rs'
+                if fault == 'intent-patch': api.intent['patch_sha256'] = '0' * 64
+                if fault == 'intent-commit': api.intent_head_commit['files'].append(
+                    dict(filename='src/updates.rs', status='modified'))
+                with self.assertRaises(ValueError): promote(api, api.run)
+                self.assertEqual(api.writes, [])
+
+    def test_recovery_governance_lane_is_based_on_current_hotfix_and_scope_limited(self):
+        from hotfix_policy import check_branch_flow
+        api = RecoveryFixture()
+        event = dict(pull_request=dict(
+            head=dict(ref='codex/hotfix-recovery-governance', sha=GOVERNANCE_HEAD,
+                      repo={'full_name': reference.REPO}),
+            base=dict(ref='main', sha=SOURCE_MERGE, repo={'full_name': reference.REPO})))
+        self.assertEqual(check_branch_flow(event, api), 'governance-only')
+        api.governance_files[0]['filename'] = 'src/updates.rs'
+        with self.assertRaisesRegex(ValueError, 'Non-governance'): check_branch_flow(event, api)
+
 
 if __name__ == "__main__":
     unittest.main()
+

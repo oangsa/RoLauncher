@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - name: Check development, governance and isolated hotfix branch flow
+      - name: Check development, recovery, governance and isolated hotfix branch flow
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 scripts/branch-flow.py
@@ -149,3 +149,4 @@ jobs:
           path: |
             target/linux-ui-preview/*.png
             target/linux-ui-preview/*.txt
+

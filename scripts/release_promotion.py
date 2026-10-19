@@ -73,7 +73,8 @@ def authorize(call, run):
     path = intents[0]["filename"]
     intent = json.loads(content(call, path, sha), object_pairs_hook=unique_object)
     require(isinstance(intent, dict), "Intent must be a JSON object")
-    hotfix = type(intent.get("schema")) is int and intent["schema"] == 2
+    hotfix = type(intent.get("schema")) is int and intent["schema"] in (2, 3)
+    recovery = type(intent.get("schema")) is int and intent["schema"] == 3
     require((hotfix or (set(intent) == {"schema", "id", "version", "channel"} and type(intent["schema"]) is int
             and intent["schema"] == 1)) and intent["channel"] == "stable", "Invalid release intent contract")
     require(str(UUID(intent["id"], version=4)) == intent["id"]
@@ -87,13 +88,16 @@ def authorize(call, run):
     prs = call(f"/commits/{sha}/pulls?per_page=100")
     require(len(prs) < 100, "Ambiguous PR evidence")
     prs = [call(f'/pulls/{p["number"]}') for p in prs]
+    expected_branch = ("hotfix-intent/" if recovery else "hotfix/") + intent["version"] if hotfix else "dev"
     matches = [p for p in prs if p["merged"] and p["merge_commit_sha"] == sha
                and p["base"]["ref"] == "main" and p["base"]["repo"]["full_name"] == REPO
-               and p["head"]["ref"] == ("hotfix/" + intent["version"] if hotfix else "dev") and p["head"]["repo"]["full_name"] == REPO
+               and p["head"]["ref"] == expected_branch and p["head"]["repo"]["full_name"] == REPO
                and (p.get("merged_by") or {}).get("id") == owner["id"]]
     require(len(matches) == 1, "Owner-authorized release source to main merge required")
     if hotfix:
-        from hotfix_policy import verify_hotfix
+        from hotfix_policy import verify_hotfix, verify_hotfix_recovery
+        if recovery:
+            return verify_hotfix_recovery(call, intent, matches[0], commit, path, sha, content)
         return verify_hotfix(call, intent, matches[0], commit, path, sha, content)
     return intent
 
@@ -268,7 +272,7 @@ def promote(call, run, evidence=None):
     require(notes.startswith(f"# RoLauncher {version}\n") and len(notes.strip()) > 120
             and "Describe the user-visible changes" not in notes, "Release notes mismatch")
     files, artifacts = artifact_files(call, run, version, beta)
-    if intent.get('source') == 'hotfix':
+    if intent.get('source') in ('hotfix', 'hotfix-recovery'):
         from hotfix_policy import verify_source
         verify_source(call, sha, files[f'rolauncher-v{version}-source.zip'])
     receipt = dict(schema=1, intent=intent["id"], channel=intent["channel"], version=version, source=sha,
@@ -460,3 +464,4 @@ def main(channel=None):
 
 if __name__ == "__main__":
     main()
+

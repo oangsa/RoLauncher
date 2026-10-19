@@ -1,7 +1,7 @@
 # Release governance
 
 Status: preparation only; publication hard-disabled pending independent review and owner activation.
-See [Hotfix strategy](HOTFIX-RELEASE-STRATEGY.md) for transition, settings, evidence and owner decisions.
+See [stable hotfix release flow](HOTFIX-RELEASE-STRATEGY.md) for release steps and current hotfix status.
 
 ## Trust boundary
 
@@ -54,6 +54,27 @@ This avoids a self-referencing commit hash while binding approval to the actual 
 Branch flow prints commit IDs, paths and patch hash before intent creation.
 The owner reviews complete blobs/dependencies at those IDs, adds the intent in a separate final commit, and authorizes its merge.
 No executable intent or patch-version metadata exists in this preparation.
+
+## Recovery intent: schema 3
+
+Schema 3 is only for a hotfix source PR already merged by owner `oangsa` without its schema-2 intent. It does not relax schema 2 or admit a patch that was not owner-merged.
+
+| Field | Exact requirement |
+|---|---|
+| `schema`, `source`, `channel` | Integer `3`, `hotfix-recovery`, `stable` |
+| `id` | Fresh canonical UUIDv4; filename matches; never edited or reused |
+| `version` | Plain stable version, exactly published baseline PATCH + 1 |
+| `baseline_tag`, `baseline_sha` | Published stable tag and its resolved commit |
+| `source_pr`, `source_merge_sha` | Original owner-merged hotfix PR number and exact merge commit |
+| `base_sha`, `reviewed_sha` | Original source PR base and reviewed head, not recovery-PR SHAs |
+| `commits`, `paths`, `patch_sha256` | Exact original source report, in order/sorted form and canonical digest |
+| `review` | Same bug, dependency/prerequisite and Premium-exclusion attestations as schema 2 |
+
+The original PR must be official `hotfix/<version>`, owner-merged to `main`, and have merge parents `[base_sha, reviewed_sha]` with the reviewed tree unchanged. Governance history from the stable baseline to `base_sha` and the complete hotfix report are checked again.
+
+The recovery PR branch must be `hotfix-intent/<version>` and start directly at current `main`. If governance support has merged since the original hotfix, every intervening commit from `source_merge_sha` to the recovery PR base must be governance-only. Package and lockfile bytes must match the original hotfix tree. The intent branch has one commit adding only the fresh file; the owner-merged commit must preserve its exact base/head parents and tree. Any application drift, mismatched source PR, changed patch or extra file is rejected.
+
+The recovery implementation itself can enter `main` only through `codex/hotfix-recovery-governance`, based directly on current `main`. Branch flow permits governance paths only and requires Cargo package version to remain the exact next patch over latest stable. This exception does not enable the publisher or satisfy owner-signed live controls.
 
 ## Scope evidence
 
@@ -127,3 +148,4 @@ Historical beta tags retain legacy workflows; restrict new beta tag creation and
 
 The legacy beta library seam remains solely for compatibility tests; its CLI delegates to the protected boundary.
 No workflow calls that library directly or gives it candidate build credentials with write access.
+
