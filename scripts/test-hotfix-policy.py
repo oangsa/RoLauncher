@@ -398,13 +398,14 @@ class HotfixTests(unittest.TestCase):
 
     def test_recovery_authority_rejects_source_and_binding_drift_before_writes(self):
         for fault in ('source-owner', 'source-head', 'source-tree', 'recovery-base',
-                      'intent-patch', 'intent-commit'):
+                      'governance-drift', 'intent-patch', 'intent-commit'):
             with self.subTest(fault=fault):
                 api = RecoveryFixture()
                 if fault == 'source-owner': api.source_pr['merged_by']['id'] = 8
                 if fault == 'source-head': api.source_pr['head']['sha'] = '7' * 40
                 if fault == 'source-tree': api.review_commits[0]['commit']['tree']['sha'] = '7' * 40
                 if fault == 'recovery-base': api.pr['base']['sha'] = '7' * 40
+                if fault == 'governance-drift': api.governance_files[0]['filename'] = 'src/updates.rs'
                 if fault == 'intent-patch': api.intent['patch_sha256'] = '0' * 64
                 if fault == 'intent-commit': api.intent_head_commit['files'].append(
                     dict(filename='src/updates.rs', status='modified'))
