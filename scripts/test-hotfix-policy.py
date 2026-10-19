@@ -92,6 +92,39 @@ class HotfixFixture(reference.GitHubFixture):
 
 
 class HotfixTests(unittest.TestCase):
+    def test_exact_windows_sys_features_for_process_checks_do_not_change_dependency_versions(self):
+        api = HotfixFixture()
+        baseline = '''[package]\nname = "rolauncher"\nversion = "2.3.3"\n\n[target."cfg(windows)".dependencies]\nwindows-sys = { version = "0.61", features = ["Win32_Foundation"] }\n'''
+        reviewed = '''[package]\nname = "rolauncher"\nversion = "2.3.4"\n\n[target."cfg(windows)".dependencies]\nwindows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_RemoteDesktop"] }\n'''
+        original = api.__call__
+        def evidence(path, method='GET', body=None, **kwargs):
+            if path == f'/contents/Cargo.toml?ref={BASE}':
+                return dict(encoding='base64', content=base64.b64encode(baseline.encode()).decode())
+            if path == f'/contents/Cargo.toml?ref={SHA}':
+                return dict(encoding='base64', content=base64.b64encode(reviewed.encode()).decode())
+            return original(path, method, body, **kwargs)
+
+        self.assertEqual(promote(evidence, api.run), 'published')
+
+    def test_other_windows_sys_feature_or_version_changes_still_fail_closed(self):
+        baseline = '''[package]\nname = "rolauncher"\nversion = "2.3.3"\n\n[target."cfg(windows)".dependencies]\nwindows-sys = { version = "0.61", features = ["Win32_Foundation"] }\n'''
+        variants = (
+            '''[package]\nname = "rolauncher"\nversion = "2.3.4"\n\n[target."cfg(windows)".dependencies]\nwindows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Memory"] }\n''',
+            '''[package]\nname = "rolauncher"\nversion = "2.3.4"\n\n[target."cfg(windows)".dependencies]\nwindows-sys = { version = "0.62", features = ["Win32_Foundation"] }\n''',
+        )
+        for reviewed in variants:
+            with self.subTest(reviewed=reviewed):
+                api = HotfixFixture()
+                original = api.__call__
+                def evidence(path, method='GET', body=None, **kwargs):
+                    if path == f'/contents/Cargo.toml?ref={BASE}':
+                        return dict(encoding='base64', content=base64.b64encode(baseline.encode()).decode())
+                    if path == f'/contents/Cargo.toml?ref={SHA}':
+                        return dict(encoding='base64', content=base64.b64encode(reviewed.encode()).decode())
+                    return original(path, method, body, **kwargs)
+                with self.assertRaises(ValueError): promote(evidence, api.run)
+                self.assertEqual(api.writes, [])
+
     def test_net_diff_cannot_hide_experimental_changes_in_an_intermediate_commit(self):
         api = HotfixFixture()
         original = api.__call__
