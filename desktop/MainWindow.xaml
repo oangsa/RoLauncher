@@ -290,7 +290,11 @@
           <Border Style="{StaticResource Card}"><StackPanel Spacing="12">
             <TextBlock Text="Game joining" Style="{StaticResource SectionTitle}"/>
             <ComboBox x:Name="ServerSelector" Header="Server selector" HorizontalAlignment="Stretch" SelectionChanged="GameSettings_Changed"><ComboBoxItem Content="Smart"/><ComboBoxItem Content="Lowest"/><ComboBoxItem Content="Highest"/></ComboBox>
-            <TextBlock Text="Smart balances ping and player count; Lowest / Highest use player count. Region and local latency unavailable. Scans up to 500 servers; Job IDs and private links override." Style="{StaticResource Caption}" TextWrapping="Wrap"/>
+            <TextBlock Text="Smart searches all available pages for low reported ping and enough free slots. Lowest / Highest use player count. Region and local latency unavailable. Searches time out after two minutes; Job IDs and private links override." Style="{StaticResource Caption}" TextWrapping="Wrap"/>
+            <ComboBox x:Name="MultiInstance" Header="Multiple Roblox instances" HorizontalAlignment="Stretch" SelectionChanged="MultiInstance_Changed"><ComboBoxItem Content="On (default)"/><ComboBoxItem Content="Off"/></ComboBox>
+            <TextBlock x:Name="MultiInstanceHint" Text="Changes apply after restarting RoLauncher. Off launches one managed client at a time." Style="{StaticResource Caption}" TextWrapping="Wrap"/>
+            <CheckBox x:Name="ExternalBackgroundCleanup" Content="Automatically close conflicting background Roblox instances" Click="ExternalBackgroundCleanup_Click"/>
+            <TextBlock Text="Windows only. When enabled, RoLauncher may close hidden Roblox processes outside its management that block startup. Visible game windows stay protected. Applies next startup; off by default." Style="{StaticResource Caption}" TextWrapping="Wrap"/>
             <ComboBox x:Name="GameJoinType" Header="Join type" HorizontalAlignment="Stretch" SelectionChanged="GameSettings_Changed"><ComboBoxItem Content="Friend"/><ComboBoxItem Content="Random"/></ComboBox>
             <TextBlock Text="Friend joins managed accounts on the same saved game. Select that game for each account; game access and free slots required. Managed peers can report their own server when friend presence is hidden. Random joins independently. Saved for future launches and rejoins." Style="{StaticResource Caption}" TextWrapping="Wrap"/>
           </StackPanel></Border>

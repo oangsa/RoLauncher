@@ -33,6 +33,9 @@ static LAUNCH_EXITS: LazyLock<Mutex<HashMap<String, bool>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 pub struct ExitWatch(String);
 impl ExitWatch {
+    pub fn alive(&self, identity: &ProcessIdentity) -> Result<bool, String> {
+        alive(identity)
+    }
     pub fn new(identity: &ProcessIdentity) -> Option<Self> {
         Some(Self(identity.tracker.clone()))
     }

@@ -17,12 +17,15 @@ use std::{
 use tokio::sync::{Notify, broadcast};
 use uuid::Uuid;
 
+#[cfg(test)]
+mod import_tests;
 mod management;
 mod server_selection;
 pub use management::{BulkPatch, ProfileSave};
 
 #[derive(Clone)]
 struct State {
+    active_multi_instance: bool,
     database: Database,
     operations: BTreeMap<Uuid, Operation>,
     network_suspended: bool,
@@ -42,22 +45,197 @@ struct Inner {
 }
 #[derive(Clone)]
 pub struct Engine(Arc<Inner>);
+#[cfg(windows)]
+type MemoryProbe = (
+    ProcessIdentity,
+    Option<platform::MemoryLogReader>,
+    Option<(chrono::DateTime<Utc>, Signal)>,
+);
 
 const OWNERSHIP_TIMEOUT_ERROR: &str = "Launch tracker has no verified instance. Recovery paused; use Stop, then Start after checking the client";
 const CLOSE_BLOCKED_PREFIX: &str = "Managed client close blocked: ";
 const REJOIN_DISABLED: &str = "Automatic rejoin disabled; use Start to launch manually";
 #[cfg(windows)]
-const LAUNCH_COORDINATION_ERROR: &str = "Roblox launch coordination is not ready. Close existing Roblox clients yourself, wait a moment, then try Start again. If this persists, check Support and integrations for the coordination error";
+const LAUNCH_COORDINATION_ERROR: &str = "Roblox launch coordination is not ready. Background clients are checked on startup; close any visible client and retry Start. Check Support and integrations if this persists";
 #[cfg(not(windows))]
 const LAUNCH_COORDINATION_ERROR: &str = "Multi-instance initialization failed. Check Support and integrations, resolve the reported issue, then restart RoLauncher";
 
-fn recovery_due(account: &Account, now: chrono::DateTime<Utc>) -> bool {
+fn recovery_due(account: &Account, _now: chrono::DateTime<Utc>) -> bool {
     account.desired_running
         && account.auto_recovery
         && account.status == Status::Reconnecting
-        && account
-            .disconnected_since
-            .is_some_and(|t| now - t >= ChronoDuration::seconds(30))
+        && account.recovery_evidence == RecoveryEvidence::ConfirmedTerminalDisconnect
+}
+
+#[derive(Clone, Copy)]
+enum Observation {
+    DiskLog(crate::logs::LogEvent),
+    #[cfg(any(windows, test))]
+    UnverifiedMemory(Signal),
+}
+
+fn apply_observation(account: &mut Account, observation: Observation) {
+    if !account.desired_running || account.status == Status::NeedsAttention {
+        return;
+    }
+    let (signal, confirmed) = match observation {
+        #[cfg(any(windows, test))]
+        Observation::UnverifiedMemory(signal) => {
+            if signal != Signal::Connected
+                && !matches!(
+                    account.recovery_evidence,
+                    RecoveryEvidence::ConfirmedTerminalDisconnect
+                        | RecoveryEvidence::RecoveryStarted
+                )
+            {
+                account.recovery_evidence = RecoveryEvidence::SuspectedDisconnect;
+                account.last_error = Some("Unverified RAM disconnect candidate; waiting for owned disk-log or process-exit evidence".into());
+            }
+            return;
+        }
+        Observation::DiskLog(event) => (event.signal, event.confirmed_terminal),
+    };
+    let blocked = match signal {
+        Signal::PermissionDenied | Signal::SessionLost(Some(267 | 524 | 533 | 600 | 773)) => {
+            Some(Failure::new(
+                FailureKind::Permission,
+                "Game denied access; check permissions or bans before restarting",
+            ))
+        }
+        Signal::ClientUpdateRequired => Some(Failure::new(
+            FailureKind::Unsupported,
+            "Roblox is out of date (280); update Roblox, then use Start",
+        )),
+        Signal::SessionLost(Some(268)) => Some(Failure::new(
+            FailureKind::Unsupported,
+            "Roblox rejected client behavior (268); check the client before restarting",
+        )),
+        _ => None,
+    };
+    if let Some(error) = blocked {
+        account.recovery_evidence = RecoveryEvidence::Unavailable;
+        apply_failure(account, &error);
+        return;
+    }
+    if signal == Signal::Connected {
+        let rate_limited = account.recovery_reason == "RateLimit"
+            && account.next_retry.is_some_and(|time| time > Utc::now());
+        account.status = Status::Running;
+        account.connected_since.get_or_insert_with(Utc::now);
+        account.disconnected_since = None;
+        account.last_error = None;
+        if !rate_limited {
+            account.next_retry = None;
+            account.recovery_reason.clear();
+        }
+        account.recovery_evidence = RecoveryEvidence::Unavailable;
+        return;
+    }
+    if !confirmed {
+        if !matches!(
+            account.recovery_evidence,
+            RecoveryEvidence::ConfirmedTerminalDisconnect | RecoveryEvidence::RecoveryStarted
+        ) {
+            account.recovery_evidence = RecoveryEvidence::SuspectedDisconnect;
+            account.last_error = Some("Unconfirmed connection event; automatic replacement waits for independent evidence".into());
+        }
+        return;
+    }
+    if account.recovery_evidence == RecoveryEvidence::RecoveryStarted {
+        return;
+    }
+    if signal == Signal::TargetUnavailable {
+        apply_failure(
+            account,
+            &Failure::new(
+                FailureKind::TargetUnavailable,
+                "Configured destination unavailable; applying the account fallback policy",
+            ),
+        );
+        account.recovery_evidence = if account.status == Status::Backoff {
+            RecoveryEvidence::RecoveryStarted
+        } else {
+            RecoveryEvidence::Unavailable
+        };
+        return;
+    }
+    account.recovery_evidence = RecoveryEvidence::ConfirmedTerminalDisconnect;
+    account.status = Status::Reconnecting;
+    account.disconnected_since.get_or_insert_with(Utc::now);
+    account.connected_since = None;
+    if !(account.recovery_reason == "RateLimit"
+        && account.next_retry.is_some_and(|time| time > Utc::now()))
+    {
+        account.recovery_reason = match signal {
+            Signal::ConnectionFailed => "ConnectionFailed",
+            Signal::SessionLost(_) => "SessionLost",
+            _ => "ConfirmedTerminalDisconnect",
+        }
+        .into();
+    }
+    account.last_error = Some(match signal {
+        Signal::ConnectionFailed => {
+            "Connection failed: server did not respond (279); controlled recovery requested".into()
+        }
+        Signal::SessionLost(Some(code)) => {
+            format!("Session lost (code {code}); controlled recovery requested")
+        }
+        Signal::SessionLost(None) => "Session lost; controlled recovery requested".into(),
+        _ => "Confirmed connection lost; controlled recovery requested".into(),
+    });
+}
+
+fn launch_ready(account: &Account, now: chrono::DateTime<Utc>) -> bool {
+    account.desired_running
+        && account.process.is_none()
+        && account.tracker.is_none()
+        && matches!(account.status, Status::Queued | Status::Backoff)
+        && account.next_retry.is_none_or(|time| time <= now)
+}
+
+fn close_authorized(account: &Account) -> bool {
+    !account.desired_running
+        || account.status == Status::Queued
+        || account.auto_recovery
+            && account.recovery_process.is_some()
+            && account.recovery_process == account.process
+            && account.recovery_evidence == RecoveryEvidence::RecoveryStarted
+}
+fn log_unavailable(account: &mut Account) {
+    // A transient read failure must not erase an already confirmed disconnect.
+    if account.status == Status::Reconnecting
+        || account.status == Status::NeedsAttention
+        || account.recovery_evidence == RecoveryEvidence::RecoveryStarted
+    {
+        return;
+    }
+    account.status = Status::Unknown;
+    account.connected_since = None;
+    account.last_error =
+        Some("Log unavailable; retrying verified log discovery and read-only monitoring".into());
+}
+fn process_unavailable(account: &mut Account) {
+    // Inaccessibility supplies no new evidence and cannot reset a terminal/attention decision.
+    if account.status == Status::NeedsAttention
+        || matches!(
+            account.recovery_evidence,
+            RecoveryEvidence::ConfirmedTerminalDisconnect | RecoveryEvidence::RecoveryStarted
+        )
+    {
+        return;
+    }
+    account.status = Status::Unknown;
+    account.last_error =
+        Some("Process metadata inaccessible; automatic replacement is disabled".into());
+}
+async fn completed_task<T>(
+    task: &mut Option<tokio::task::JoinHandle<T>>,
+) -> Option<Result<T, tokio::task::JoinError>> {
+    if task.as_ref().is_some_and(|task| task.is_finished()) {
+        Some(task.take().unwrap().await)
+    } else {
+        None
+    }
 }
 
 fn resume_after_confirmed_close(account: &mut Account) {
@@ -90,6 +268,8 @@ fn resume_after_confirmed_close(account: &mut Account) {
 
 fn attach_verified_player(account: &mut Account, identity: ProcessIdentity) {
     account.process = Some(identity);
+    account.recovery_evidence = RecoveryEvidence::Unavailable;
+    account.recovery_process = None;
     // A late exact match resolves only the ownership-timeout pause, not auth or other failures.
     let ownership_resolved = account.last_error.as_deref() == Some(OWNERSHIP_TIMEOUT_ERROR);
     if account.desired_running && (account.status != Status::NeedsAttention || ownership_resolved) {
@@ -121,6 +301,7 @@ impl Engine {
         launch_allowed: Arc<AtomicBool>,
     ) -> Result<Self, String> {
         let mut database = store.load()?;
+        let active_multi_instance = database.multi_instance_enabled;
         let token = if database.encrypted_api_token.is_empty() {
             let token = zeroize::Zeroizing::new(format!(
                 "{}{}",
@@ -159,6 +340,7 @@ impl Engine {
         }
         Ok(Self(Arc::new(Inner {
             state: Mutex::new(State {
+                active_multi_instance,
                 database,
                 operations: BTreeMap::new(),
                 network_suspended: false,
@@ -202,6 +384,18 @@ impl Engine {
     pub fn set_launch_allowed(&self, allowed: bool) {
         self.0.launch_allowed.store(allowed, Ordering::Release);
     }
+    pub fn set_multi_instance(&self, enabled: bool) -> Result<(), String> {
+        self.transaction(|s| {
+            s.database.multi_instance_enabled = enabled;
+            Ok(())
+        })
+    }
+    pub fn set_external_background_cleanup(&self, enabled: bool) -> Result<(), String> {
+        self.transaction(|s| {
+            s.database.external_background_cleanup_enabled = enabled;
+            Ok(())
+        })
+    }
     fn transaction<T>(
         &self,
         edit: impl FnOnce(&mut State) -> Result<T, String>,
@@ -221,15 +415,8 @@ impl Engine {
             let a = &mut saved.account;
             a.track_run(now);
             if a.status == Status::Reconnecting && a.desired_running {
-                let known_error = a.last_error.as_deref().is_some_and(|e| {
-                    e.starts_with("Session lost (code") || e.starts_with("Connection failed:")
-                });
-                if known_error
-                    || a.disconnected_since
-                        .is_some_and(|t| Utc::now() - t >= ChronoDuration::seconds(30))
-                {
-                    a.disconnect_notified = true;
-                }
+                a.disconnect_notified =
+                    a.recovery_evidence == RecoveryEvidence::ConfirmedTerminalDisconnect;
             } else {
                 a.disconnect_notified = false;
             }
@@ -422,6 +609,35 @@ impl Engine {
     pub async fn import(&self, value: &str) -> Result<Account, String> {
         self.import_for(value, None).await
     }
+    pub async fn import_batch(&self, values: &mut [String]) -> Vec<Result<Account, String>> {
+        use futures_util::StreamExt;
+        use zeroize::Zeroize;
+        let cookies: Vec<_> = values
+            .iter_mut()
+            .map(|value| {
+                let cookie = normalize_cookie(value);
+                value.zeroize();
+                cookie
+            })
+            .collect();
+        let mut sessions = futures_util::stream::iter(cookies)
+            .map(|cookie| async move {
+                let cookie = cookie?;
+                let user = self.0.roblox.user(&cookie).await.map_err(|e| e.message)?;
+                Ok((user, cookie))
+            })
+            .buffered(4);
+        let mut results = Vec::new();
+        // Validate up to four sessions concurrently, but save in submitted order.
+        while let Some(session) = sessions.next().await {
+            results.push(
+                session.and_then(|(user, cookie)| {
+                    self.save_authenticated_session(user, &cookie, None)
+                }),
+            );
+        }
+        results
+    }
     pub async fn import_for(&self, value: &str, expected: Option<&str>) -> Result<Account, String> {
         let cookie = normalize_cookie(value)?;
         let user = self.0.roblox.user(&cookie).await.map_err(|e| e.message)?;
@@ -535,7 +751,7 @@ impl Engine {
             }
             let a = account_mut(s,id)?; a.finish_run(Utc::now()); a.desired_running = action != "stop";
             if a.process.is_none() { a.tracker=None;a.ownership_deadline=None; }
-            a.generation = Uuid::new_v4(); a.failures = 0; a.next_retry = None; a.connected_since = None; a.disconnected_since = None; a.last_error = None;
+            a.generation = Uuid::new_v4(); a.failures = 0; a.next_retry = None; a.connected_since = None; a.disconnected_since = None; a.last_error = None; a.recovery_evidence = RecoveryEvidence::Unavailable; a.recovery_process = None;
             a.status = if action == "stop" { Status::Stopped } else { Status::Queued };
             a.public_fallback_active = false; a.recovery_reason.clear(); a.operation_id = Some(op.id);
             s.operations.insert(op.id,op.clone()); Ok(op)
@@ -627,13 +843,15 @@ impl Engine {
                     continue;
                 }
             }
-            let next = self.snapshot().accounts.into_iter().find(|a| {
-                a.desired_running
-                    && a.process.is_none()
-                    && a.tracker.is_none()
-                    && matches!(a.status, Status::Queued | Status::Backoff)
-                    && a.next_retry.is_none_or(|t| t <= Utc::now())
-            });
+            if !self.0.launch_allowed.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+            let next = self
+                .snapshot()
+                .accounts
+                .into_iter()
+                .find(|a| launch_ready(a, Utc::now()));
             if let Some(account) = next {
                 tokio::time::sleep_until(next_launch.into()).await;
                 if self.is_shutdown() {
@@ -644,12 +862,8 @@ impl Engine {
                     .accounts
                     .into_iter()
                     .find(|a| a.id == account.id);
-                let current = current.filter(|a| {
-                    a.generation == account.generation
-                        && a.desired_running
-                        && matches!(a.status, Status::Queued | Status::Backoff)
-                        && a.next_retry.is_none_or(|t| t <= Utc::now())
-                });
+                let current = current
+                    .filter(|a| a.generation == account.generation && launch_ready(a, Utc::now()));
                 let Some(current) = current else {
                     continue;
                 };
@@ -661,6 +875,23 @@ impl Engine {
         }
     }
     async fn launch_one(&self, account: Account) {
+        if !self.snapshot().active_multi_instance
+            && self
+                .snapshot()
+                .accounts
+                .iter()
+                .any(|a| a.id != account.id && (a.process.is_some() || a.tracker.is_some()))
+        {
+            let _ = self.update(&account.id, account.generation, |a| {
+                a.status = Status::Queued;
+                a.next_retry = Some(Utc::now() + ChronoDuration::seconds(5));
+                a.last_error = Some(
+                    "Multiple instances disabled; waiting for the other managed client to close"
+                        .into(),
+                );
+            });
+            return;
+        }
         if !self.0.launch_allowed.load(Ordering::Acquire) {
             self.failure(
                 &account.id,
@@ -734,7 +965,7 @@ impl Engine {
             return;
         }
         let target = match tokio::time::timeout(
-            Duration::from_secs(30),
+            Duration::from_secs(120),
             self.select_launch_target(&account, target, &cookie),
         )
         .await
@@ -761,8 +992,8 @@ impl Engine {
                 let error = match result {
                     Ok(Err(error)) => error,
                     _ => Failure::new(
-                        FailureKind::Network,
-                        "Server selection timed out; retrying when Roblox is reachable",
+                        FailureKind::Other,
+                        "Server search exceeded two minutes; scheduling another attempt",
                     ),
                 };
                 self.failure(&account.id, account.generation, error);
@@ -784,7 +1015,12 @@ impl Engine {
             let Ok(a) = account_mut(&mut next, &account.id) else {
                 return;
             };
-            if a.generation != account.generation || !a.desired_running || self.is_shutdown() {
+            if a.generation != account.generation
+                || !a.desired_running
+                || a.process.is_some()
+                || a.tracker.is_some()
+                || self.is_shutdown()
+            {
                 return;
             }
             if account.status == Status::Backoff && !a.auto_recovery {
@@ -822,6 +1058,18 @@ impl Engine {
         let mut last_log_discovery = Instant::now() - Duration::from_secs(30);
         let mut close_attempts: HashMap<(u32, String), Instant> = HashMap::new();
         let mut exit_watches: HashMap<(u32, String), platform::ExitWatch> = HashMap::new();
+        let mut discovery = None;
+        let mut log_discovery = None;
+        #[cfg(windows)]
+        let mut memory_task: Option<tokio::task::JoinHandle<MemoryProbe>> = None;
+        #[cfg(windows)]
+        let mut memory_readers = HashMap::new();
+        #[cfg(windows)]
+        let mut memory_attempts = HashMap::<(u32, String), Instant>::new();
+        #[cfg(windows)]
+        let mut log_progress = HashMap::<(u32, String), (u64, Instant)>::new();
+        #[cfg(windows)]
+        let memory_epoch = Instant::now();
         while !self.is_shutdown() {
             let retired = self
                 .0
@@ -831,63 +1079,67 @@ impl Engine {
                 .database
                 .retired_launches
                 .clone();
-            if last_discovery.elapsed() >= Duration::from_secs(5)
-                && (self.snapshot().accounts.iter().any(|a| a.tracker.is_some())
+            if discovery.is_none()
+                && last_discovery.elapsed() >= Duration::from_secs(5)
+                && (self
+                    .snapshot()
+                    .accounts
+                    .iter()
+                    .any(|a| a.process.is_none() && a.tracker.is_some())
                     || !retired.is_empty())
             {
-                let result = tokio::task::spawn_blocking(platform::players).await;
-                if let Ok(Ok(players)) = result {
-                    for old in &retired {
-                        for player in players.iter().filter(|p| p.tracker == old.tracker) {
-                            let identity = player.identity(old.generation);
-                            let key = (identity.pid, identity.creation_time.clone());
-                            let started = *close_attempts.entry(key).or_insert_with(Instant::now);
-                            let _ = platform::close(
-                                &identity,
-                                started.elapsed() >= Duration::from_secs(5),
-                            );
-                        }
+                discovery = Some(tokio::task::spawn_blocking(platform::players));
+                last_discovery = Instant::now();
+            }
+            if let Some(Ok(Ok(players))) = completed_task(&mut discovery).await {
+                for old in &retired {
+                    for player in players.iter().filter(|p| p.tracker == old.tracker) {
+                        let identity = player.identity(old.generation);
+                        let key = (identity.pid, identity.creation_time.clone());
+                        let started = *close_attempts.entry(key).or_insert_with(Instant::now);
+                        let _ =
+                            platform::close(&identity, started.elapsed() >= Duration::from_secs(5));
                     }
-                    for account in self.snapshot().accounts {
-                        if account.process.is_some() || account.tracker.is_none() {
-                            continue;
-                        }
-                        let matches: Vec<_> = players
-                            .iter()
-                            .filter(|p| Some(&p.tracker) == account.tracker.as_ref())
-                            .collect();
-                        if matches.len() == 1 {
-                            let identity = matches[0].identity(account.generation);
-                            let _ = self.update(&account.id, account.generation, |a| {
-                                attach_verified_player(a, identity)
-                            });
-                            // Discover its log now; an empty scan during startup
-                            // must not leave a newly verified player waiting 30s.
-                            last_log_discovery = Instant::now() - Duration::from_secs(30);
-                        } else if matches.len() > 1 {
-                            let _=self.update(&account.id,account.generation,|a| { a.status=Status::NeedsAttention;a.last_error=Some("Multiple primary instances share this launch tracker; ownership is ambiguous".into()); });
-                        } else if account.desired_running
-                            && account.process.is_none()
-                            && account.status != Status::NeedsAttention
-                            && account.ownership_deadline.is_none_or(|t| t <= Utc::now())
-                        {
-                            let _ = self.update(&account.id, account.generation, |a| {
-                                a.status = Status::NeedsAttention;
-                                a.last_error = Some(OWNERSHIP_TIMEOUT_ERROR.into());
-                            });
-                            self.finish_operation(
-                                &account.id,
-                                account.generation,
-                                Some("Launch ownership could not be verified".into()),
-                            );
-                        } else if !account.desired_running && account.process.is_none() {
-                            // Stopped processes are handled below; late launches use durable tombstones.
-                        }
+                }
+                for account in self.snapshot().accounts {
+                    if account.process.is_some() || account.tracker.is_none() {
+                        continue;
+                    }
+                    let matches: Vec<_> = players
+                        .iter()
+                        .filter(|p| Some(&p.tracker) == account.tracker.as_ref())
+                        .collect();
+                    if matches.len() == 1 {
+                        let identity = matches[0].identity(account.generation);
+                        let _ = self.update(&account.id, account.generation, |a| {
+                            attach_verified_player(a, identity)
+                        });
+                        // Discover its log now; an empty scan during startup
+                        // must not leave a newly verified player waiting 30s.
+                        last_log_discovery = Instant::now() - Duration::from_secs(30);
+                    } else if matches.len() > 1 {
+                        let _=self.update(&account.id,account.generation,|a| { a.status=Status::NeedsAttention;a.last_error=Some("Multiple primary instances share this launch tracker; ownership is ambiguous".into()); });
+                    } else if account.desired_running
+                        && account.process.is_none()
+                        && account.status != Status::NeedsAttention
+                        && account.ownership_deadline.is_none_or(|t| t <= Utc::now())
+                    {
+                        let _ = self.update(&account.id, account.generation, |a| {
+                            a.status = Status::NeedsAttention;
+                            a.last_error = Some(OWNERSHIP_TIMEOUT_ERROR.into());
+                        });
+                        self.finish_operation(
+                            &account.id,
+                            account.generation,
+                            Some("Launch ownership could not be verified".into()),
+                        );
+                    } else if !account.desired_running && account.process.is_none() {
+                        // Stopped processes are handled below; late launches use durable tombstones.
                     }
                 }
                 last_discovery = Instant::now();
             }
-            if last_log_discovery.elapsed() >= Duration::from_secs(30) {
+            if log_discovery.is_none() && last_log_discovery.elapsed() >= Duration::from_secs(30) {
                 let identities: Vec<_> = self
                     .snapshot()
                     .accounts
@@ -895,19 +1147,38 @@ impl Engine {
                     .filter_map(|a| a.process.clone())
                     .filter(|p| !tails.contains_key(&(p.pid, p.creation_time.clone())))
                     .collect();
-                if !identities.is_empty()
-                    && let Ok(Ok(logs)) =
-                        tokio::task::spawn_blocking(move || platform::owned_logs(&identities)).await
-                {
-                    for (key, path) in logs {
-                        if let Ok(tail) = crate::logs::Tail::new(path, false) {
-                            tails.insert(key, tail);
-                        }
-                    }
+                if !identities.is_empty() {
+                    log_discovery = Some(tokio::task::spawn_blocking(move || {
+                        platform::owned_logs(&identities)
+                    }));
                 }
                 last_log_discovery = Instant::now();
             }
-            for account in self.snapshot().accounts {
+            if let Some(Ok(Ok(logs))) = completed_task(&mut log_discovery).await {
+                for (key, path) in logs {
+                    if let Ok(tail) = crate::logs::Tail::new(path, false) {
+                        tails.insert(key, tail);
+                    }
+                }
+            }
+            let accounts = self.snapshot().accounts;
+            let active: std::collections::HashSet<_> = accounts
+                .iter()
+                .filter_map(|a| a.process.as_ref())
+                .map(|p| (p.pid, p.creation_time.clone()))
+                .collect();
+            tails.retain(|key, _| active.contains(key));
+            exit_watches.retain(|key, _| active.contains(key));
+            close_attempts.retain(|key, started| {
+                active.contains(key) || started.elapsed() < Duration::from_secs(300)
+            });
+            #[cfg(windows)]
+            {
+                memory_readers.retain(|key, _| active.contains(key));
+                memory_attempts.retain(|key, _| active.contains(key));
+                log_progress.retain(|key, _| active.contains(key));
+            }
+            for account in accounts {
                 let Some(identity) = account.process.clone() else {
                     continue;
                 };
@@ -921,42 +1192,17 @@ impl Engine {
                 {
                     close_attempts.remove(&key);
                 }
-                match platform::alive(&identity) {
+                let alive = exit_watches.get(&key).map_or_else(
+                    || platform::alive(&identity),
+                    |watch| watch.alive(&identity),
+                );
+                match alive {
                     Ok(false) => {
                         let clean =
                             exit_watches.remove(&key).and_then(|w| w.clean_exit()) == Some(true);
                         tails.remove(&key);
                         close_attempts.remove(&key);
-                        let _ = self.update(&account.id, account.generation, |a| {
-                            a.process = None;
-                            a.tracker = None;
-                            a.ownership_deadline = None;
-                            a.connected_since = None;
-                            a.disconnected_since = None;
-                            resume_after_confirmed_close(a);
-                            if a.desired_running
-                                && a.auto_recovery
-                                && !matches!(
-                                    a.status,
-                                    Status::NeedsAttention | Status::Queued | Status::Backoff
-                                )
-                            {
-                                apply_failure(
-                                    a,
-                                    &Failure::new(
-                                        FailureKind::Other,
-                                        "Managed client exited; scheduling recovery",
-                                    ),
-                                );
-                            } else if !a.desired_running || !a.auto_recovery {
-                                a.desired_running = false;
-                                a.status = Status::Stopped;
-                            }
-                            if clean && !account.disconnect_notified {
-                                a.last_error = Some("Client closed normally".into());
-                                a.recovery_reason = "NormalExit".into();
-                            }
-                        });
+                        self.confirmed_exit(&account.id, account.generation, &identity, clean);
                         if !account.desired_running {
                             self.finish_operation(&account.id, account.generation, None);
                         }
@@ -964,7 +1210,8 @@ impl Engine {
                     }
                     Err(_) => {
                         if account.desired_running && account.status != Status::Unknown {
-                            let _=self.update(&account.id,account.generation,|a| { a.status=Status::Unknown;a.last_error=Some("Process metadata inaccessible; automatic replacement is disabled".into()); });
+                            let _ =
+                                self.update(&account.id, account.generation, process_unavailable);
                         }
                         continue;
                     }
@@ -972,44 +1219,50 @@ impl Engine {
                 }
                 if account.desired_running
                     && account.status != Status::Queued
-                    && !close_attempts.contains_key(&key)
-                    && !(account.recovery_reason == "TargetUnavailable"
-                        && account.status == Status::Backoff)
                     && let Some(tail) = tails.get_mut(&key)
                 {
-                    match tail.read() {
+                    match tail.read_events() {
                         Ok(signals) => {
-                            for signal in signals {
-                                self.signal(&account.id, account.generation, signal);
+                            #[cfg(windows)]
+                            {
+                                let progress = log_progress
+                                    .entry(key.clone())
+                                    .or_insert((tail.offset, Instant::now()));
+                                if progress.0 != tail.offset {
+                                    *progress = (tail.offset, Instant::now());
+                                }
+                            }
+                            for event in signals {
+                                self.observe(
+                                    &account.id,
+                                    account.generation,
+                                    &identity,
+                                    Observation::DiskLog(event),
+                                );
                             }
                         }
                         Err(_) => {
                             tails.remove(&key);
-                            let _ = self.update(&account.id, account.generation, |a| {
-                                a.status = Status::Unknown;
-                                a.connected_since = None;
-                                a.disconnected_since = None;
-                                a.last_error =
-                                    Some("Log unavailable; disconnect monitoring disabled".into());
-                            });
+                            let _ = self.update(&account.id, account.generation, log_unavailable);
                         }
                     }
                 }
-                // Read fresh reconnect/disconnect events before deciding to replace a client.
-                if !account.disconnect_notified
-                    && account.status == Status::Reconnecting
-                    && account
-                        .disconnected_since
-                        .is_some_and(|t| Utc::now() - t >= ChronoDuration::seconds(30))
-                {
-                    self.0.discord.prepare_capture(&identity).await;
-                    let _ = self.update(&account.id, account.generation, |_| {});
-                }
-                let Some(account) = self.snapshot().accounts.into_iter().find(|a| {
-                    a.id == account.id
-                        && a.generation == account.generation
-                        && a.process.as_ref() == Some(&identity)
-                }) else {
+                let Some(account) = self
+                    .0
+                    .state
+                    .lock()
+                    .unwrap()
+                    .database
+                    .accounts
+                    .iter()
+                    .map(|s| &s.account)
+                    .find(|a| {
+                        a.id == account.id
+                            && a.generation == account.generation
+                            && a.process.as_ref() == Some(&identity)
+                    })
+                    .cloned()
+                else {
                     continue;
                 };
                 let recovering = recovery_due(&account, Utc::now());
@@ -1020,21 +1273,33 @@ impl Engine {
                     || account.recovery_reason == "TargetUnavailable"
                         && account.status == Status::Backoff;
                 if should_close {
-                    if recovering && !close_attempts.contains_key(&key) {
-                        self.failure(
-                            &account.id,
-                            account.generation,
-                            Failure::new(
-                                FailureKind::Other,
-                                "Disconnected for more than 30 seconds; scheduling recovery",
-                            ),
-                        );
+                    if account.status == Status::NeedsAttention
+                        && account
+                            .last_error
+                            .as_deref()
+                            .is_some_and(|error| error.starts_with(CLOSE_BLOCKED_PREFIX))
+                    {
+                        close_attempts.remove(&key);
+                        continue;
                     }
-                    let started = *close_attempts
-                        .entry(key.clone())
-                        .or_insert_with(Instant::now);
-                    let force = started.elapsed() >= Duration::from_secs(5);
-                    if let Err(e) = platform::close(&identity, force) {
+                    let force = close_attempts
+                        .get(&key)
+                        .is_some_and(|started| started.elapsed() >= Duration::from_secs(5));
+                    let closed = self.close_managed_with(
+                        &account.id,
+                        account.generation,
+                        &identity,
+                        force,
+                        platform::close,
+                    );
+                    if matches!(closed, Ok(true)) {
+                        close_attempts
+                            .entry(key.clone())
+                            .or_insert_with(Instant::now);
+                    } else {
+                        close_attempts.remove(&key);
+                    }
+                    if let Err(e) = closed {
                         // Recheck the exact identity: it may have exited while close was in flight.
                         if matches!(platform::alive(&identity), Ok(false)) {
                             continue;
@@ -1054,68 +1319,279 @@ impl Engine {
                     let _ = self.update(&account.id, account.generation, |a| a.failures = 0);
                 }
             }
+            #[cfg(windows)]
+            {
+                if let Some(Ok((identity, reader, event))) = completed_task(&mut memory_task).await
+                {
+                    let key = (identity.pid, identity.creation_time.clone());
+                    let current = self.snapshot().accounts.into_iter().find(|a| {
+                        a.generation == identity.generation
+                            && a.process.as_ref() == Some(&identity)
+                            && a.desired_running
+                            && matches!(
+                                a.status,
+                                Status::Unknown | Status::Running | Status::Reconnecting
+                            )
+                    });
+                    if let Some(account) = current {
+                        if let Some(reader) = reader {
+                            memory_readers.insert(key.clone(), reader);
+                        }
+                        if let Some((time, signal)) = event
+                            && time >= Utc::now() - ChronoDuration::seconds(15)
+                            && time <= Utc::now()
+                            && tails
+                                .get(&key)
+                                .and_then(|tail| tail.last_signal_time)
+                                .is_none_or(|disk| time > disk)
+                        {
+                            self.observe(
+                                &account.id,
+                                account.generation,
+                                &identity,
+                                Observation::UnverifiedMemory(signal),
+                            );
+                        }
+                    }
+                }
+                if memory_task.is_none() {
+                    let candidate = self
+                        .snapshot()
+                        .accounts
+                        .into_iter()
+                        .filter(|a| {
+                            a.desired_running
+                                && matches!(
+                                    a.status,
+                                    Status::Unknown | Status::Running | Status::Reconnecting
+                                )
+                        })
+                        .filter_map(|a| a.process)
+                        .filter(|id| {
+                            let key = (id.pid, id.creation_time.clone());
+                            let quiet = log_progress
+                                .get(&key)
+                                .map_or(memory_epoch, |(_, time)| *time)
+                                .elapsed()
+                                >= Duration::from_secs(15);
+                            quiet
+                                && memory_attempts
+                                    .get(&key)
+                                    .map_or(memory_epoch, |time| *time)
+                                    .elapsed()
+                                    >= Duration::from_secs(30)
+                        })
+                        .min_by_key(|id| {
+                            memory_attempts
+                                .get(&(id.pid, id.creation_time.clone()))
+                                .copied()
+                                .unwrap_or(memory_epoch)
+                        });
+                    if let Some(identity) = candidate {
+                        let key = (identity.pid, identity.creation_time.clone());
+                        memory_attempts.insert(key.clone(), Instant::now());
+                        let reader = memory_readers.remove(&key);
+                        let disk_time = tails.get(&key).and_then(|tail| tail.last_signal_time);
+                        memory_task = Some(tokio::task::spawn_blocking(move || {
+                            let mut reader =
+                                reader.or_else(|| platform::MemoryLogReader::new(&identity));
+                            let event = reader.as_mut().and_then(|reader| reader.read(disk_time));
+                            (identity, reader, event)
+                        }));
+                    }
+                }
+            }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }
+    fn observe(
+        &self,
+        id: &str,
+        generation: Uuid,
+        identity: &ProcessIdentity,
+        observation: Observation,
+    ) {
+        let accepted = self
+            .transaction(|state| {
+                let account = account_mut(state, id)?;
+                if account.generation != generation
+                    || identity.generation != generation
+                    || account.process.as_ref() != Some(identity)
+                    || !account.desired_running
+                {
+                    return Ok(false);
+                }
+                if account.recovery_process.as_ref() != Some(identity) {
+                    account.recovery_evidence = RecoveryEvidence::Unavailable;
+                    account.recovery_process = None;
+                }
+                apply_observation(account, observation);
+                account.recovery_process = (account.recovery_evidence
+                    != RecoveryEvidence::Unavailable)
+                    .then(|| identity.clone());
+                let connected = matches!(
+                    observation,
+                    Observation::DiskLog(crate::logs::LogEvent {
+                        signal: Signal::Connected,
+                        ..
+                    })
+                ) && account.status == Status::Running;
+                let paused = account.status == Status::NeedsAttention;
+                let operation = account.operation_id;
+                let error = account.last_error.clone();
+                if paused && let Some(op) = operation.and_then(|id| state.operations.get_mut(&id)) {
+                    op.state = "failed".into();
+                    op.error = error;
+                }
+                Ok(connected)
+            })
+            .unwrap_or(false);
+        if accepted {
+            self.finish_operation(id, generation, None);
+        }
+    }
+
+    fn confirmed_exit(&self, id: &str, generation: Uuid, identity: &ProcessIdentity, clean: bool) {
+        let _ = self.update(id, generation, |account| {
+            if account.process.as_ref() != Some(identity) {
+                return;
+            }
+            let ordinary_exit = account.recovery_evidence != RecoveryEvidence::RecoveryStarted
+                && account.status != Status::NeedsAttention
+                && !account.disconnect_notified;
+            account.process = None;
+            account.tracker = None;
+            account.ownership_deadline = None;
+            account.connected_since = None;
+            account.disconnected_since = None;
+            account.recovery_evidence = RecoveryEvidence::Unavailable;
+            account.recovery_process = None;
+            resume_after_confirmed_close(account);
+            if account.desired_running
+                && account.auto_recovery
+                && !matches!(
+                    account.status,
+                    Status::NeedsAttention | Status::Queued | Status::Backoff
+                )
+            {
+                apply_failure(
+                    account,
+                    &Failure::new(
+                        FailureKind::Other,
+                        "Managed client exited; scheduling recovery",
+                    ),
+                );
+            } else if !account.desired_running || !account.auto_recovery {
+                account.desired_running = false;
+                account.status = Status::Stopped;
+            }
+            if clean && ordinary_exit {
+                account.last_error = Some("Client closed normally".into());
+                account.recovery_reason = "NormalExit".into();
+            }
+        });
+    }
+
+    fn close_managed_with(
+        &self,
+        id: &str,
+        generation: Uuid,
+        identity: &ProcessIdentity,
+        force: bool,
+        close: impl FnOnce(&ProcessIdentity, bool) -> Result<(), String>,
+    ) -> Result<bool, String> {
+        // Commit the retry exactly once, before controlled shutdown. No grace timer.
+        let pending = self
+            .0
+            .state
+            .lock()
+            .unwrap()
+            .database
+            .accounts
+            .iter()
+            .any(|saved| saved.account.id == id && recovery_due(&saved.account, Utc::now()));
+        if pending {
+            self.transaction(|state| {
+                let account = account_mut(state, id)?;
+                if account.generation == generation
+                    && identity.generation == generation
+                    && account.process.as_ref() == Some(identity)
+                    && account.recovery_process.as_ref() == Some(identity)
+                    && recovery_due(account, Utc::now())
+                {
+                    let retry = account.next_retry;
+                    let rate_limited = account.recovery_reason == "RateLimit"
+                        && retry.is_some_and(|time| time > Utc::now());
+                    let message = account
+                        .last_error
+                        .as_deref()
+                        .unwrap_or("Confirmed disconnect; controlled recovery started")
+                        .to_owned();
+                    apply_failure(
+                        account,
+                        &Failure::new(
+                            if rate_limited {
+                                FailureKind::RateLimit
+                            } else {
+                                FailureKind::Other
+                            },
+                            &message,
+                        ),
+                    );
+                    if let (Some(previous), Some(next)) = (retry, account.next_retry) {
+                        account.next_retry = Some(previous.max(next));
+                    }
+                    account.recovery_evidence = RecoveryEvidence::RecoveryStarted;
+                    let paused = account.status == Status::NeedsAttention;
+                    let operation = account.operation_id;
+                    let error = account.last_error.clone();
+                    if paused
+                        && let Some(op) = operation.and_then(|id| state.operations.get_mut(&id))
+                    {
+                        op.state = "failed".into();
+                        op.error = error;
+                    }
+                }
+                Ok(())
+            })?;
+        }
+        // Same command lock as Stop/settings/launch. Hold through the OS identity check
+        // and close, so cancellation cannot race between authorization and termination.
+        let state = self.0.state.lock().unwrap();
+        let Some(account) = state
+            .database
+            .accounts
+            .iter()
+            .map(|saved| &saved.account)
+            .find(|a| a.id == id)
+        else {
+            return Ok(false);
+        };
+        if self.is_shutdown()
+            || account.generation != generation
+            || account.process.as_ref() != Some(identity)
+            || !close_authorized(account)
+        {
+            return Ok(false);
+        }
+        close(identity, force)?;
+        Ok(true)
+    }
+
+    #[cfg(test)]
     fn signal(&self, id: &str, generation: Uuid, signal: Signal) {
-        match signal {
-            Signal::Connected => {
-                let _ = self.update(id, generation, |a| {
-                    if a.desired_running && a.status != Status::NeedsAttention {
-                        a.status = Status::Running;
-                        a.connected_since = Some(Utc::now());
-                        a.disconnected_since = None;
-                        a.last_error = None;
-                        a.recovery_reason.clear();
-                    }
-                });
-                self.finish_operation(id, generation, None);
-            }
-            Signal::Disconnected
-            | Signal::ConnectionFailed
-            | Signal::JoinRequestFailed
-            | Signal::SessionLost(_) => {
-                let _ = self.update(id, generation, |a| {
-                    if a.desired_running && a.status != Status::NeedsAttention {
-                        if a.disconnected_since.is_none() {
-                            a.last_error = Some("Game connection lost; allowing 30 seconds to reconnect before recovery".into());
-                        }
-                        a.status = Status::Reconnecting;
-                        a.disconnected_since.get_or_insert_with(Utc::now);
-                        a.connected_since = None;
-                        let kick_known = a.last_error.as_deref().is_some_and(|error| error.starts_with("Session lost (code 267)"));
-                        if signal == Signal::ConnectionFailed && !kick_known {
-                            a.recovery_reason = "ConnectionFailed".into();
-                            a.last_error = Some("Connection failed: server did not respond (279); allowing 30 seconds to reconnect before recovery".into());
-                        } else if signal == Signal::JoinRequestFailed && !kick_known {
-                            a.recovery_reason = "JoinRequestFailed".into();
-                            a.last_error = Some("Join request failed (HTTP/network error); allowing 30 seconds to retry before recovery".into());
-                        } else if let Signal::SessionLost(code) = signal && !kick_known {
-                            a.recovery_reason = if code == Some(267) { "Kick267" } else { "SessionLost" }.into();
-                            a.last_error = Some(match code {
-                                Some(code) => format!("Session lost (code {code}); allowing 30 seconds to reconnect before recovery"),
-                                None => "Session lost; allowing 30 seconds to reconnect before recovery".into(),
-                            });
-                        }
-                    }
-                });
-            }
-            Signal::TargetUnavailable => self.failure(
-                id,
-                generation,
-                Failure::new(
-                    FailureKind::TargetUnavailable,
-                    "Configured destination unavailable; applying the account fallback policy",
-                ),
-            ),
-            Signal::PermissionDenied => self.failure(
-                id,
-                generation,
-                Failure::new(
-                    FailureKind::Permission,
-                    "Game denied access; check permissions before restarting",
-                ),
-            ),
+        // Synthetic state-machine tests only; production observations require an exact process.
+        let _ = self.update(id, generation, |a| {
+            apply_observation(
+                a,
+                Observation::DiskLog(crate::logs::LogEvent {
+                    signal,
+                    confirmed_terminal: signal != Signal::JoinRequestFailed,
+                }),
+            )
+        });
+        if signal == Signal::Connected {
+            self.finish_operation(id, generation, None);
         }
     }
 }
@@ -1129,6 +1605,9 @@ fn account_mut<'a>(s: &'a mut State, id: &str) -> Result<&'a mut Account, String
 }
 fn snapshot(s: &State) -> Snapshot {
     Snapshot {
+        external_background_cleanup_enabled: s.database.external_background_cleanup_enabled,
+        multi_instance_enabled: s.database.multi_instance_enabled,
+        active_multi_instance: s.active_multi_instance,
         server_selection: s.database.server_selection,
         join_type: s.database.join_type,
         game_profiles: s.database.game_profiles.clone(),
@@ -1199,6 +1678,738 @@ fn apply_failure(a: &mut Account, error: &Failure) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn owned_fixture() -> (Engine, std::path::PathBuf, ProcessIdentity) {
+        let (engine, path) = fixture(1);
+        engine.command("1", "start").unwrap();
+        let generation = engine.snapshot().accounts[0].generation;
+        let identity = ProcessIdentity {
+            pid: 4242,
+            creation_time: "verified-fixture-start".into(),
+            tracker: "fixture-tracker".into(),
+            generation,
+        };
+        engine
+            .update("1", generation, |a| {
+                a.process = Some(identity.clone());
+                a.status = Status::Running;
+                a.connected_since = Some(Utc::now());
+            })
+            .unwrap();
+        (engine, path, identity)
+    }
+    fn disk(line: &str) -> Observation {
+        Observation::DiskLog(crate::logs::parse_event(line).unwrap())
+    }
+    #[test]
+    #[ignore = "explicit recovery latency fixture; no live Roblox processes"]
+    fn recovery_policy_latency_fixture() {
+        use std::io::Write;
+        fn summary(mut samples: Vec<f64>) -> serde_json::Value {
+            samples.sort_by(f64::total_cmp);
+            serde_json::json!({
+                "samples": samples.len(), "p50_ms": samples[samples.len()/2],
+                "p95_ms": samples[samples.len()*95/100], "max_ms": samples[samples.len()-1]
+            })
+        }
+        let mut reports = Vec::new();
+        for backlog in [false, true] {
+            let (engine, path, identity) = owned_fixture();
+            let log = path.join("latency.log");
+            let mut detection = Vec::new();
+            let mut scheduling = Vec::new();
+            let mut controlled_close = Vec::new();
+            for _ in 0..100 {
+                engine
+                    .update("1", identity.generation, |a| {
+                        a.status = Status::Running;
+                        a.failures = 0;
+                        a.next_retry = None;
+                        a.recovery_reason.clear();
+                        a.recovery_evidence = RecoveryEvidence::Unavailable;
+                        a.recovery_process = None;
+                    })
+                    .unwrap();
+                std::fs::write(
+                    &log,
+                    if backlog {
+                        "[FLog::Output] unrelated game output\n".repeat(100_000)
+                    } else {
+                        String::new()
+                    },
+                )
+                .unwrap();
+                let mut tail = crate::logs::Tail::new(log.clone(), false).unwrap();
+                let mut writer = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+                writeln!(
+                    writer,
+                    "[FLog::Network] Sending disconnect with reason: 273"
+                )
+                .unwrap();
+                writer.flush().unwrap();
+                let start = Instant::now();
+                let events = tail.read_events().unwrap();
+                detection.push(start.elapsed().as_secs_f64() * 1000.0);
+                assert_eq!(events.len(), 1);
+                let accepted = Instant::now();
+                engine.observe(
+                    "1",
+                    identity.generation,
+                    &identity,
+                    Observation::DiskLog(events[0]),
+                );
+                assert!(recovery_due(&engine.snapshot().accounts[0], Utc::now()));
+                scheduling.push(accepted.elapsed().as_secs_f64() * 1000.0);
+                assert!(
+                    engine
+                        .close_managed_with(
+                            "1",
+                            identity.generation,
+                            &identity,
+                            false,
+                            |_, force| {
+                                assert!(!force);
+                                // Cancellation shares this lock through identity verification and close.
+                                assert!(engine.0.state.try_lock().is_err());
+                                controlled_close.push(accepted.elapsed().as_secs_f64() * 1000.0);
+                                Ok(())
+                            }
+                        )
+                        .unwrap()
+                );
+            }
+            reports.push(serde_json::json!({
+                "backlog_bytes": if backlog { 3_500_000 } else { 0 },
+                "detection": summary(detection), "recovery_scheduling": summary(scheduling),
+                "accepted_event_to_controlled_close": summary(controlled_close),
+                "old_fixed_grace_ms": 30000, "new_fixed_grace_ms": 0
+            }));
+            drop(engine);
+            std::fs::remove_dir_all(path).unwrap();
+        }
+        println!(
+            "RECOVERY_LATENCY {}",
+            serde_json::to_string(&reports).unwrap()
+        );
+    }
+    #[test]
+    fn policy_confirmed_events_start_close_now_and_wait_for_verified_exit() {
+        for line in [
+            "[FLog::Network] Connection lost",
+            "[DFLog::NetworkClient] ID_CONNECTION_LOST",
+            "[FLog::GameJoinUtil] GameJoinFailed errorCode: 279",
+            "[FLog::Network] Sending disconnect with reason: 273",
+            "[FLog::GameJoinUtil] GameJoinFailed errorCode: 529",
+        ] {
+            let (engine, path, identity) = owned_fixture();
+            engine.observe("1", identity.generation, &identity, disk(line));
+            let accepted = engine.snapshot().accounts.remove(0);
+            assert_eq!(
+                accepted.recovery_evidence,
+                RecoveryEvidence::ConfirmedTerminalDisconnect
+            );
+            assert!(recovery_due(&accepted, Utc::now()));
+            let mut calls = 0;
+            assert!(
+                engine
+                    .close_managed_with("1", identity.generation, &identity, false, |id, force| {
+                        assert_eq!(id, &identity);
+                        assert!(!force);
+                        calls += 1;
+                        Ok(())
+                    })
+                    .unwrap()
+            );
+            assert_eq!(calls, 1);
+            let closing = engine.snapshot().accounts.remove(0);
+            assert_eq!(closing.status, Status::Backoff);
+            assert_eq!(closing.failures, 1);
+            assert_eq!(closing.recovery_evidence, RecoveryEvidence::RecoveryStarted);
+            assert!(!launch_ready(
+                &closing,
+                Utc::now() + ChronoDuration::days(1)
+            ));
+            let retry = closing.next_retry.unwrap();
+            engine.confirmed_exit("1", identity.generation, &identity, false);
+            let exited = engine.snapshot().accounts.remove(0);
+            assert!(exited.process.is_none() && exited.tracker.is_none());
+            assert_eq!(exited.failures, 1); // Exit must not count the same disconnect twice.
+            assert_eq!(exited.next_retry, Some(retry));
+            assert!(!launch_ready(&exited, retry - ChronoDuration::seconds(1)));
+            assert!(launch_ready(&exited, retry));
+            drop(engine);
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+    #[test]
+    fn policy_verified_exit_schedules_without_grace_and_preserves_pause_or_stop() {
+        for enabled in [true, false] {
+            let (engine, path, identity) = owned_fixture();
+            engine
+                .update("1", identity.generation, |a| a.auto_recovery = enabled)
+                .unwrap();
+            let before = Utc::now();
+            engine.confirmed_exit("1", identity.generation, &identity, false);
+            let account = engine.snapshot().accounts.remove(0);
+            assert!(account.process.is_none());
+            if enabled {
+                assert_eq!(account.status, Status::Backoff);
+                assert_eq!(account.failures, 1);
+                let retry = account.next_retry.unwrap();
+                assert!(retry >= before + ChronoDuration::seconds(10));
+                assert!(retry <= Utc::now() + ChronoDuration::seconds(13));
+            } else {
+                assert_eq!(account.status, Status::Stopped);
+                assert!(!account.desired_running);
+            }
+            drop(engine);
+            std::fs::remove_dir_all(path).unwrap();
+        }
+        let (engine, path, identity) = owned_fixture();
+        engine.observe(
+            "1",
+            identity.generation,
+            &identity,
+            disk("[FLog::GameJoinUtil] GameJoinFailed errorCode: 600"),
+        );
+        engine.confirmed_exit("1", identity.generation, &identity, true);
+        assert_eq!(engine.snapshot().accounts[0].status, Status::NeedsAttention);
+        assert_eq!(engine.snapshot().accounts[0].recovery_reason, "Permission");
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+    #[test]
+    fn policy_unverified_ram_copies_never_authorize_close_or_cancel_disk_evidence() {
+        let (engine, path, identity) = owned_fixture();
+        for _ in 0..10 {
+            for signal in [
+                Signal::Disconnected,
+                Signal::SessionLost(Some(273)),
+                Signal::PermissionDenied,
+                Signal::ClientUpdateRequired,
+                Signal::Connected,
+            ] {
+                engine.observe(
+                    "1",
+                    identity.generation,
+                    &identity,
+                    Observation::UnverifiedMemory(signal),
+                );
+            }
+        }
+        let account = engine.snapshot().accounts.remove(0);
+        assert_eq!(account.status, Status::Running);
+        assert_eq!(
+            account.recovery_evidence,
+            RecoveryEvidence::SuspectedDisconnect
+        );
+        assert!(!recovery_due(
+            &account,
+            Utc::now() + ChronoDuration::days(1)
+        ));
+        assert!(
+            !engine
+                .close_managed_with("1", identity.generation, &identity, true, |_, _| panic!(
+                    "RAM-only close"
+                ))
+                .unwrap()
+        );
+        assert_eq!(account.failures, 0);
+        assert!(account.next_retry.is_none());
+        engine.observe(
+            "1",
+            identity.generation,
+            &identity,
+            disk("[FLog::Network] Connection lost"),
+        );
+        engine.observe(
+            "1",
+            identity.generation,
+            &identity,
+            Observation::UnverifiedMemory(Signal::Connected),
+        );
+        assert!(recovery_due(&engine.snapshot().accounts[0], Utc::now()));
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+    #[test]
+    fn policy_ambiguous_transport_http_and_missing_logs_never_become_terminal_on_timeout() {
+        let (engine, path, identity) = owned_fixture();
+        for line in [
+            "[FLog::Network] Sending disconnect with reason: 0",
+            "[FLog::Network] Sending disconnect with reason: 282",
+            "[FLog::Network] Sending disconnect with reason: 20",
+            "[FLog::Network] Sending disconnect with reason: 285",
+            "[FLog::Network] Client:Disconnect",
+            "[FLog::Network] ID_DISCONNECTION_NOTIFICATION",
+            "[DFLog::RbxTransportDummyClient] Connection closed",
+            "[FLog::HttpTraceError] HttpResponse(#1) status:503 Error url:{ \"https://gamejoin.roblox.com/v1/join-game\" }",
+        ] {
+            engine.observe("1", identity.generation, &identity, disk(line));
+            assert!(
+                !engine
+                    .close_managed_with("1", identity.generation, &identity, true, |_, _| panic!(
+                        "Unconfirmed close"
+                    ))
+                    .unwrap()
+            );
+        }
+        engine
+            .update("1", identity.generation, log_unavailable)
+            .unwrap();
+        let account = engine.snapshot().accounts.remove(0);
+        assert_eq!(
+            account.recovery_evidence,
+            RecoveryEvidence::SuspectedDisconnect
+        );
+        assert!(!recovery_due(
+            &account,
+            Utc::now() + ChronoDuration::days(1)
+        ));
+        assert_eq!(account.failures, 0);
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+    #[test]
+    fn policy_fresh_connected_disk_event_cancels_pending_and_force_close() {
+        let (engine, path, identity) = owned_fixture();
+        for already_started in [false, true] {
+            engine.observe(
+                "1",
+                identity.generation,
+                &identity,
+                disk("[FLog::Network] Connection lost"),
+            );
+            if already_started {
+                assert!(
+                    engine
+                        .close_managed_with("1", identity.generation, &identity, false, |_, _| Ok(
+                            ()
+                        ))
+                        .unwrap()
+                );
+            }
+            engine.observe(
+                "1",
+                identity.generation,
+                &identity,
+                disk("[FLog::Network] Connection accepted"),
+            );
+            assert!(
+                !engine
+                    .close_managed_with("1", identity.generation, &identity, true, |_, _| panic!(
+                        "Connected client closed"
+                    ))
+                    .unwrap()
+            );
+            assert_eq!(engine.snapshot().accounts[0].status, Status::Running);
+            assert!(engine.snapshot().accounts[0].next_retry.is_none());
+        }
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+    #[test]
+    fn policy_duplicates_schedule_one_retry_and_do_not_launch_a_second_client() {
+        let (engine, path, identity) = owned_fixture();
+        let event = disk("[FLog::Network] Sending disconnect with reason: 273");
+        engine.observe("1", identity.generation, &identity, event);
+        engine
+            .close_managed_with("1", identity.generation, &identity, false, |_, _| Ok(()))
+            .unwrap();
+        let initial = engine.snapshot().accounts.remove(0);
+        for _ in 0..10 {
+            engine.observe("1", identity.generation, &identity, event);
+            engine.observe(
+                "1",
+                identity.generation,
+                &identity,
+                Observation::UnverifiedMemory(Signal::Disconnected),
+            );
+        }
+        let duplicate = engine.snapshot().accounts.remove(0);
+        assert_eq!(duplicate.failures, 1);
+        assert_eq!(duplicate.next_retry, initial.next_retry);
+        assert_eq!(duplicate.operation_id, initial.operation_id);
+        assert!(!launch_ready(
+            &duplicate,
+            Utc::now() + ChronoDuration::days(1)
+        ));
+        engine.confirmed_exit("1", identity.generation, &identity, false);
+        engine.observe("1", identity.generation, &identity, event); // Delayed old disk/RAM results are stale now.
+        assert_eq!(engine.snapshot().accounts[0].failures, 1);
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+    #[test]
+    fn policy_destination_fallback_closes_only_bound_client_and_counts_once() {
+        for policy in [
+            FallbackPolicy::AllowPublic,
+            FallbackPolicy::Stay,
+            FallbackPolicy::Pause,
+        ] {
+            let (engine, path, identity) = owned_fixture();
+            engine
+                .update("1", identity.generation, |a| a.fallback_policy = policy)
+                .unwrap();
+            let event = disk("[FLog::GameJoinUtil] GameJoinFailed errorCode: 528");
+            engine.observe("1", identity.generation, &identity, event);
+            let first = engine.snapshot().accounts.remove(0);
+            engine.observe("1", identity.generation, &identity, event);
+            assert_eq!(engine.snapshot().accounts[0].failures, first.failures);
+            assert_eq!(engine.snapshot().accounts[0].next_retry, first.next_retry);
+            let mut calls = 0;
+            let closed = engine
+                .close_managed_with("1", identity.generation, &identity, false, |_, _| {
+                    calls += 1;
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(closed, policy != FallbackPolicy::Pause);
+            assert_eq!(calls, usize::from(closed));
+            assert_eq!(
+                first.public_fallback_active,
+                policy == FallbackPolicy::AllowPublic
+            );
+            assert!(!launch_ready(&first, Utc::now() + ChronoDuration::days(1)));
+            engine.observe(
+                "1",
+                identity.generation,
+                &identity,
+                disk("[FLog::Network] Connection accepted"),
+            );
+            assert!(
+                !engine
+                    .close_managed_with("1", identity.generation, &identity, true, |_, _| panic!(
+                        "Cancelled fallback close"
+                    ))
+                    .unwrap()
+            );
+            drop(engine);
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+    #[test]
+    fn policy_inaccessible_logs_or_metadata_preserve_retry_and_attention() {
+        let (engine, path, identity) = owned_fixture();
+        engine.observe(
+            "1",
+            identity.generation,
+            &identity,
+            disk("[FLog::Network] Connection lost"),
+        );
+        engine
+            .update("1", identity.generation, process_unavailable)
+            .unwrap();
+        assert!(recovery_due(&engine.snapshot().accounts[0], Utc::now()));
+        engine
+            .close_managed_with("1", identity.generation, &identity, false, |_, _| Ok(()))
+            .unwrap();
+        let closing = engine.snapshot().accounts.remove(0);
+        engine
+            .update("1", identity.generation, log_unavailable)
+            .unwrap();
+        engine
+            .update("1", identity.generation, process_unavailable)
+            .unwrap();
+        engine.confirmed_exit("1", identity.generation, &identity, false);
+        let exited = engine.snapshot().accounts.remove(0);
+        assert_eq!(exited.failures, 1);
+        assert_eq!(exited.next_retry, closing.next_retry);
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+        let (engine, path, identity) = owned_fixture();
+        engine.observe(
+            "1",
+            identity.generation,
+            &identity,
+            disk("[FLog::GameJoinUtil] GameJoinFailed errorCode: 600"),
+        );
+        engine
+            .update("1", identity.generation, log_unavailable)
+            .unwrap();
+        engine
+            .update("1", identity.generation, process_unavailable)
+            .unwrap();
+        engine.observe(
+            "1",
+            identity.generation,
+            &identity,
+            disk("[FLog::Network] Connection accepted"),
+        );
+        assert_eq!(engine.snapshot().accounts[0].status, Status::NeedsAttention);
+        assert_eq!(engine.snapshot().accounts[0].recovery_reason, "Permission");
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+    #[test]
+    fn policy_saved_fallback_reason_plus_ram_hint_cannot_authorize_close() {
+        let (engine, path, identity) = owned_fixture();
+        engine
+            .update("1", identity.generation, |a| {
+                a.status = Status::Backoff;
+                a.recovery_reason = "TargetUnavailable".into();
+            })
+            .unwrap();
+        engine.observe(
+            "1",
+            identity.generation,
+            &identity,
+            Observation::UnverifiedMemory(Signal::Disconnected),
+        );
+        assert!(
+            !engine
+                .close_managed_with("1", identity.generation, &identity, true, |_, _| panic!(
+                    "Persisted reason plus RAM close"
+                ))
+                .unwrap()
+        );
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+    #[test]
+    fn policy_nonrecoverable_codes_stay_in_attention_and_cannot_be_bypassed_by_connected() {
+        for code in [267, 268, 280, 524, 533, 600, 773] {
+            let (engine, path, identity) = owned_fixture();
+            engine.observe(
+                "1",
+                identity.generation,
+                &identity,
+                disk(&format!(
+                    "[FLog::GameJoinUtil] GameJoinFailed errorCode: {code}"
+                )),
+            );
+            engine.observe(
+                "1",
+                identity.generation,
+                &identity,
+                disk("[FLog::Network] Connection accepted"),
+            );
+            let account = engine.snapshot().accounts.remove(0);
+            assert_eq!(account.status, Status::NeedsAttention, "{code}");
+            assert!(account.next_retry.is_none());
+            assert!(!launch_ready(
+                &account,
+                Utc::now() + ChronoDuration::days(1)
+            ));
+            assert!(
+                !engine
+                    .close_managed_with("1", identity.generation, &identity, true, |_, _| panic!(
+                        "Attention bypass"
+                    ))
+                    .unwrap()
+            );
+            assert_eq!(
+                engine
+                    .operation(account.operation_id.unwrap())
+                    .unwrap()
+                    .state,
+                "failed"
+            );
+            drop(engine);
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+    #[test]
+    fn policy_stop_disable_shutdown_and_identity_changes_cancel_destructive_recovery() {
+        for action in ["stop", "disable", "identity", "shutdown"] {
+            let (engine, path, identity) = owned_fixture();
+            let event = disk("[FLog::Network] Connection lost");
+            let mut wrong = identity.clone();
+            wrong.pid += 1;
+            engine.observe("1", identity.generation, &wrong, event);
+            let mut wrong = identity.clone();
+            wrong.generation = Uuid::new_v4();
+            engine.observe("1", identity.generation, &wrong, event);
+            let mut wrong = identity.clone();
+            wrong.creation_time.push('x');
+            engine.observe("1", identity.generation, &wrong, event);
+            let mut wrong = identity.clone();
+            wrong.tracker.push('x');
+            engine.observe("1", identity.generation, &wrong, event);
+            engine.observe("1", Uuid::new_v4(), &identity, event);
+            assert_eq!(engine.snapshot().accounts[0].status, Status::Running);
+            engine.observe("1", identity.generation, &identity, event);
+            match action {
+                "stop" => {
+                    engine.command("1", "stop").unwrap();
+                }
+                "disable" => {
+                    engine
+                        .patch(
+                            "1",
+                            AccountPatch {
+                                auto_recovery: Some(false),
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap();
+                }
+                "identity" => {
+                    engine
+                        .update("1", identity.generation, |a| {
+                            a.process.as_mut().unwrap().creation_time.push('x');
+                        })
+                        .unwrap();
+                }
+                _ => engine.shutdown(),
+            }
+            assert!(
+                !engine
+                    .close_managed_with("1", identity.generation, &identity, true, |_, _| panic!(
+                        "Cancelled or mismatched close"
+                    ))
+                    .unwrap()
+            );
+            assert!(!launch_ready(
+                &engine.snapshot().accounts[0],
+                Utc::now() + ChronoDuration::days(1)
+            ));
+            drop(engine);
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+    #[test]
+    fn policy_rate_limit_deadline_and_failure_limit_survive_immediate_shutdown() {
+        let (engine, path, identity) = owned_fixture();
+        let cooldown = Utc::now() + ChronoDuration::seconds(120);
+        engine
+            .update("1", identity.generation, |a| {
+                a.recovery_reason = "RateLimit".into();
+                a.next_retry = Some(cooldown);
+            })
+            .unwrap();
+        engine.observe(
+            "1",
+            identity.generation,
+            &identity,
+            disk("[FLog::Network] Connection lost"),
+        );
+        assert!(
+            engine
+                .close_managed_with("1", identity.generation, &identity, false, |_, _| Ok(()))
+                .unwrap()
+        );
+        assert_eq!(engine.snapshot().accounts[0].next_retry, Some(cooldown));
+        assert_eq!(engine.snapshot().accounts[0].recovery_reason, "RateLimit");
+        engine
+            .update("1", identity.generation, |a| {
+                a.failures = 4;
+                a.recovery_evidence = RecoveryEvidence::ConfirmedTerminalDisconnect;
+                a.status = Status::Reconnecting;
+            })
+            .unwrap();
+        engine
+            .close_managed_with("1", identity.generation, &identity, false, |_, _| Ok(()))
+            .unwrap();
+        let paused = engine.snapshot().accounts.remove(0);
+        assert_eq!(paused.failures, 5);
+        assert_eq!(paused.status, Status::NeedsAttention);
+        assert!(paused.next_retry.is_none());
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+    #[test]
+    fn policy_runtime_evidence_is_not_trusted_after_reopen_or_exported() {
+        let (engine, path, identity) = owned_fixture();
+        engine.observe(
+            "1",
+            identity.generation,
+            &identity,
+            disk("[FLog::Network] Connection lost"),
+        );
+        let reopened = Engine::open(Store::new(path.clone()).unwrap(), "fixture".into()).unwrap();
+        let account = reopened.snapshot().accounts.remove(0);
+        assert_eq!(account.recovery_evidence, RecoveryEvidence::Unavailable);
+        assert!(account.recovery_process.is_none());
+        assert!(!recovery_due(
+            &account,
+            Utc::now() + ChronoDuration::days(1)
+        ));
+        let json = serde_json::to_string(&engine.snapshot()).unwrap();
+        assert!(!json.contains("recovery_evidence") && !json.contains("recovery_process"));
+        drop(reopened);
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+    #[test]
+    fn confirmed_disconnect_starts_without_reconnection_grace() {
+        let (engine, path) = fixture(1);
+        engine.command("1", "start").unwrap();
+        let generation = engine.snapshot().accounts[0].generation;
+        engine.signal("1", generation, Signal::Disconnected);
+        assert!(recovery_due(&engine.snapshot().accounts[0], Utc::now()));
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+    #[tokio::test]
+    async fn slow_discovery_never_blocks_ready_monitor_work() {
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let worker_release = release.clone();
+        let mut task = Some(tokio::task::spawn_blocking(move || {
+            worker_release.wait();
+            50
+        }));
+        let result =
+            tokio::time::timeout(Duration::from_millis(100), completed_task(&mut task)).await;
+        release.wait();
+        assert!(matches!(result, Ok(None)));
+        assert_eq!(task.take().unwrap().await.unwrap(), 50);
+    }
+    #[test]
+    fn fifty_accounts_keep_confirmed_273_during_log_failure_and_cancel_on_reconnect() {
+        let (engine, path) = fixture(50);
+        for account in engine.snapshot().accounts {
+            engine.command(&account.id, "start").unwrap();
+            let generation = engine
+                .snapshot()
+                .accounts
+                .into_iter()
+                .find(|a| a.id == account.id)
+                .unwrap()
+                .generation;
+            engine.signal(&account.id, generation, Signal::SessionLost(Some(273)));
+            engine
+                .update(&account.id, generation, log_unavailable)
+                .unwrap();
+            let a = engine
+                .snapshot()
+                .accounts
+                .into_iter()
+                .find(|a| a.id == account.id)
+                .unwrap();
+            assert_eq!(a.status, Status::Reconnecting);
+            assert!(a.last_error.as_ref().unwrap().contains("273"));
+            assert!(recovery_due(&a, Utc::now() + ChronoDuration::seconds(31)));
+            engine.signal(&account.id, generation, Signal::Connected);
+        }
+        assert!(
+            engine
+                .snapshot()
+                .accounts
+                .iter()
+                .all(|a| a.status == Status::Running && a.disconnected_since.is_none())
+        );
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+    #[test]
+    fn instance_preference_defaults_on_and_changes_only_after_reopen() {
+        let (engine, path) = fixture(1);
+        assert!(
+            engine.snapshot().multi_instance_enabled && engine.snapshot().active_multi_instance
+        );
+        engine.set_multi_instance(false).unwrap();
+        assert!(
+            !engine.snapshot().multi_instance_enabled && engine.snapshot().active_multi_instance
+        );
+        drop(engine);
+        let reopened = Engine::open(Store::new(path.clone()).unwrap(), "test".into()).unwrap();
+        assert!(
+            !reopened.snapshot().multi_instance_enabled
+                && !reopened.snapshot().active_multi_instance
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(path).unwrap();
+    }
     #[test]
     fn bot_controls_reuse_saved_settings_without_starting_on_save() {
         let path = std::env::temp_dir().join(format!("rbx-bot-control-test-{}", Uuid::new_v4()));
@@ -1298,14 +2509,13 @@ mod tests {
         engine.command("1", "start").unwrap();
         let generation = engine.snapshot().accounts[0].generation;
         engine.signal("1", generation, Signal::Connected);
-        engine.signal("1", generation, Signal::Disconnected);
-        engine.signal("1", generation, Signal::SessionLost(Some(267)));
+        engine.signal("1", generation, Signal::SessionLost(Some(273)));
         let count = engine.discord_settings().recent.len();
-        assert_eq!(count, 1); // Transient disconnect is silent; the confirmed kick is reported.
+        assert_eq!(count, 1); // Confirmed recoverable disconnect is reported immediately.
         engine.signal("1", generation, Signal::ConnectionFailed);
         engine.signal("1", generation, Signal::SessionLost(None));
-        engine.signal("1", generation, Signal::SessionLost(Some(267)));
-        engine.signal("1", Uuid::new_v4(), Signal::SessionLost(Some(267)));
+        engine.signal("1", generation, Signal::SessionLost(Some(273)));
+        engine.signal("1", Uuid::new_v4(), Signal::SessionLost(Some(273)));
         assert_eq!(engine.discord_settings().recent.len(), count);
         engine.signal("1", generation, Signal::Connected);
         assert_eq!(
@@ -1346,31 +2556,28 @@ mod tests {
         std::fs::remove_dir_all(path).unwrap();
     }
     #[test]
-    fn discord_redirect_grace_only_reports_persistent_disconnects_and_recovers_once() {
+    fn discord_reports_confirmed_disconnect_immediately_and_deduplicates() {
         let (engine, path) = fixture(1);
         engine.command("1", "start").unwrap();
         let generation = engine.snapshot().accounts[0].generation;
         engine.signal("1", generation, Signal::Connected);
         engine.signal("1", generation, Signal::Disconnected);
-        engine.signal("1", generation, Signal::Connected);
-        assert!(engine.discord_settings().recent.is_empty());
-        engine.signal("1", generation, Signal::Disconnected);
-        engine
-            .update("1", generation, |a| {
-                a.disconnected_since = Some(Utc::now() - ChronoDuration::seconds(31))
-            })
-            .unwrap();
-        assert_eq!(engine.discord_settings().recent.len(), 1);
-        engine.update("1", generation, |_| {}).unwrap();
         assert_eq!(engine.discord_settings().recent.len(), 1);
         engine.signal("1", generation, Signal::Connected);
         assert_eq!(engine.discord_settings().recent.len(), 2);
+        engine.signal("1", generation, Signal::Disconnected);
+        assert_eq!(engine.discord_settings().recent.len(), 3);
+        engine.signal("1", generation, Signal::Disconnected);
+        engine.update("1", generation, |_| {}).unwrap();
+        assert_eq!(engine.discord_settings().recent.len(), 3);
+        engine.signal("1", generation, Signal::Connected);
+        assert_eq!(engine.discord_settings().recent.len(), 4);
         assert_eq!(
             engine.discord_settings().recent[0].title,
             "Account is back online"
         );
         engine.command("1", "stop").unwrap();
-        assert_eq!(engine.discord_settings().recent.len(), 2);
+        assert_eq!(engine.discord_settings().recent.len(), 4);
         drop(engine);
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -1434,15 +2641,14 @@ mod tests {
     }
     #[cfg(any(windows, target_os = "linux"))]
     #[test]
-    fn generic_kicks_wait_for_grace_and_reconnection_stop_or_disable_prevent_replacement() {
+    fn recoverable_disconnect_is_immediate_and_connected_stop_or_disable_cancel() {
         let (engine, path) = fixture(1);
         engine.command("1", "start").unwrap();
         let generation = engine.snapshot().accounts[0].generation;
-        engine.signal("1", generation, Signal::SessionLost(Some(267)));
+        engine.signal("1", generation, Signal::SessionLost(Some(273)));
         let mut account = engine.snapshot().accounts.remove(0);
         let start = account.disconnected_since.unwrap();
-        assert!(!recovery_due(&account, start + ChronoDuration::seconds(29)));
-        assert!(recovery_due(&account, start + ChronoDuration::seconds(30)));
+        assert!(recovery_due(&account, start));
         assert!(!account.public_fallback_active);
         assert_eq!(account.failures, 0);
         engine.signal("1", generation, Signal::Connected);
@@ -1456,14 +2662,14 @@ mod tests {
         account.desired_running = false;
         assert!(!recovery_due(&account, start + ChronoDuration::seconds(40)));
         engine.command("1", "stop").unwrap();
-        engine.signal("1", generation, Signal::SessionLost(Some(267)));
+        engine.signal("1", generation, Signal::SessionLost(Some(273)));
         assert_eq!(engine.snapshot().accounts[0].status, Status::Stopped);
         drop(engine);
         std::fs::remove_dir_all(path).unwrap();
     }
     #[cfg(any(windows, target_os = "linux"))]
     #[test]
-    fn connection_failure_preserves_target_grace_and_stop() {
+    fn connection_failure_preserves_target_and_stop() {
         let (engine, path) = fixture(1);
         engine.command("1", "start").unwrap();
         let before = engine.snapshot().accounts.remove(0);
@@ -1488,70 +2694,70 @@ mod tests {
     }
     #[cfg(any(windows, target_os = "linux"))]
     #[test]
-    fn unknown_client_handles_confirmed_join_error_before_connecting() {
-        let (engine, path) = fixture(1);
-        for (line, error) in [
-            ("[FLog::GameJoinUtil] GameJoinFailed errorCode: 529", "529"),
+    fn unknown_client_distinguishes_join_failure_from_http_request_error() {
+        for (line, terminal) in [
+            ("[FLog::GameJoinUtil] GameJoinFailed errorCode: 529", true),
             (
                 "[DFLog::HttpTraceError] HttpResponse(#19) error:5 message:HttpError: Timedout url:{ \"https://gamejoin.roblox.com/v1/join-game-instance\" }",
-                "Join request failed",
+                false,
             ),
             (
                 "[FLog::HttpTraceError] HttpResponse(#1) status:503 Service Unavailable url:{ \"https://gamejoin.roblox.com/v1/join-private-game\" }",
-                "Join request failed",
+                false,
             ),
         ] {
-            engine.command("1", "start").unwrap();
-            let before = engine.snapshot().accounts.remove(0);
-            let generation = before.generation;
+            let (engine, path, identity) = owned_fixture();
+            let generation = identity.generation;
             engine
                 .update("1", generation, |a| a.status = Status::Unknown)
                 .unwrap();
+            let before = engine.snapshot().accounts.remove(0);
             let log = path.join("Player.log");
             std::fs::write(&log, format!("{line}\n")).unwrap();
             let mut tail = crate::logs::Tail::new(log, false).unwrap();
-            let signals = tail.read().unwrap();
-            assert_eq!(signals.len(), 1);
-            let signal = signals[0];
-            engine.signal("1", generation, signal);
+            let events = tail.read_events().unwrap();
+            assert_eq!(events.len(), 1);
+            engine.observe("1", generation, &identity, Observation::DiskLog(events[0]));
             let failed = engine.snapshot().accounts.remove(0);
-            assert_eq!(failed.status, Status::Reconnecting);
-            assert!(failed.last_error.as_deref().unwrap().contains(error));
+            assert_eq!(
+                failed.status,
+                if terminal {
+                    Status::Reconnecting
+                } else {
+                    Status::Unknown
+                }
+            );
             assert!(!failed.last_error.as_deref().unwrap().contains("roblox.com"));
             assert_eq!(failed.target, before.target);
             assert!(!failed.public_fallback_active);
             assert_eq!(failed.failures, 0);
-            let start = failed.disconnected_since.unwrap();
-            assert!(!recovery_due(&failed, start + ChronoDuration::seconds(29)));
-            assert!(recovery_due(&failed, start + ChronoDuration::seconds(30)));
-            engine.signal("1", generation, signal);
+            assert_eq!(recovery_due(&failed, Utc::now()), terminal);
+            engine.observe("1", generation, &identity, Observation::DiskLog(events[0]));
             assert_eq!(
                 engine.snapshot().accounts[0].disconnected_since,
-                Some(start)
+                failed.disconnected_since
             );
             engine
                 .update("1", generation, |a| a.auto_recovery = false)
                 .unwrap();
-            assert!(!recovery_due(
-                &engine.snapshot().accounts[0],
-                start + ChronoDuration::seconds(30)
-            ));
+            assert!(!recovery_due(&engine.snapshot().accounts[0], Utc::now()));
             engine
                 .update("1", generation, |a| a.auto_recovery = true)
                 .unwrap();
-            engine.signal("1", generation, Signal::Connected);
-            let connected = engine.snapshot().accounts.remove(0);
-            assert_eq!(connected.status, Status::Running);
-            assert!(!recovery_due(
-                &connected,
-                start + ChronoDuration::seconds(30)
-            ));
+            engine.observe(
+                "1",
+                generation,
+                &identity,
+                disk("[FLog::Network] Connection accepted"),
+            );
+            assert_eq!(engine.snapshot().accounts[0].status, Status::Running);
+            assert!(!recovery_due(&engine.snapshot().accounts[0], Utc::now()));
             engine.command("1", "stop").unwrap();
-            engine.signal("1", generation, signal);
+            engine.observe("1", generation, &identity, Observation::DiskLog(events[0]));
             assert_eq!(engine.snapshot().accounts[0].status, Status::Stopped);
+            drop(engine);
+            std::fs::remove_dir_all(path).unwrap();
         }
-        drop(engine);
-        std::fs::remove_dir_all(path).unwrap();
     }
     #[test]
     fn confirmed_close_resumes_retry_without_counting_another_failure() {
@@ -1851,7 +3057,11 @@ mod tests {
         let count = engine.activity(None).len();
         engine.signal("1", generation, Signal::SessionLost(Some(267)));
         assert_eq!(engine.activity(None).len(), count);
-        assert!(engine.activity(Some("1"))[0].message.contains("267"));
+        assert!(
+            engine.activity(Some("1"))[0]
+                .message
+                .contains("Access denied")
+        );
         engine.failure(
             "1",
             generation,

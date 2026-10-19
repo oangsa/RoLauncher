@@ -33,6 +33,7 @@ impl Store {
             return Ok(Database {
                 version: 2,
                 close_to_tray: true,
+                multi_instance_enabled: true,
                 ..Default::default()
             });
         }

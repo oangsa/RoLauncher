@@ -42,6 +42,11 @@ pub fn router(engine: Engine) -> Router {
         .route("/v1/games/{place_id}", get(game_details))
         .route("/v1/settings/window", patch(window_settings))
         .route("/v1/settings/game", patch(game_settings))
+        .route("/v1/settings/instances", patch(instance_settings))
+        .route(
+            "/v1/settings/startup-cleanup",
+            patch(startup_cleanup_settings),
+        )
         .route("/v1/profiles", get(profiles).post(profile_save))
         .route("/v1/profiles/import", post(profile_import))
         .route("/v1/profiles/{id}", axum::routing::delete(profile_delete))
@@ -98,16 +103,59 @@ async fn game_details(
     ))
 }
 #[derive(Deserialize)]
-struct GameSettings {
-    server_selection: crate::model::ServerSelection,
-    join_type: crate::model::JoinType,
+#[serde(untagged)]
+enum GameSettings {
+    Joining {
+        server_selection: crate::model::ServerSelection,
+        join_type: crate::model::JoinType,
+    },
+    Instances(InstanceSettings),
+    StartupCleanup(StartupCleanupSettings),
 }
 async fn game_settings(
     State(engine): State<Engine>,
     Json(settings): Json<GameSettings>,
 ) -> Result<StatusCode, ApiError> {
+    match settings {
+        GameSettings::Joining {
+            server_selection,
+            join_type,
+        } => engine.set_game_settings(server_selection, join_type),
+        GameSettings::Instances(settings) => {
+            engine.set_multi_instance(settings.multi_instance_enabled)
+        }
+        GameSettings::StartupCleanup(settings) => {
+            engine.set_external_background_cleanup(settings.external_background_cleanup_enabled)
+        }
+    }
+    .map(|_| StatusCode::NO_CONTENT)
+    .map_err(error)
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstanceSettings {
+    multi_instance_enabled: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartupCleanupSettings {
+    external_background_cleanup_enabled: bool,
+}
+async fn startup_cleanup_settings(
+    State(engine): State<Engine>,
+    Json(settings): Json<StartupCleanupSettings>,
+) -> Result<StatusCode, ApiError> {
     engine
-        .set_game_settings(settings.server_selection, settings.join_type)
+        .set_external_background_cleanup(settings.external_background_cleanup_enabled)
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(error)
+}
+async fn instance_settings(
+    State(engine): State<Engine>,
+    Json(settings): Json<InstanceSettings>,
+) -> Result<StatusCode, ApiError> {
+    engine
+        .set_multi_instance(settings.multi_instance_enabled)
         .map(|_| StatusCode::NO_CONTENT)
         .map_err(error)
 }
@@ -349,13 +397,16 @@ async fn import(
         accounts: Vec::new(),
         errors: Vec::new(),
     };
-    use zeroize::Zeroize;
-    for (index, cookie) in input.cookies.iter_mut().enumerate() {
-        match engine.import(cookie).await {
+    for (index, outcome) in engine
+        .import_batch(&mut input.cookies)
+        .await
+        .into_iter()
+        .enumerate()
+    {
+        match outcome {
             Ok(a) => result.accounts.push(a),
             Err(e) => result.errors.push(ImportError { index, error: e }),
         };
-        cookie.zeroize();
     }
     Ok(Json(result))
 }
@@ -444,9 +495,60 @@ pub async fn serve_on(engine: Engine, listener: tokio::net::TcpListener) -> Resu
 }
 
 #[cfg(all(test, any(windows, target_os = "linux")))]
+mod compat_tests;
+
+#[cfg(all(test, any(windows, target_os = "linux")))]
 mod tests {
     use super::*;
     use tower::ServiceExt;
+    #[tokio::test]
+    async fn instance_settings_require_auth_and_persist_until_restart() {
+        use tower::ServiceExt;
+        let path = std::env::temp_dir().join(format!("rbx-instance-settings-{}", Uuid::new_v4()));
+        let engine = Engine::open(
+            crate::store::Store::new(path.clone()).unwrap(),
+            "fixture".into(),
+        )
+        .unwrap();
+        let app = router(engine.clone());
+        for (auth, expected) in [
+            (false, StatusCode::UNAUTHORIZED),
+            (true, StatusCode::NO_CONTENT),
+        ] {
+            let mut request = Request::builder()
+                .method("PATCH")
+                .uri("/v1/settings/instances")
+                .header("content-type", "application/json");
+            if auth {
+                request = request.header("authorization", format!("Bearer {}", engine.token()));
+            }
+            let response = app
+                .clone()
+                .oneshot(
+                    request
+                        .body(axum::body::Body::from(
+                            r#"{"multi_instance_enabled":false}"#,
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+        assert!(
+            !engine.snapshot().multi_instance_enabled && engine.snapshot().active_multi_instance
+        );
+        drop(app);
+        drop(engine);
+        let reopened = Engine::open(
+            crate::store::Store::new(path.clone()).unwrap(),
+            "fixture".into(),
+        )
+        .unwrap();
+        assert!(!reopened.snapshot().active_multi_instance);
+        drop(reopened);
+        std::fs::remove_dir_all(path).unwrap();
+    }
     #[tokio::test]
     async fn game_join_settings_require_auth_validate_enums_and_persist() {
         use crate::model::{JoinType, ServerSelection};
