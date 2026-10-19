@@ -94,6 +94,7 @@ class HotfixFixture(reference.GitHubFixture):
 SOURCE_MERGE = "8" * 40
 INTENT_HEAD = "9" * 40
 GOVERNANCE_HEAD = "7" * 40
+RECOVERY_BASE = "6" * 40
 
 
 class RecoveryFixture(HotfixFixture):
@@ -110,16 +111,16 @@ class RecoveryFixture(HotfixFixture):
         self.pr.update(merge_commit_sha=SHA,
                        head={"ref": "hotfix-intent/2.3.4", "sha": INTENT_HEAD,
                              "repo": {"full_name": reference.REPO}},
-                       base={"ref": "main", "sha": SOURCE_MERGE,
+                       base={"ref": "main", "sha": RECOVERY_BASE,
                              "repo": {"full_name": reference.REPO}})
         self.intent.update(schema=3, source="hotfix-recovery", source_pr=4,
                            source_merge_sha=SOURCE_MERGE)
         self.intent.pop("reviewed_sha", None)
         self.intent["reviewed_sha"] = REVIEWED
-        self.intent_head_commit = dict(sha=INTENT_HEAD, parents=[{"sha": SOURCE_MERGE}],
+        self.intent_head_commit = dict(sha=INTENT_HEAD, parents=[{"sha": RECOVERY_BASE}],
                                        files=[dict(filename=PATH, status="added")],
                                        commit={"tree": {"sha": "6" * 40}})
-        self.merge_parents = [{"sha": SOURCE_MERGE}, {"sha": INTENT_HEAD}]
+        self.merge_parents = [{"sha": RECOVERY_BASE}, {"sha": INTENT_HEAD}]
         self.merge_tree = "6" * 40
 
     def __call__(self, path, method="GET", body=None, **kwargs):
@@ -133,9 +134,16 @@ class RecoveryFixture(HotfixFixture):
                         commit={"tree": {"sha": "5" * 40}})
         if path == f"/commits/{GOVERNANCE_HEAD}?per_page=100":
             return dict(files=self.governance_files)
+        if path == f"/commits/{RECOVERY_BASE}?per_page=100":
+            return dict(parents=[{"sha": SOURCE_MERGE}, {"sha": GOVERNANCE_HEAD}],
+                        files=self.governance_files, commit={"tree": {"sha": "3" * 40}})
         if path.startswith(f"/compare/{SOURCE_MERGE}...{GOVERNANCE_HEAD}"):
             commit = dict(sha=GOVERNANCE_HEAD, parents=[{"sha": SOURCE_MERGE}])
             return comparison(SOURCE_MERGE, GOVERNANCE_HEAD, [commit], self.governance_files)
+        if path.startswith(f"/compare/{SOURCE_MERGE}...{RECOVERY_BASE}"):
+            commits = [dict(sha=GOVERNANCE_HEAD, parents=[{"sha": SOURCE_MERGE}]),
+                       dict(sha=RECOVERY_BASE, parents=[{"sha": SOURCE_MERGE}, {"sha": GOVERNANCE_HEAD}])]
+            return comparison(SOURCE_MERGE, RECOVERY_BASE, commits, self.governance_files)
         if path == f"/commits/{SHA}/pulls?per_page=100": return [{"number": 5}]
         if path == "/pulls/4": return self.source_pr
         if path == "/pulls/5": return self.pr
@@ -383,7 +391,7 @@ class HotfixTests(unittest.TestCase):
         event = dict(pull_request=dict(
             head=dict(ref='hotfix-intent/2.3.4', sha=INTENT_HEAD,
                       repo={'full_name': reference.REPO}),
-            base=dict(ref='main', sha=SOURCE_MERGE, repo={'full_name': reference.REPO})))
+            base=dict(ref='main', sha=RECOVERY_BASE, repo={'full_name': reference.REPO})))
         self.assertIn('semantic_review', check_branch_flow(event, api))
         api.intent_head_commit['files'].append(dict(filename='src/updates.rs', status='modified'))
         with self.assertRaises(ValueError): check_branch_flow(event, api)

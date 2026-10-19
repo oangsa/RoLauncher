@@ -24,11 +24,11 @@ Successful CI, merged source or signed preflight alone never authorizes publicat
 PR #29 was owner-merged before an intent was added. Schema 2 correctly rejects retroactive intent because it requires the source patch and intent in the same PR.
 
 1. Merge reviewed recovery support through `codex/hotfix-recovery-governance`, based on the exact current `main`. Its diff must contain governance paths only and preserve the already-merged `1.7.1` package version.
-2. Create `hotfix-intent/1.7.1` directly on PR #29's merge SHA. Add one fresh schema-3 intent as its only commit and file.
+2. After that governance PR merges, create `hotfix-intent/1.7.1` directly on current `main`. The source merge must be an ancestor, with only governance commits between it and the intent PR base; package metadata must remain unchanged.
 3. Bind that intent to PR #29, its merge SHA, its original base/head SHAs, exact ordered commits, sorted paths and canonical patch SHA256. Include the original bug, dependency and Premium review.
 4. Owner reviews and merges the intent PR with a merge commit. Publisher verifies PR #29's owner merge, tree, patch, the intent PR's exact source parent and its own merge tree.
 
-Any intervening `main` commit, source PR mismatch, changed patch or extra recovery-PR change fails closed. Schema 3 grants no authority until its governance change and intent PR are separately reviewed and owner-merged.
+Any non-governance `main` change, source PR mismatch, changed patch or extra recovery-PR change fails closed. Schema 3 grants no authority until its governance change and intent PR are separately reviewed and owner-merged.
 
 ## Historical migration proposal (October 16, 2026)
 

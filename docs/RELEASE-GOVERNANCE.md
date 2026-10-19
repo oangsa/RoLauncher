@@ -72,7 +72,7 @@ Schema 3 is only for a hotfix source PR already merged by owner `oangsa` without
 
 The original PR must be official `hotfix/<version>`, owner-merged to `main`, and have merge parents `[base_sha, reviewed_sha]` with the reviewed tree unchanged. Governance history from the stable baseline to `base_sha` and the complete hotfix report are checked again.
 
-The recovery PR branch must be `hotfix-intent/<version>` and start directly at `source_merge_sha`. It has one commit, adding only the fresh intent file. Its owner-merged commit must have parents `[source_merge_sha, recovery_head]` and a tree identical to that head. Any intervening `main` change, mismatched source PR, changed patch or extra file is rejected.
+The recovery PR branch must be `hotfix-intent/<version>` and start directly at current `main`. If governance support has merged since the original hotfix, every intervening commit from `source_merge_sha` to the recovery PR base must be governance-only. Package and lockfile bytes must match the original hotfix tree. The intent branch has one commit adding only the fresh file; the owner-merged commit must preserve its exact base/head parents and tree. Any application drift, mismatched source PR, changed patch or extra file is rejected.
 
 The recovery implementation itself can enter `main` only through `codex/hotfix-recovery-governance`, based directly on current `main`. Branch flow permits governance paths only and requires Cargo package version to remain the exact next patch over latest stable. This exception does not enable the publisher or satisfy owner-signed live controls.
 

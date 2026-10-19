@@ -356,19 +356,24 @@ def verify_hotfix_recovery(call, intent, pr, merge, path, source, content):
             'Owner semantic/dependency review required; partial cherry-picks need prerequisites reviewed')
 
     pr_head = pr['head']['sha']
+    recovery_base = pr['base']['sha']
+    require(isinstance(recovery_base, str) and re.fullmatch('[a-f0-9]{40}', recovery_base),
+            'Invalid recovery PR base identity')
+    if recovery_base != source_merge_sha:
+        governance_history(call, source_merge_sha, recovery_base)
     require(pr['head']['ref'] == 'hotfix-intent/' + intent['version']
             and re.fullmatch('[a-f0-9]{40}', pr_head)
             and (merge is not None or pr_head == source)
             and pr['head']['repo']['full_name'] == 'oangsa/RoLauncher'
-            and pr['base']['ref'] == 'main' and pr['base']['sha'] == source_merge_sha
+            and pr['base']['ref'] == 'main'
             and pr['base']['repo']['full_name'] == 'oangsa/RoLauncher',
-            'Recovery intent PR must be based directly on the exact source hotfix merge')
+            'Recovery intent PR must be based on official main after the exact source hotfix merge')
     final = call(f'/commits/{pr_head}?per_page=100')
-    require([p['sha'] for p in final['parents']] == [source_merge_sha]
+    require([p['sha'] for p in final['parents']] == [recovery_base]
             and [(f['filename'], f['status']) for f in final['files']] == [(path, 'added')],
-            'Recovery source commit must add only the fresh intent')
+            'Recovery source commit must add only the fresh intent directly on its reviewed main base')
     if merge is not None:
-        require([p['sha'] for p in merge['parents']] == [source_merge_sha, pr_head]
+        require([p['sha'] for p in merge['parents']] == [recovery_base, pr_head]
                 and merge['commit']['tree']['sha'] == final['commit']['tree']['sha'],
                 'Recovery intent merge must preserve its exact reviewed tree and source parent')
 
@@ -388,7 +393,8 @@ def verify_hotfix_recovery(call, intent, pr, merge, path, source, content):
                     'Hotfix source lock version mismatch')
             new['version'] = old['version']
         require(before == after, 'Hotfix dependency changes require separate authorization')
-        require(content(call, name, source) == content(call, name, source_merge_sha),
+        require(content(call, name, recovery_base) == content(call, name, source_merge_sha)
+                and content(call, name, source) == content(call, name, source_merge_sha),
                 'Recovery intent changed hotfix package metadata')
     return intent
 
