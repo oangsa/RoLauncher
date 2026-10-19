@@ -5,6 +5,7 @@ import json
 import re
 import struct
 import tomllib
+from uuid import UUID
 import zipfile
 
 GOVERNANCE_PATHS = {
@@ -21,6 +22,7 @@ GOVERNANCE_PATHS = {
 }
 HOTFIX_FIELDS = {'schema', 'id', 'version', 'channel', 'source', 'baseline_tag',
                 'baseline_sha', 'base_sha', 'reviewed_sha', 'commits', 'paths', 'patch_sha256', 'review'}
+HOTFIX_RECOVERY_FIELDS = HOTFIX_FIELDS | {'source_pr', 'source_merge_sha'}
 WINDOWS_SYS_FEATURE_ADDITIONS = {
     'Win32_System_Diagnostics_Debug',
     'Win32_System_Diagnostics_ToolHelp',
@@ -175,7 +177,11 @@ def check_branch_flow(event, call):
     require(base['ref'] == 'main' and head['repo']['full_name'] == REPO, 'Official main PR required')
     if branch == 'dev':
         return 'feature-promotion'
-    require(branch == 'codex/hotfix-release-lane' or re.fullmatch(r'hotfix/[0-9]+\.[0-9]+\.[0-9]+', branch),
+    recovery_branch = re.fullmatch(r'hotfix-intent/[0-9]+\.[0-9]+\.[0-9]+', branch)
+    recovery_governance = branch == 'codex/hotfix-recovery-governance'
+    require(branch == 'codex/hotfix-release-lane'
+            or re.fullmatch(r'hotfix/[0-9]+\.[0-9]+\.[0-9]+', branch)
+            or recovery_branch or recovery_governance,
             'Unauthorized main source branch')
     latest = call('/releases/latest')
     tag = latest['tag_name']
@@ -192,6 +198,33 @@ def check_branch_flow(event, call):
         return 'governance-only'
     numbers = list(map(int, tag[1:].split('.')))
     numbers[2] += 1
+    expected_version = '.'.join(map(str, numbers))
+    if recovery_governance:
+        governance_history(call, base['sha'], head['sha'])
+        base_version = tomllib.loads(content(call, 'Cargo.toml', base['sha']))['package']['version']
+        head_version = tomllib.loads(content(call, 'Cargo.toml', head['sha']))['package']['version']
+        require(base_version == head_version == expected_version,
+                'Recovery governance must preserve the exact already-merged hotfix version')
+        return 'governance-only'
+    if recovery_branch:
+        require(branch == 'hotfix-intent/' + expected_version, 'Recovery intent must target next stable PATCH')
+        head_sha = head['sha']
+        final = call(f'/commits/{head_sha}?per_page=100')
+        files = final['files']
+        require(len(files) == 1 and files[0]['status'] == 'added'
+                and files[0]['filename'].startswith('.github/release-intents/')
+                and [p['sha'] for p in final['parents']] == [base['sha']],
+                'Recovery PR must add one intent in one commit directly on the source merge')
+        path = files[0]['filename']
+        intent = json.loads(content(call, path, head_sha), object_pairs_hook=lambda pairs: _unique_pairs(pairs))
+        require(isinstance(intent, dict) and type(intent.get('schema')) is int and intent['schema'] == 3,
+                'Recovery intent schema 3 required')
+        result = verify_hotfix_recovery(call, intent, pr, None, path, head_sha, content)
+        return json.dumps(dict(commits=result['commits'], paths=result['paths'],
+                               patch_sha256=result['patch_sha256'], source_pr=intent['source_pr'],
+                               source_merge_sha=intent['source_merge_sha'],
+                               semantic_review='Owner must inspect the exact previously merged hotfix patch and recovery binding'),
+                          sort_keys=True)
     require(branch == 'hotfix/' + '.'.join(map(str, numbers)), 'Hotfix branch must target next patch')
     governance_history(call, baseline, base['sha'])
     reviewed = head['sha']
@@ -202,6 +235,12 @@ def check_branch_flow(event, call):
         reviewed = final['parents'][0]['sha']
     report = hotfix_report(call, base['sha'], reviewed)
     return json.dumps(dict(report, semantic_review='Owner must inspect full blobs, bug scope and cherry-pick prerequisites'), sort_keys=True)
+
+
+def _unique_pairs(pairs):
+    result = dict(pairs)
+    require(len(result) == len(pairs), 'Duplicate intent JSON fields')
+    return result
 
 
 def verify_hotfix(call, intent, pr, merge, path, source, content):
@@ -254,3 +293,102 @@ def verify_hotfix(call, intent, pr, merge, path, source, content):
             new['version'] = old['version']
         require(before == after, 'Dependency changes require separate authorization')
     return intent
+
+
+def verify_hotfix_recovery(call, intent, pr, merge, path, source, content):
+    """Bind an intent-only follow-up PR to one exact owner-merged hotfix PR."""
+    require(set(intent) == HOTFIX_RECOVERY_FIELDS and type(intent['schema']) is int
+            and intent['schema'] == 3 and intent['source'] == 'hotfix-recovery'
+            and intent['channel'] == 'stable', 'Invalid hotfix recovery intent contract')
+    require(isinstance(intent['id'], str) and str(UUID(intent['id'], version=4)) == intent['id']
+            and path == '.github/release-intents/' + intent['id'] + '.json', 'Invalid recovery intent identity')
+    require(type(intent['source_pr']) is int and intent['source_pr'] > 0,
+            'Invalid original hotfix PR identity')
+    for field in ('baseline_sha', 'base_sha', 'reviewed_sha', 'source_merge_sha'):
+        require(isinstance(intent[field], str) and re.fullmatch('[a-f0-9]{40}', intent[field]),
+                'Invalid hotfix recovery commit identity')
+    tag, baseline, base, reviewed = (intent[k] for k in
+                                     ('baseline_tag', 'baseline_sha', 'base_sha', 'reviewed_sha'))
+    require(isinstance(tag, str) and re.fullmatch(
+        r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', tag),
+        'Published stable baseline required')
+    numbers = list(map(int, tag[1:].split('.')))
+    numbers[2] += 1
+    require(isinstance(intent['version'], str)
+            and intent['version'] == '.'.join(map(str, numbers)),
+            'Hotfix recovery must increment published stable PATCH only')
+    release = call('/releases/tags/' + tag)
+    require(release['tag_name'] == tag and not release['draft'] and not release['prerelease'],
+            'Unpublished baseline')
+    obj = call('/git/ref/tags/' + tag)['object']
+    if obj['type'] == 'tag': obj = call('/git/tags/' + obj['sha'])['object']
+    require(obj['type'] == 'commit' and obj['sha'] == baseline, 'Stable baseline tag mismatch')
+    latest = call('/releases/latest')
+    require(not latest['draft'] and not latest['prerelease']
+            and latest['tag_name'] in (tag, 'v' + intent['version']), 'Stale hotfix recovery baseline')
+
+    owner = call('')['owner']
+    require(owner['login'] == 'oangsa' and owner['type'] == 'User', 'Unexpected repository owner')
+    original = call(f'/pulls/{intent["source_pr"]}')
+    source_merge_sha = intent['source_merge_sha']
+    require(original['merged'] is True and original['merge_commit_sha'] == source_merge_sha
+            and original['base']['ref'] == 'main' and original['base']['sha'] == base
+            and original['base']['repo']['full_name'] == 'oangsa/RoLauncher'
+            and original['head']['ref'] == 'hotfix/' + intent['version']
+            and original['head']['sha'] == reviewed
+            and original['head']['repo']['full_name'] == 'oangsa/RoLauncher'
+            and (original.get('merged_by') or {}).get('id') == owner['id'],
+            'Exact owner-merged source hotfix PR required')
+    source_merge = call(f'/commits/{source_merge_sha}?per_page=100')
+    reviewed_commit = call(f'/commits/{reviewed}?per_page=100')
+    require([p['sha'] for p in source_merge['parents']] == [base, reviewed]
+            and source_merge['commit']['tree']['sha'] == reviewed_commit['commit']['tree']['sha'],
+            'Original hotfix merge must preserve its exact reviewed source tree')
+    governance_history(call, baseline, base)
+    report = hotfix_report(call, base, reviewed)
+    require(all(report[k] == intent[k] for k in report),
+            'Recovery intent does not match exact original hotfix patch/commits')
+    review = intent['review']
+    require(isinstance(review, dict) and set(review) == {'bug', 'dependencies', 'premium_excluded'}
+            and review['premium_excluded'] is True
+            and all(isinstance(review[k], str) and len(review[k].strip()) >= 20
+                    for k in ('bug', 'dependencies')),
+            'Owner semantic/dependency review required; partial cherry-picks need prerequisites reviewed')
+
+    pr_head = pr['head']['sha']
+    require(pr['head']['ref'] == 'hotfix-intent/' + intent['version']
+            and re.fullmatch('[a-f0-9]{40}', pr_head)
+            and (merge is not None or pr_head == source)
+            and pr['head']['repo']['full_name'] == 'oangsa/RoLauncher'
+            and pr['base']['ref'] == 'main' and pr['base']['sha'] == source_merge_sha
+            and pr['base']['repo']['full_name'] == 'oangsa/RoLauncher',
+            'Recovery intent PR must be based directly on the exact source hotfix merge')
+    final = call(f'/commits/{pr_head}?per_page=100')
+    require([p['sha'] for p in final['parents']] == [source_merge_sha]
+            and [(f['filename'], f['status']) for f in final['files']] == [(path, 'added')],
+            'Recovery source commit must add only the fresh intent')
+    if merge is not None:
+        require([p['sha'] for p in merge['parents']] == [source_merge_sha, pr_head]
+                and merge['commit']['tree']['sha'] == final['commit']['tree']['sha'],
+                'Recovery intent merge must preserve its exact reviewed tree and source parent')
+
+    for name in ('Cargo.toml', 'Cargo.lock'):
+        before = tomllib.loads(content(call, name, base))
+        after = tomllib.loads(content(call, name, source_merge_sha))
+        if name == 'Cargo.toml':
+            require(before['package']['version'] == tag[1:]
+                    and after['package']['version'] == intent['version'],
+                    'Hotfix source manifest version mismatch')
+            after['package']['version'] = before['package']['version']
+            normalize_windows_sys_features(before, after)
+        else:
+            old = next(p for p in before['package'] if p['name'] == 'rolauncher')
+            new = next(p for p in after['package'] if p['name'] == 'rolauncher')
+            require(old['version'] == tag[1:] and new['version'] == intent['version'],
+                    'Hotfix source lock version mismatch')
+            new['version'] = old['version']
+        require(before == after, 'Hotfix dependency changes require separate authorization')
+        require(content(call, name, source) == content(call, name, source_merge_sha),
+                'Recovery intent changed hotfix package metadata')
+    return intent
+
