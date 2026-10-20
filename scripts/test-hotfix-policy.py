@@ -474,6 +474,16 @@ class HotfixTests(unittest.TestCase):
         api.governance_files[0]['filename'] = 'src/updates.rs'
         with self.assertRaisesRegex(ValueError, 'Non-governance'): check_branch_flow(event, api)
 
+    def test_timed_out_intent_history_is_exact_and_immutable(self):
+        from hotfix_policy import require_governance_file
+        path = '.github/release-intents/4422944a-0a2e-450d-8f3d-103ae22eadba.json'
+        file = dict(filename=path, status='added', sha='d3e330b5b376624a3e158b9ba2ebe5a90acb371f')
+        require_governance_file(file)
+        for changed in (dict(file, sha='0' * 40), dict(file, status='modified'),
+                        dict(file, filename='.github/release-intents/unapproved.json')):
+            with self.assertRaises(ValueError):
+                require_governance_file(changed)
+
     def test_unattended_governance_admits_only_governance_changes(self):
         from hotfix_policy import check_branch_flow
         api = RecoveryFixture()
