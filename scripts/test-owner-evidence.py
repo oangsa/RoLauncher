@@ -549,14 +549,22 @@ class OwnerEvidenceTests(unittest.TestCase):
         self.assertNotIn('src/updates.rs', GOVERNANCE_PATHS)
         self.assertNotIn('Cargo.toml', GOVERNANCE_PATHS)
 
-    def test_workflow_stays_hard_disabled_and_policy_unenrolled(self):
+    def test_workflow_stays_hard_disabled_with_exact_owner_policy(self):
         workflow = (evidence.ROOT / '.github/workflows/release-promotion.yml').read_text()
         self.assertIn('false &&', workflow)
         self.assertIn('timeout-minutes: 60', workflow)
         self.assertIn('cancel-in-progress: false', workflow)
         self.assertIn('issues: read', workflow)
         self.assertNotIn('administration:', workflow)
-        with self.assertRaises(ValueError): evidence.load_policy()
+        policy, active = evidence.load_policy()
+        self.assertEqual(policy['inbox'], 35)
+        self.assertIs(policy['public_disclosure_approved'], True)
+        self.assertEqual(policy['disclosure_sha256'],
+                         '9a6ade9194ff6d87897e07de05e280b367351f823074537d6db66e42b58cd6fa')
+        self.assertEqual(policy['keys'], [
+            'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIfhxAsJYk67VBohpkfYVBKdEkJV1/6IASKEBesgTAoW'
+        ])
+        self.assertEqual(active, policy['keys'])
 
 
 if __name__ == '__main__':
