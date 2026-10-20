@@ -165,7 +165,7 @@ impl Notice {
 
 fn rejoin(a: &Account) -> &'static str {
     if a.auto_recovery {
-        "Waiting up to 30 seconds for reconnection, then automatic rejoin will try again."
+        "Controlled recovery begins immediately; replacement waits for client exit and retry backoff."
     } else {
         "Automatic rejoin is off. Use Start or Restart when you are ready."
     }
@@ -755,7 +755,11 @@ mod tests {
         new.last_error = Some("Session lost (code 267); SECRET_RAW_ERROR".into());
         let kick = account_notice(&old, &new).unwrap();
         assert_eq!(kick.title, "Account kicked");
-        assert!(kick.message.contains("30 seconds"));
+        assert!(
+            kick.message
+                .contains("Controlled recovery begins immediately")
+        );
+        assert!(!kick.message.contains("30 seconds"));
         assert!(account_notice(&new, &new).is_none());
         let mut generic = new.clone();
         generic.last_error = Some("Game connection lost".into());

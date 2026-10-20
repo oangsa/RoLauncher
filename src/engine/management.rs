@@ -511,12 +511,10 @@ pub(super) fn record_activity(old: &State, next: &mut State) {
             Status::Launching => "Launch issued; waiting for verified ownership",
             Status::Running => "Connection confirmed in a verified client log",
             Status::Reconnecting => match a.recovery_reason.as_str() {
-                "Kick267" => "Kick detected (267); waiting through the reconnect grace period",
-                "ConnectionFailed" => {
-                    "Connection failed (279); waiting through the reconnect grace period"
-                }
-                "SessionLost" => "Session lost; waiting through the reconnect grace period",
-                _ => "Connection lost; waiting through the reconnect grace period",
+                "Kick267" => "Access restriction detected (267); check experience permissions",
+                "ConnectionFailed" => "Connection failed (279); controlled recovery requested",
+                "SessionLost" => "Session lost; controlled recovery requested",
+                _ => "Connection lost; controlled recovery requested",
             },
             Status::Backoff => "Retry scheduled; inspect the next retry time",
             Status::Unknown => "Connection or process ownership is not yet verified",

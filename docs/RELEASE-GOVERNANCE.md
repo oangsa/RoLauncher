@@ -1,257 +1,166 @@
-# Protected release promotion — PR01
+# Release governance
 
-Status: implementation prepared on `codex/pr01-protected-release-promotion`, October 16, 2026.
-Publication, live settings changes, branch merges and application version changes were not authorized or performed.
+Status: automatic control collection replaces attended signing after one-time GitHub App setup.
+See [setup and release procedure](OWNER-EVIDENCE.md).
+See [stable hotfix release flow](HOTFIX-RELEASE-STRATEGY.md) for release steps and current hotfix status.
 
-## Release Intent contract
+## Trust boundary
 
-Ordinary `main` merges, version edits, changelog edits, workflow dispatches and pushed stable tags cannot authorize stable publication.
-A qualifying release adds exactly one `.github/release-intents/<UUIDv4>.json` in an owner-merged `dev → main` PR.
-Merging this record means the owner explicitly authorizes publication of that resulting merge commit after checks pass.
+1. CI builds and tests candidate code with contents-read and nonpersisted checkout credentials.
+2. A separate `workflow_run` publisher checks out the trusted default-branch event SHA, never the candidate SHA.
+3. It reads candidate files and archives as data, verifies authority and evidence, then uploads without executing candidate code.
 
-```json
-{
-  "schema": 1,
-  "id": "<fresh lowercase UUIDv4 matching the filename>",
-  "version": "<intentionally prepared MAJOR.MINOR.PATCH>",
-  "channel": "stable"
-}
-```
+Only the publishing job requests contents-write, Actions-read and PR-read.
+A separate repository-scoped App credential supplies live administrative control reads.
+A missing/false `RELEASE_PROMOTION_ENABLED` prevents activation.
+The dedicated App must also be configured before an admitted release can proceed.
+Neither successful CI nor a branch name grants publication authority.
 
-The placeholders are deliberately invalid; this PR creates no executable intent and selects no release version.
-The four fields are mandatory; extra fields, duplicate JSON fields, development suffixes and reused/edited paths are rejected.
-Keep historical records unchanged and create the record in one commit, after preparation is complete.
+The default-branch and token separation follow GitHub's [workflow_run security model](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_run).
+Do not expose repository secrets, write credentials or shared executable caches to build jobs.
 
-1. Follow AGENTS.md: verify latest stable, prepare the intentional version once, and finish README, lockfile, release notes and changelogs.
-2. Add the fresh record through a `feature/*` or `codex/*` PR to `dev`; pass all checks.
-3. The repository owner merges the subsequent `dev → main` PR, using a merge commit as established by project convention.
-4. Post-merge Windows, Ubuntu package, Ubuntu container and Arch container checks must succeed at the exact source SHA.
-5. The trusted publisher verifies authority and artifacts, finishes a matching draft, then publishes automatically once.
+## Feature intent: schema 1
 
-Authority comes from GitHub's authenticated PR `merged_by.id` matching the personal repository owner's numeric ID.
-Author names, commit messages, labels, record-supplied identities and arbitrary branch/tag names confer no authority.
-Repository transfer, organization ownership or a changed default branch requires a reviewed transition; the gate currently accepts only `oangsa/RoLauncher` with `main` as default.
+The existing PR01 contract remains unchanged: one newly added `.github/release-intents/<UUIDv4>.json`.
+Its exact fields are `schema=1`, `id=<UUIDv4>`, `version=<MAJOR.MINOR.PATCH>` and `channel=stable`.
+Only an official `dev` PR merged into official `main` by repository owner `oangsa` qualifies.
 
-The source SHA comes from the owner-merged PR and GitHub push run, avoiding a self-referential commit field.
-The source must still be current `main` before writes and final promotion; an older unconsumed intent needs a fresh, separately authorized promotion.
-GitHub path history must show a single creation, preventing deletion/reintroduction or reuse of an old intent.
+The intent must first appear in that promotion, with exactly one path-history entry.
+Development versions, changed/reintroduced intents, foreign PRs and ambiguous evidence fail closed.
+Future Premium feature releases still require this independent feature path after development is complete.
 
-## Trust and artifact boundary
+## Hotfix intent: schema 2
 
-`ci-release.yml`, `beta-release.yml` and `linux.yml` retain their Windows/Linux build, test, smoke and packaging jobs.
-They have read-only tokens, do not persist checkout credentials, and contain no publishing jobs or custom publishing secrets.
-`codex/**` now follows the same development path as `feature/**`; only same-repository `dev` PRs target `main`.
+Only official `hotfix/<version>` PRs merged into `main` by the owner qualify.
+Merge commits are required: ordered parents must equal authorized main base and PR head; merged tree must equal head tree.
+Squash/rebase promotion requires a separately reviewed policy change.
 
-`release-promotion.yml` runs on workflow completion from the default branch with a single serialized publication job.
-It checks out the event's trusted default-branch SHA using a pinned checkout action, never the candidate `workflow_run.head_sha`.
-The write token is passed only to the trusted Python publisher; it executes no candidate scripts, builds, installers or downloaded programs.
-
-The publisher independently reads GitHub API evidence for the source workflow, latest attempt, exact jobs and artifacts.
-It requires successful named jobs, matching source identities and active branch/tag rulesets before writing.
-It repeats controls and run checks before final promotion, including whether the publishing workflow was disabled.
-
-| Evidence | Required behavior |
+| Field | Exact requirement |
 |---|---|
-| Source run | Official repository, `push`, exact workflow path/branch, completed successfully |
-| Main checks | Branch flow; Windows checks; Linux checks and package (Ubuntu 24.04) |
-| Separate Linux workflow | Same main SHA; successful Linux checks (Ubuntu) and Linux checks (Arch) |
-| Run attempts | Re-read current attempt and job evidence before publishing; a changed attempt is not a mutation retry |
-| Artifact selection | Exact Windows/Linux names suffixed `-attempt-N`, source run ID/SHA and current attempt; no expired, duplicate or missing artifacts |
-| Archive integrity | GitHub API `sha256:` archive digest required and verified; missing digest fails closed |
-| ZIP handling | Fixed basenames; bounded directory and decompression; no paths, duplicates, symlinks, encryption, split ZIPs or ZIP64 |
-| Payload integrity | Existing Windows/Linux checksum validator requires exact payload sets and verified SHA256 values |
-| Version/channel | Intent, Cargo, lockfile, README and notes agree; source CI retains all existing changelog/version checks |
-| Stable ordering | A new stable version must exceed latest published stable; no application version is chosen by this change |
-| Version tag | Exact checked commit; stable tags are lightweight; existing wrong/ambiguous tags are rejected |
+| `schema`, `source`, `channel` | Integer `2`, `hotfix`, `stable` |
+| `id` | Fresh canonical UUIDv4; filename matches; never edited/reused |
+| `version` | Plain stable version, exactly baseline PATCH + 1 |
+| `baseline_tag`, `baseline_sha` | Published stable tag and its resolved commit |
+| `base_sha` | Exact authorized main base; only reviewed governance history may follow baseline |
+| `reviewed_sha` | Final reviewed application/version/docs commit, before intent-only commit |
+| `commits` | Ordered complete commit list from base through reviewed SHA |
+| `paths` | Sorted complete net changed-file list |
+| `patch_sha256` | Hash of canonical reviewed patch records, as printed by Branch flow |
+| `review.bug` | Concrete approved bug and scope, at least 20 characters |
+| `review.dependencies` | Explicit prerequisite/cherry-pick and dependency analysis, at least 20 characters |
+| `review.premium_excluded` | Boolean `true`, attested by owner's merge |
 
-The publisher adds `release-promotion.json` with intent, source, channel, run/attempt, artifact IDs/archive digests and five final asset hashes.
-A hash of this receipt binds the draft body before uploads; the receipt becomes the sixth public release asset.
-The receipt uses authenticated GitHub evidence, not a new cryptographic signing key or signed-update scheme; PR03/PR04 remain separate.
+No additional fields are accepted.
+The final hotfix commit must add only that intent file, with sole parent `reviewed_sha`.
+This avoids a self-referencing commit hash while binding approval to the actual promotion and exact reviewed source.
 
-Each downloaded archive is capped at 256 MiB, including bounded HTTP reads when Content-Length is absent or false.
-Expanded data across both archives is capped at 512 MiB; individual entries are capped at 256 MiB and checksum files at 1 MiB.
-Extraction copies 1 MiB chunks to temporary files; final in-memory payloads remain bounded by the aggregate cap.
+Branch flow prints commit IDs, paths and patch hash before intent creation.
+The owner reviews complete blobs/dependencies at those IDs, adds the intent in a separate final commit, and authorizes its merge.
+No executable intent or patch-version metadata exists in this preparation.
 
-Before ZIP parsing, the standard footer must declare the exact expected entry count and a central directory no larger than 64 KiB.
-Only stored/deflated entries are accepted; nested release payloads remain opaque and are never unpacked or executed.
-JSON responses are capped at 8 MiB; request timeouts and the existing 15-minute publishing-job timeout bound stalled work.
+## Recovery intent: schema 3
 
-These are application input budgets, not a guaranteed process-RSS ceiling or an OS sandbox.
-Current local Windows payloads total about 156 MiB; a prior Linux package is about 64 MiB, within these budgets.
-Larger packages or GitHub-generated ZIP64 archives fail closed and require a reviewed budget/format change before activation.
+Schema 3 is only for a hotfix source PR already merged by owner `oangsa` without its schema-2 intent. It does not relax schema 2 or admit a patch that was not owner-merged.
 
-## Idempotency and failures
-
-The matching release identity and receipt are the consumption ledger; no new database is needed.
-A matching published release returns `consumed` and performs no writes.
-A matching interrupted draft uploads only missing assets, verifies all asset sizes/digests, then promotes.
-
-| Scenario | Result |
+| Field | Exact requirement |
 |---|---|
-| Lost draft/tag creation response | Rerun reconciles existing identity before attempting creation again |
-| Lost asset-upload response | Rerun recognizes identical uploaded bytes; never deletes/replaces them |
-| Lost final-publish response | Rerun recognizes a complete consumed release; no second publication |
-| Different draft marker, source, channel or asset bytes | Deny and quarantine for owner investigation |
-| Historical release or pre-transition draft without receipt | Preserve it; deny automatic adoption or replacement |
-| CI still running, failed, canceled, skipped or missing | Deny; completion of the other required workflow provides another reconciliation opportunity |
-| Main advanced, artifact expired, or CI rebuilt as another attempt | Deny stale identity; do not rewrite the pending draft to fit different evidence |
-| Invalid/truncated API evidence or unavailable GitHub | Fail closed; no automatic retry of ambiguous mutations |
-| Emergency disable during upload | Keep draft; final gate checks workflow state before promotion |
+| `schema`, `source`, `channel` | Integer `3`, `hotfix-recovery`, `stable` |
+| `id` | Fresh canonical UUIDv4; filename matches; never edited or reused |
+| `version` | Plain stable version, exactly published baseline PATCH + 1 |
+| `baseline_tag`, `baseline_sha` | Published stable tag and its resolved commit |
+| `source_pr`, `source_merge_sha` | Original owner-merged hotfix PR number and exact merge commit |
+| `base_sha`, `reviewed_sha` | Original source PR base and reviewed head, not recovery-PR SHAs |
+| `commits`, `paths`, `patch_sha256` | Exact original source report, in order/sorted form and canonical digest |
+| `review` | Same bug, dependency/prerequisite and Premium-exclusion attestations as schema 2 |
 
-Rerun the **Protected release promotion** run to retry the same source evidence; rebuilding CI is a different operation.
-If an intent is stale, prepare a fresh owner-authorized intent and version/disposition as needed, rather than overwriting existing artifacts.
-API evidence collections at 100 entries are rejected rather than partially trusted; split oversized promotion diffs.
-GitHub can replace a pending concurrency run when more completion events queue; replay the trusted promotion run if an eligible event never executed.
-This is a retry of existing authorization, not a new manual Publish approval.
+The original PR must be official `hotfix/<version>`, owner-merged to `main`, and have merge parents `[base_sha, reviewed_sha]` with the reviewed tree unchanged. Governance history from the stable baseline to `base_sha` and the complete hotfix report are checked again.
 
-## Beta and historical GPL transition
+The recovery PR branch must be `hotfix-intent/<version>` and start directly at current `main`. If governance support has merged since the original hotfix, every intervening commit from `source_merge_sha` to the recovery PR base must be governance-only. Package and lockfile bytes must match the original hotfix tree. The intent branch has one commit adding only the fresh file; the owner-merged commit must preserve its exact base/head parents and tree. Any application drift, mismatched source PR, changed patch or extra file is rejected.
 
-The existing `beta-vMAJOR.MINOR.PATCH` push still builds Windows/Linux/source artifacts.
-Publication migrates to the common trusted publisher: the original tag-push actor must be the owner, the tag must still resolve to the checked SHA, and that SHA must belong to `dev` history.
-Beta remains a prerelease with `make_latest=false`; it does not require a stable JSON intent or promote stable/latest.
+The recovery implementation itself can enter `main` only through `codex/hotfix-recovery-governance`, based directly on current `main`. Branch flow permits governance paths only and requires Cargo package version to remain the exact next patch over latest stable. This exception does not enable the publisher or satisfy owner-signed live controls.
 
-Beta publication pauses during transition until the new default-branch publisher and separately approved controls/activation exist.
-No beta tag was created or moved here; the existing successful beta run's actual `push`, tag-name `head_branch`, workflow path and owner actor were checked read-only for compatibility.
-Legacy helper tests remain; both publishing command entry points now use the common workflow-run guard.
+## Scope evidence
 
-**Historical workflow hazard:** old tags contain old workflow code, including privileged publishing jobs.
-Restrict creation of `beta-v*` tags to the owner before activation; new beta tags must point to the migrated workflow revision in `dev`.
-Cancel old privileged runs and do not rerun pre-transition CI/publish jobs; their old code cannot be retroactively secured by this PR.
+The patch hash covers JSON records containing `filename`, `status`, blob `sha` and GitHub `patch`, sorted by filename.
+Serialization uses sorted keys and separators `(',', ':')`, UTF-8, without a newline.
+`scripts/hotfix_policy.py` exposes `patch_report` and `hotfix_report`; Branch flow emits their reviewable report.
 
-Historical GPL releases, tags, source archives, license terms and notices remain unchanged.
-Existing source packaging still includes tracked build inputs and AGENTS.md; the new scripts/workflow/docs are tracked source inputs too.
-No paid gating, signing credential or proprietary feature is added.
+Both net patch and each individual commit are checked; reverted experimental commits cannot hide in a clean net diff.
+Hotfix commits must be linear descendants of authorized base and diverge from `dev`; dev ancestors/merges are denied.
+Main history since published stable is separately checked for governance-only paths, including each commit.
 
-## GitHub settings — separate owner approval required
+Unexpected paths, missing patches, renamed files, binary-only diffs, oversized evidence and known Premium/identity/licensing/payment markers are denied.
+Cargo manifests and lockfiles may change only the root version, except a hotfix may add the allowlisted
+`Win32_System_Diagnostics_Debug`, `Win32_System_Diagnostics_ToolHelp` and `Win32_System_RemoteDesktop` features to
+the existing `windows-sys` 0.61 Windows dependency. Existing features must remain, and dependency versions or other
+dependency metadata must not change; desktop project/package-lock changes are denied.
+Compatibility changes outside this narrow policy need a separate reviewed governance PR, never a bypass.
 
-Read-only inspection on October 16 found a public repository, default branch `main`, unprotected `main` and zero rulesets.
-No live setting was changed; deployment readiness is blocked until configuration and an isolated GitHub integration proof pass.
-GitHub Free supports branch/tag rulesets for public repositories; availability must be reassessed before any private-repository transition. [GitHub ruleset documentation](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository).
+These controls do not prove program semantics or detect every missing prerequisite.
+The owner must inspect full source blobs, call paths, dependency closure and tests; API patch previews may omit detail.
+The explicit review attestation flags partial cherry-picks for human review and is not an automated proof of dependency completeness.
 
-1. Keep the repository's write/admin/Actions-management authority with the trusted owner; audit collaborators, Apps, deploy keys and bypasses.
-2. Set default workflow permissions to read repository contents; keep fork-PR write tokens and fork secret access disabled.
-3. Add active rulesets targeting `refs/heads/main` and `refs/heads/dev`: require PRs, prevent deletion/force pushes, and require all five checks listed above.
-4. Select GitHub Actions as expected check source and require branches up to date; permit the established merge-commit workflow.
-5. Keep branch bypasses empty in normal operation; a sole owner does not need an unavailable second reviewer or a separate Publish reviewer.
-6. Add an active tag ruleset for `refs/tags/v*` restricting updates and deletion, with no ordinary bypass; allow initial creation by the publisher token.
-7. Add an active tag ruleset for `refs/tags/beta-v*` restricting creation, updates and deletion; limit creation bypass to the trusted owner/admin role and ensure no other account has that role.
-8. Enable GitHub release immutability for future releases after testing its draft/upload behavior; preserve existing releases. [GitHub immutability setup](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/establish-provenance-and-integrity/prevent-release-changes).
-9. Cancel pre-transition privileged runs, complete isolated controls/permission/digest tests, then separately authorize `RELEASE_PROMOTION_ENABLED=true` as a repository Actions variable.
+## Checks and artifacts
 
-The runtime gate reads active effective branch rules, their source definitions and tag-rule definitions.
-All five required checks must specify GitHub Actions App ID `15368`; strict up-to-date checking must be explicitly true on each required-status rule.
-Missing/foreign integration IDs, missing/false strictness, truncated rule evidence and inactive/incorrect source rulesets deny promotion.
+- Required main CI jobs: Branch flow, Windows checks, Linux checks and package (Ubuntu 24.04).
+- Separate Linux workflow: Linux checks (Ubuntu) and Linux checks (Arch), same exact main SHA.
+- All runs must be official successful pushes; exact latest attempts and named successful jobs are rechecked before final publication.
+- Artifacts must match run ID/SHA/attempt, fixed basenames and mandatory GitHub archive SHA256 digests.
+- ZIP budgets reject duplicate/path/link/encrypted/unsupported entries; payload checksum sets must match exactly.
+- Hotfix source ZIP inventory and every Git blob hash must equal the exact promoted commit tree.
+- Stable source packaging uses `git archive HEAD` from a clean committed tree; local development packaging retains working changes.
+- Existing package verification retains executable, WebView2Loader.dll, source, AGENTS.md, GPL/attribution and dependency-license checks.
 
-Visible branch bypasses must be empty; visible stable-tag bypasses must be empty.
-Visible beta-tag bypasses permit only `RepositoryRole=5` (admin), `bypass_mode=always`; a separate owner/admin audit must confirm the owner is the only administrator.
-Use separate stable and beta tag rulesets, since the beta creation exception must not apply to stable tags.
+Outer archives are limited to 256 MiB each, 512 MiB total expansion, 256 MiB per entry and 1 MiB per checksum file.
+Hotfix source has a separate 256 MiB expansion budget, fewer than 5,000 directory entries and a 2 MiB central-directory limit.
+Truncated/oversized collections fail closed; limits need review before increasing.
 
-GitHub returns `bypass_actors` only to callers with write access to the ruleset; contents-write does not grant ruleset-write.
-An omitted field is explicitly reported as **unverified**, never interpreted as an empty list; the publisher cannot enforce a hidden list using its least-privilege token.
-Before enabling promotion, the owner/admin must separately inspect/export every applicable bypass list, collaborator/App/deploy-key permission and native immutability setting.
+## Publication and recovery
 
-Record ruleset IDs, scope, check integration IDs/strictness, bypass actors and the reviewer/date in the activation evidence.
-Reverify after protection, access, ownership or workflow changes; setting `RELEASE_PROMOTION_ENABLED=true` attests this separate verification has passed.
-The checklist/attestation is an administrative prerequisite, not an enforced GitHub security boundary or a substitute for actual rules.
+`release-promotion.json` binds intent, source, channel, run/attempt, artifact IDs/digests and final file hashes.
+Its hash binds the draft body; identical completed publication returns `consumed` without writes.
+Matching interrupted drafts upload only missing assets; conflicting bytes or identity are quarantined, never replaced.
 
-Rules and integration/strictness fields are readable with Metadata-read; no new publisher permissions are added.
-The GitHub Actions identity was checked against actual hosted check runs on the reviewed branch. [GitHub rules API fields and bypass visibility](https://docs.github.com/en/rest/repos/rules).
-Classic branch protection alone does not satisfy this implementation; configure the documented rulesets.
+Only exact checked tags qualify; stable tags created by this publisher are lightweight.
+Existing wrong/stale tags, historical releases without matching receipt, development versions and nonadvancing versions are denied.
+The published baseline may advance to the exact target solely to reconcile its matching consumed receipt.
 
-GitHub's immutable-release settings endpoint requires Administration read permission, unavailable to the proposed minimal workflow token.
-The publisher therefore guarantees it never replaces published assets; native GitHub immutability and bypass/access configuration remain independently verified activation prerequisites.
-Do not add a production admin token just to work around this limitation. [GitHub API permissions](https://docs.github.com/en/rest/repos/repos#check-if-immutable-releases-are-enabled-for-a-repository).
+The final gate repeats authority, main-head, active Rulesets, workflow state and source-run checks.
+GitHub API operations are not atomic; emergency disable must cancel running jobs as well as disable the workflow.
+Native release immutability, owner/default-branch trust and independent activation proof remain required.
 
-No repository-wide production secrets should be available to code-building workflows.
-This patch references only the ephemeral `GITHUB_TOKEN`; trusted publication has contents-write, Actions-read and PR-read, with no Administration permission.
-Untrusted fork PRs use `pull_request`, never `pull_request_target`; `workflow_run` authority stays on trusted default-branch code. [GitHub event and security model](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_run).
+## Automatic live controls
 
-## Emergency disable and rollback
+The workflow uses a repository-scoped GitHub App to collect complete fresh rulesets, explicit bypass arrays and native immutability settings.
+It checks them before staging and publication, and refreshes automatically during slow uploads.
+No SSH signature, public Issue response or local attendance is required.
 
-1. Disable **Protected release promotion** in Actions and cancel its running/queued jobs; set `RELEASE_PROMOTION_ENABLED=false` or remove the variable.
-2. Retain matching drafts, receipts, tags and artifacts for investigation; do not publish manually or overwrite conflicting assets.
-3. Investigate credentials/source/controls, fix on a feature branch, and validate through dev; any live permission or credential action needs its own authorization.
-4. Resume only after explicit owner authorization and revalidation of exact pending source/artifact identity.
+The App needs Administration write to read bypass actors; its credential is limited to control GETs by the publisher adapter.
+Only trusted default-branch code receives it; the normal Actions token retains release-write duties.
+This replaces the workstation-signature trust model with a protected Actions-secret trust model.
 
-Workflow disable is re-read before writes/final promotion; changing the variable alone does not cancel an already-running process.
-GitHub cannot atomically combine a settings change with a release PATCH; cancel in-flight work for an emergency, and account for an already-completed publication.
-Corrections to published bytes require a new version under AGENTS.md.
+See [one-time setup, credential permissions and recovery](OWNER-EVIDENCE.md).
+The following describes the historical attended transport, retained for audit.
 
-For code rollback, retain CI-only build jobs and the disabled guarded publisher; revert the new promotion path through a reviewed PR.
-Do not blindly restore the old main-auto-publish or tag-local publisher jobs.
-Do not delete, re-tag or replace historical releases as a rollback mechanism.
+## Historical owner-signed live controls
 
-## Local validation and remaining proof
+See [owner evidence protocol and operations](OWNER-EVIDENCE.md) and the separately authorized [sandbox lifecycle plan](SANDBOX-RELEASE-LIFECYCLE.md).
+Production policy is deliberately unenrolled: no key, inbox or public disclosure approval.
+Literal `false &&` remains, and activation variable must remain absent pending separate owner authorization.
 
-| Check | Result on October 16, 2026 |
-|---|---|
-| `python scripts/test-release-promotion.py` | 30 behavioral tests passed, including denial matrices, resource budgets and interruption/race cases |
-| `python scripts/test-publish-beta.py` | 6 existing compatibility/checksum tests passed |
-| `python scripts/test-versioning.py` | Development identity and stable preparation fixtures passed; repository version unchanged |
-| `python scripts/test-linux-update.py` | 3 archive/update tests passed on Windows; not a native Linux run |
-| `python scripts/check-release.py` | Existing 1.7.0 metadata/notes remain consistent |
-| Python compilation | New/common publisher, tests and both entry points compile |
-| Actionlint 1.7.12 | All four workflow files passed; official download SHA256 verified; shellcheck disabled/unavailable |
+Read-only admission precedes two attended challenge-artifact/Issue-response gates, with pinned OpenSSH signatures and exact source/run/attempt/receipt binding.
+Both gates use complete fresh Ruleset/bypass evidence with `protected_branches(strict=True)` and signed live native immutability settings.
+Feature and beta source authority remain unchanged; missing bypass evidence no longer qualifies through administrative attestation.
 
-The first ordinary-merge test failed before implementation; later owner-authority, promotion, history, race, beta, CLI, tag-control, event and duplicate-field slices also ran red before green.
-Tests use an external GitHub API fixture and synthetic archives; they exercise the actual promotion code without credentials or network writes.
-No Windows application/UI/installer build, native Linux build, hosted CI run, production publish, ruleset edit or credential provisioning was performed.
+Each write requires unexpired evidence; final publication rechecks source authority, checks, tag, release and asset identity after attendance.
+Published and consumed releases require separate `immutable: true` readback; identical consumed reconciliation performs no writes.
+Independent review, signing policy enrollment, public disclosure approval, real sandbox lifecycle proof and separate activation authorization remain outstanding.
 
-Before activation, commission a disposable public-repository proof with the same Free-plan rules and owner-only access model.
-Verify real GITHUB_TOKEN endpoint permissions, artifact and release digest availability, immutable draft completion, rule bypasses, token isolation, old-tag fencing, rerun/cancellation ordering and source association.
-No sandbox repository or release was created under this task's prohibition on publishing releases.
+## Beta compatibility
 
-GitHub-hosted runners, GitHub API correctness, the trusted owner/default-branch publisher and pinned checkout action remain trusted.
-An administrator, compromised owner, trusted workflow edit or another write-capable workflow can defeat repository-local conventions; this implementation does not claim protection against those actors.
-Final checks narrow race windows but cannot make API checks and publication a single atomic transaction; no separate signing/notarization or reproducible-build claim is made.
+Beta builds remain read-only; tag-local publication is removed.
+The trusted publisher retains PR01's owner-pushed `beta-vMAJOR.MINOR.PATCH`, dev-history and prerelease/never-latest policy.
+Historical beta tags retain legacy workflows; restrict new beta tag creation and never rerun old privileged jobs.
 
-## Exact changed files
-
-| File | Change |
-|---|---|
-| `.github/workflows/ci-release.yml` | CI-only main path, codex compatibility, read-only checkout and promotion tests |
-| `.github/workflows/beta-release.yml` | Retain beta build/checks; move publication to trusted workflow |
-| `.github/workflows/linux.yml` | Retain Ubuntu/Arch checks; add promotion tests and nonpersisted checkout credentials |
-| `.github/workflows/release-promotion.yml` | Disabled-by-default trusted automatic publisher |
-| `scripts/release_promotion.py` | Intent, evidence, artifact, rule, draft/idempotency and CLI boundary |
-| `scripts/test-release-promotion.py` | Credential-free behavioral GitHub fixture and failure scenarios |
-| `scripts/publish-release.py` | Stable entry point delegates to common guard |
-| `scripts/publish-beta.py` | Beta entry point delegates to common guard; legacy helper compatibility preserved |
-| `scripts/test.ps1` | Run promotion suite in Windows checks |
-| `docs/DEVELOPMENT.md` | CI-only main behavior, intent workflow and codex branches |
-| `.github/pull_request_template.md` | Explicit release-intent authorization guidance |
-| `docs/RELEASE-GOVERNANCE.md` | Contract, controls, validation, transition and recovery record |
-
-## Review-ready PR summary
-
-**Title:** Require owner release intent before trusted automatic promotion
-
-Ordinary main merges previously published automatically from a job executing candidate repository code with write authority.
-Build workflows now remain read-only; a separate default-branch publisher requires a fresh owner-merged intent, passing exact-source Windows/Linux checks and verified artifacts before stable publication.
-Matching retries resume drafts without replacing bytes; consumed intents perform no writes, and beta stays a prerelease through the same guarded transition.
-
-Validation: 30 promotion behavioral tests, six existing beta tests, three archive/update tests, version fixtures, metadata checks, Python compilation and actionlint pass locally.
-Live protection and automatic publication remain disabled/pending separate approval; no application version, GPL terms, release artifact or application behavior changed.
-Review the settings/transition prerequisites and real-GitHub proof limitations above before authorizing activation.
-
-## Follow-up review disposition
-
-The comparison base is `dev` at `f61f9e06e4b5531b43b4af7a25a8ef1cec638af7`.
-The feature branch was rebased onto that tip; no merge into `dev` or `main` was performed.
-The unrelated Phase 0 audit was removed from the net PR diff and preserved outside the repository; the complete comparison is the 12 files listed above.
-
-Follow-up code changes are limited to `scripts/release_promotion.py`, its behavioral suite and this governance record.
-The original workflows, application version and application/licensing code were not changed by the follow-up.
-Red tests reproduced weak integration/strictness, bypass and resource acceptance before the corresponding guards were added.
-
-New coverage includes both branches, incorrect/missing App IDs, missing/false strictness, incomplete rule pages, visible bypasses and hidden-bypass reporting.
-Artifact coverage includes overstated metadata, understated download size, aggregate expansion across archives, entry/checksum limits, central-directory growth and bounded HTTP reads.
-Separate beta owner/admin creation bypass and rejected App/incorrect-role/PR-only exceptions are covered without creating a real tag.
-
-Hosted results and exact workflow execution SHAs must accompany the final review package; local tests do not prove hosted compatibility.
-For PR events GitHub builds a synthetic merge SHA; distinguish it from the PR head SHA and verify checkout's resolved HEAD in the logs.
-For push events checkout uses the run head SHA; trusted workflow-run publication still uses the default-branch event SHA, never candidate code.
-
-No release-intent record, live setting change, production credential or release is created by this follow-up.
-Live repository-variable access is an administrative permission boundary; do not infer a missing/false variable from an unauthenticated 404.
-The disabled-default CLI/workflow guards are tested; owner/admin verification of live activation state remains required before deployment.
+The legacy beta library seam remains solely for compatibility tests; its CLI delegates to the protected boundary.
+No workflow calls that library directly or gives it candidate build credentials with write access.

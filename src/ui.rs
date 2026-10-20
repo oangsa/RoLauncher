@@ -1433,7 +1433,7 @@ fn run_window(
         let settings_note = control(
             hwnd,
             "STATIC",
-            "Automatic rejoin waits 30 seconds for reconnection, then retries with backoff. Turn it off to keep the client open without automatic replacement. Changes are saved immediately.",
+            "Confirmed disconnects begin controlled recovery immediately. Replacement waits for the old client to exit and retry backoff. Unverified events cannot close a client. Turn rejoin off to prevent automatic replacement.",
             213,
             12,
             184,

@@ -14,7 +14,26 @@ import warnings
 import zipfile
 from unittest.mock import patch
 import release_promotion
-from release_promotion import authorize, promote, promote_event
+from release_promotion import authorize
+
+
+class FixtureEvidence:
+    """Synthetic control transport only; real SSH verification lives in test-owner-evidence."""
+    stage = 'all'
+    def gate(self, phase, call, binding):
+        if call('/immutable-releases').get('enabled') is not True:
+            raise ValueError('Native release immutability disabled or missing')
+        return call
+    def fresh(self):
+        pass
+
+
+def promote(call, run):
+    return release_promotion.promote(call, run, FixtureEvidence())
+
+
+def promote_event(call, event, channel=None):
+    return release_promotion.promote_event(call, event, channel, FixtureEvidence())
 
 
 SHA = "a" * 40
@@ -61,6 +80,7 @@ class GitHubFixture:
         self.ambiguous_publish = False
         self.fail_create = False
         self.publisher_state = "active"
+        self.immutable = {'enabled': True, 'enforced_by_owner': False}
         prefix = "rolauncher-v2.3.4"
         for artifact_id, name, suffix, endings in (
             (30, "release-files", "-SHA256SUMS.txt", ["-setup-x64.exe", "-windows-x64.zip", "-source.zip"]),
@@ -113,6 +133,7 @@ class GitHubFixture:
                 return self.assets[name]
             if path == "/releases/50" and method == "PATCH":
                 self.release.update(body)
+                self.release['immutable'] = True
                 if self.ambiguous_publish:
                     self.ambiguous_publish = False
                     raise TimeoutError("Publish response lost")
@@ -154,6 +175,8 @@ class GitHubFixture:
         if path in ("/releases/tags/v2.3.4", "/releases/tags/beta-v2.3.4"): return self.release
         if path == "/releases/latest": return {"tag_name": "v2.3.3"}
         if path == "/releases/50/assets": return list(self.assets.values())
+        if path == '/releases/50': return self.release
+        if path == '/immutable-releases': return self.immutable
         if path.startswith("/releases/assets/"):
             return next(a["data"] for a in self.assets.values() if a["id"] == int(path.split("/")[-1]))
         raise AssertionError(path)
@@ -264,12 +287,12 @@ class PromotionTests(unittest.TestCase):
                 with self.assertRaises(ValueError): promote(github, github.run)
                 self.assertEqual(github.writes, [])
 
-    def test_hidden_bypasses_report_the_separate_activation_verification_boundary(self):
+    def test_hidden_bypasses_fail_closed_for_feature_publication_too(self):
         github = GitHubFixture().with_intent()
         github.branch_ruleset.pop("bypass_actors")
-        output = io.StringIO()
-        with redirect_stdout(output): self.assertEqual(promote(github, github.run), "published")
-        self.assertIn("Owner/admin activation verification required", output.getvalue())
+        with self.assertRaisesRegex(ValueError, 'Unverified'):
+            promote(github, github.run)
+        self.assertEqual(github.writes, [])
 
     def test_weak_required_check_rules_cannot_authorize_publication(self):
         for branch in ("main", "dev"):

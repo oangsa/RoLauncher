@@ -78,26 +78,83 @@ fn run() -> Result<(), String> {
         );
         return Ok(());
     }
-    let multi = platform::MultiInstanceGuard::acquire();
-    #[cfg(windows)]
-    let compatibility = if multi.is_ok() {
-        "OS multi-instance coordination initialized; if an existing client owns the mutex, close it yourself and retry Start. Roblox launch, mapping and log compatibility require live validation".into()
+    let store = Store::new(directory)?;
+    let saved = store.load()?;
+    let multi = if saved.multi_instance_enabled {
+        platform::MultiInstanceGuard::acquire().map(Some)
     } else {
-        multi.as_ref().err().unwrap().clone()
+        Ok(None)
+    };
+    // Runs under InstanceGuard, before Engine/API launch workers exist.
+    #[cfg(windows)]
+    let startup_cleanup = (|| -> Result<usize, String> {
+        let conflict = if saved.multi_instance_enabled {
+            multi
+                .as_ref()
+                .ok()
+                .and_then(|guard| guard.as_ref())
+                .is_some_and(|guard| {
+                    !guard
+                        .launch_gate()
+                        .load(std::sync::atomic::Ordering::Acquire)
+                })
+        } else {
+            platform::startup_launch_conflict()?
+        };
+        if conflict
+            && (!saved.retired_launches.is_empty()
+                || saved.accounts.iter().any(|s| s.account.tracker.is_some()))
+        {
+            return Err("Startup conflict: saved launches still need inspection. No external clients closed; quit conflicting Roblox clients and restart RoLauncher.".into());
+        }
+        let protected: Vec<_> = saved
+            .accounts
+            .iter()
+            .filter_map(|s| s.account.process.clone())
+            .collect();
+        platform::close_startup_background_players(
+            &protected,
+            saved.external_background_cleanup_enabled,
+            conflict,
+        )
+    })();
+    #[cfg(windows)]
+    let compatibility = {
+        let coordination = if !saved.multi_instance_enabled {
+            "Multiple instances disabled; one managed client at a time".into()
+        } else if let Err(error) = &multi {
+            error.clone()
+        } else {
+            "OS multi-instance coordination initialized; read-only RAM log fallback is best effort"
+                .into()
+        };
+        match startup_cleanup {
+            Ok(0) => coordination,
+            Ok(count) => format!(
+                "{coordination}; authorized startup cleanup closed {count} conflicting background clients"
+            ),
+            Err(error) => format!("{coordination}; {error}"),
+        }
     };
     #[cfg(target_os = "linux")]
     let compatibility = match &multi {
-        Ok(_) => "Linux / Sober: built-in per-account runtime/IPC isolation; concurrent game sessions and UI parity require live validation".into(),
+        Ok(Some(_)) => "Linux / Sober: built-in per-account runtime/IPC isolation; concurrent game sessions and UI parity require live validation".into(),
+        Ok(None) => "Multiple instances disabled; one managed Sober client at a time".into(),
         Err(error) => error.clone(),
     };
     #[cfg(windows)]
     let launch_gate = multi
         .as_ref()
-        .map(|guard| guard.launch_gate())
+        .map(|guard| {
+            guard
+                .as_ref()
+                .map(|guard| guard.launch_gate())
+                .unwrap_or_else(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)))
+        })
         .unwrap_or_else(|_| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
     #[cfg(target_os = "linux")]
     let launch_gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(multi.is_ok()));
-    let engine = Engine::open_with_launch_gate(Store::new(directory)?, compatibility, launch_gate)?;
+    let engine = Engine::open_with_launch_gate(store, compatibility, launch_gate)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()

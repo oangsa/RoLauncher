@@ -140,45 +140,7 @@ impl Engine {
         identity: &ProcessIdentity,
         clean: bool,
     ) {
-        let _ = self.update(&account.id, account.generation, |a| {
-            if a.process.as_ref() != Some(identity) {
-                return;
-            }
-            a.process = None;
-            a.tracker = None;
-            a.ownership_deadline = None;
-            a.connected_since = None;
-            a.disconnected_since = None;
-            resume_after_confirmed_close(a);
-            if a.close_intent
-                .as_ref()
-                .is_none_or(|i| !i.denied && i.reason != CloseReason::UserStop)
-            {
-                a.close_intent = None;
-            }
-            if a.desired_running
-                && a.auto_recovery
-                && !matches!(
-                    a.status,
-                    Status::NeedsAttention | Status::Queued | Status::Backoff
-                )
-            {
-                apply_failure(
-                    a,
-                    &Failure::new(
-                        FailureKind::Other,
-                        "Managed client exited; scheduling recovery",
-                    ),
-                );
-            } else if !a.desired_running || !a.auto_recovery {
-                a.desired_running = false;
-                a.status = Status::Stopped;
-            }
-            if clean && !account.disconnect_notified {
-                a.last_error = Some("Client closed normally".into());
-                a.recovery_reason = "NormalExit".into();
-            }
-        });
+        self.confirmed_exit(&account.id, account.generation, identity, clean);
         if !account.desired_running {
             self.finish_operation(&account.id, account.generation, None);
         }
@@ -239,7 +201,10 @@ impl Engine {
         {
             return Err("Close superseded; observing the current client".into());
         }
-        if a.close_intent.is_none() && recovery_due(a, Utc::now()) {
+        if a.close_intent.is_none()
+            && recovery_due(a, Utc::now())
+            && a.recovery_process.as_ref() == Some(identity)
+        {
             a.close_intent = Some(CloseIntent {
                 id: Uuid::new_v4(),
                 reason: CloseReason::AutomaticRecovery,
@@ -287,6 +252,21 @@ impl Engine {
             self.commit_close_state(&mut state, next)?;
             return Err("Close denied; client preserved, inspect it before retrying".into());
         }
+        if was_recovery {
+            let a = account_mut(&mut next, &expected.id)?;
+            reserve_recovery(a);
+            a.close_intent = Some(intent.clone());
+            if a.status == Status::NeedsAttention {
+                let operation = a.operation_id;
+                let error = a.last_error.clone();
+                if let Some(op) = operation.and_then(|id| next.operations.get_mut(&id)) {
+                    op.state = "failed".into();
+                    op.error = error;
+                }
+                self.commit_close_state(&mut state, next)?;
+                return Ok(false);
+            }
+        }
         // Persist newly classified recovery before any destructive effect.
         self.commit_close_state(&mut state, next)?;
         // Coordination is an independently updated atomic. Discovery/disk work may
@@ -313,19 +293,6 @@ impl Engine {
         match effect(identity, force) {
             Ok(()) => {
                 attempts.record(&expected.id, &intent, identity, now + started.elapsed());
-                if was_recovery {
-                    let mut next = state.clone();
-                    let a = account_mut(&mut next, &expected.id)?;
-                    apply_failure(
-                        a,
-                        &Failure::new(
-                            FailureKind::Other,
-                            "Disconnected for more than 30 seconds; scheduling recovery",
-                        ),
-                    );
-                    a.close_intent = Some(intent);
-                    self.commit_close_state(&mut state, next)?;
-                }
                 Ok(true)
             }
             Err(_) => {

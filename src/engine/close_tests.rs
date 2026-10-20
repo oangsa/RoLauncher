@@ -1548,3 +1548,61 @@ fn legacy_intent_without_episode_identity_requires_and_accepts_fresh_stop() {
         .unwrap();
     assert!(closed);
 }
+
+#[test]
+fn merged_recovery_reserves_retry_before_close_and_preserves_rate_limit() {
+    let f = Fixture::new();
+    f.recovery();
+    let deadline = Utc::now() + ChronoDuration::seconds(120);
+    let a = f.account();
+    f.engine
+        .update("1", a.generation, |a| {
+            a.recovery_reason = "RateLimit".into();
+            a.next_retry = Some(deadline);
+        })
+        .unwrap();
+    let a = f.account();
+    let mut attempts = CloseAttempts::default();
+    let players = f.players();
+    assert!(
+        f.engine
+            .close_owned(
+                &a,
+                Instant::now(),
+                &mut attempts,
+                || Ok(players),
+                |_, _| {
+                    let saved = f.engine.0.store.load().unwrap().accounts.remove(0).account;
+                    assert_eq!(
+                        saved.failures, 1,
+                        "retry must be durable before the close effect"
+                    );
+                    assert!(saved.next_retry.is_some_and(|time| time >= deadline));
+                    Ok(())
+                }
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        f.account().recovery_evidence,
+        RecoveryEvidence::RecoveryStarted
+    );
+}
+
+#[test]
+fn merged_recovery_at_retry_cap_preserves_the_live_client() {
+    let f = Fixture::new();
+    f.recovery();
+    let a = f.account();
+    f.engine
+        .update("1", a.generation, |a| a.failures = 4)
+        .unwrap();
+    let mut attempts = CloseAttempts::default();
+    assert!(
+        f.tick(&f.account(), Instant::now(), &mut attempts)
+            .is_empty()
+    );
+    assert_eq!(f.account().failures, 5);
+    assert_eq!(f.account().status, Status::NeedsAttention);
+    assert!(f.account().process.is_some());
+}
