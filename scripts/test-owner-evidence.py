@@ -60,6 +60,76 @@ class LiveFixture(reference.GitHubFixture):
         return super().__call__(path, method, body, **kwargs)
 
 
+class AutomaticEvidenceTests(unittest.TestCase):
+    def test_publishes_and_reconciles_without_local_signatures(self):
+        api = LiveFixture()
+        for expected in ('published', 'consumed'):
+            transport = evidence.AutomaticEvidence(api.full)
+            self.assertEqual(promotion.promote(api, api.run, transport), expected)
+        self.assertTrue(api.release['immutable'])
+
+    def test_admission_never_writes(self):
+        api = LiveFixture()
+        with self.assertRaises(evidence.ChallengeReady):
+            promotion.promote(api, api.run, evidence.AdmissionOnly())
+        self.assertEqual(api.writes, [])
+
+    def test_no_intent_never_reads_app_controls(self):
+        api = LiveFixture()
+        api.files = []
+        transport = evidence.AutomaticEvidence(lambda path: self.fail('App called without release intent'))
+        self.assertEqual(promotion.promote(api, api.run, transport), 'no-intent')
+        self.assertEqual(api.writes, [])
+
+    def test_final_gate_denial_leaves_staged_release_unpublished(self):
+        api = LiveFixture()
+        def app(path):
+            if path == '/immutable-releases' and api.release is not None:
+                return dict(enabled=False, enforced_by_owner=False)
+            return api.full(path)
+        with self.assertRaisesRegex(ValueError, 'immutability disabled'):
+            promotion.promote(api, api.run, evidence.AutomaticEvidence(app))
+        self.assertTrue(api.release['draft'])
+        self.assertFalse(any(method == 'PATCH' for _, method, _ in api.writes))
+
+    def test_missing_bypasses_wrong_repo_and_disabled_immutability_deny_before_writes(self):
+        for fault in ('bypasses', 'repository', 'immutable', 'permission'):
+            with self.subTest(fault=fault):
+                api = LiveFixture()
+                def app(path):
+                    if fault == 'permission':
+                        raise RuntimeError('403')
+                    result = api.full(path)
+                    if fault == 'bypasses' and path == '/rulesets/2':
+                        result.pop('bypass_actors')
+                    if fault == 'repository' and path == '':
+                        result['id'] = 1
+                    if fault == 'immutable' and path == '/immutable-releases':
+                        result = dict(enabled=False, enforced_by_owner=False)
+                    return result
+                with self.assertRaises((ValueError, RuntimeError)):
+                    promotion.promote(api, api.run, evidence.AutomaticEvidence(app))
+                self.assertEqual(api.writes, [])
+
+    def test_app_adapter_denies_mutations_and_unrelated_reads(self):
+        transport = evidence.AutomaticEvidence(lambda path: self.fail('Unexpected API request'))
+        for path, args in (('/releases', ()), ('/rulesets/2', ('PATCH',)),
+                           ('https://example.com', ()), ('/issues/35', ())):
+            with self.assertRaises(ValueError):
+                transport.read(path, *args)
+
+    def test_slow_upload_refreshes_and_changed_controls_stop_publication(self):
+        api = LiveFixture()
+        transport = evidence.AutomaticEvidence(api.full)
+        transport.gate('preflight', api, {'source': 'test'})
+        transport.checked -= 46
+        api.branch_ruleset['bypass_actors'] = [dict(actor_type='RepositoryRole', actor_id=5, bypass_mode='always')]
+        with self.assertRaisesRegex(ValueError, 'bypasses must be empty'):
+            transport.fresh()
+        with self.assertRaisesRegex(ValueError, 'binding changed'):
+            transport.gate('final', api, {'source': 'changed'})
+
+
 class OwnerEvidenceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -556,10 +626,14 @@ class OwnerEvidenceTests(unittest.TestCase):
         self.assertIn("github.event.workflow_run.event == 'push'", workflow)
         self.assertIn("github.event.workflow_run.conclusion == 'success'", workflow)
         self.assertIn("github.event.workflow_run.head_repository.full_name == github.repository", workflow)
-        self.assertIn('timeout-minutes: 60', workflow)
+        self.assertIn('timeout-minutes: 20', workflow)
         self.assertIn('cancel-in-progress: false', workflow)
-        self.assertIn('issues: read', workflow)
-        self.assertNotIn('administration:', workflow)
+        self.assertNotIn('issues: read', workflow)
+        self.assertIn('--stage automatic', workflow)
+        self.assertIn('permission-administration: write', workflow)
+        self.assertIn('repositories: RoLauncher', workflow)
+        self.assertNotIn('--stage stage', workflow)
+        self.assertNotIn('\n      administration:', workflow)
         policy, active = evidence.load_policy()
         self.assertEqual(policy['inbox'], 35)
         self.assertIs(policy['public_disclosure_approved'], True)

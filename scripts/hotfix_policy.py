@@ -195,7 +195,8 @@ def check_branch_flow(event, call):
         return 'feature-promotion'
     recovery_branch = re.fullmatch(r'hotfix-intent/[0-9]+\.[0-9]+\.[0-9]+', branch)
     recovery_governance = branch == 'codex/hotfix-recovery-governance'
-    owner_evidence_enrollment = branch == 'codex/phase-d-owner-evidence-enrollment-20261020'
+    owner_evidence_enrollment = branch in (
+        'codex/phase-d-owner-evidence-enrollment-20261020', 'codex/unattended-release-promotion')
     require(branch == 'codex/hotfix-release-lane'
             or re.fullmatch(r'hotfix/[0-9]+\.[0-9]+\.[0-9]+', branch)
             or recovery_branch or recovery_governance or owner_evidence_enrollment,

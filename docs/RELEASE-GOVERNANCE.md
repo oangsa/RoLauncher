@@ -1,6 +1,7 @@
 # Release governance
 
-Status: preparation only; publication hard-disabled pending independent review and owner activation.
+Status: automatic control collection replaces attended signing after one-time GitHub App setup.
+See [setup and release procedure](OWNER-EVIDENCE.md).
 See [stable hotfix release flow](HOTFIX-RELEASE-STRATEGY.md) for release steps and current hotfix status.
 
 ## Trust boundary
@@ -9,8 +10,10 @@ See [stable hotfix release flow](HOTFIX-RELEASE-STRATEGY.md) for release steps a
 2. A separate `workflow_run` publisher checks out the trusted default-branch event SHA, never the candidate SHA.
 3. It reads candidate files and archives as data, verifies authority and evidence, then uploads without executing candidate code.
 
-Only the publishing job requests contents-write, Actions-read, PR-read and Issues-read.
-The workflow's literal `false` guard and missing/false `RELEASE_PROMOTION_ENABLED` each prevent activation.
+Only the publishing job requests contents-write, Actions-read and PR-read.
+A separate repository-scoped App credential supplies live administrative control reads.
+A missing/false `RELEASE_PROMOTION_ENABLED` prevents activation.
+The dedicated App must also be configured before an admitted release can proceed.
 Neither successful CI nor a branch name grants publication authority.
 
 The default-branch and token separation follow GitHub's [workflow_run security model](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_run).
@@ -126,7 +129,20 @@ The final gate repeats authority, main-head, active Rulesets, workflow state and
 GitHub API operations are not atomic; emergency disable must cancel running jobs as well as disable the workflow.
 Native release immutability, owner/default-branch trust and independent activation proof remain required.
 
-## Owner-signed live controls
+## Automatic live controls
+
+The workflow uses a repository-scoped GitHub App to collect complete fresh rulesets, explicit bypass arrays and native immutability settings.
+It checks them before staging and publication, and refreshes automatically during slow uploads.
+No SSH signature, public Issue response or local attendance is required.
+
+The App needs Administration write to read bypass actors; its credential is limited to control GETs by the publisher adapter.
+Only trusted default-branch code receives it; the normal Actions token retains release-write duties.
+This replaces the workstation-signature trust model with a protected Actions-secret trust model.
+
+See [one-time setup, credential permissions and recovery](OWNER-EVIDENCE.md).
+The following describes the historical attended transport, retained for audit.
+
+## Historical owner-signed live controls
 
 See [owner evidence protocol and operations](OWNER-EVIDENCE.md) and the separately authorized [sandbox lifecycle plan](SANDBOX-RELEASE-LIFECYCLE.md).
 Production policy is deliberately unenrolled: no key, inbox or public disclosure approval.

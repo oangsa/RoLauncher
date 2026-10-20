@@ -1,3 +1,56 @@
+# Automatic release control checks
+
+The publisher now obtains live controls through a dedicated GitHub App.
+Merging an owner-authorized release intent approves publication after all required checks pass.
+No local terminal, SSH key, Issue inbox, or per-release signature is required.
+
+## One-time setup
+
+1. Register a dedicated GitHub App and install it on **RoLauncher only**.
+2. Grant repository **Administration: read and write** and the mandatory Metadata read permission; grant no Contents or Workflows permission.
+3. Set repository variable `RELEASE_CONTROLS_APP_CLIENT_ID` to the App client ID.
+4. Store its private key in Actions secret `RELEASE_CONTROLS_APP_PRIVATE_KEY`; never commit or print it.
+5. Review and merge this governance change; keep the existing `RELEASE_PROMOTION_ENABLED=true` switch for activation.
+6. Validate the flow in the release sandbox before production use, including denied reads and interrupted publication.
+
+GitHub exposes ruleset bypass lists only to callers with ruleset write access.
+The App credential therefore has real administrative capability; protect workflow changes and restrict who can edit Actions secrets.
+The code uses an allowlist of control GET endpoints, but that does not reduce the credential's server-side permissions.
+
+## Each release
+
+1. Prepare the stable version and release intent, then merge the authorized source PR.
+2. CI builds and validates the exact source with read-only credentials.
+3. The trusted publisher verifies authority, CI, artifacts and checksums before requesting an App token.
+4. It reads complete rulesets, bypass lists and native immutability settings automatically before staging and final publication.
+5. It publishes verified assets and checks a separate immutable-release readback.
+
+The App token is scoped to this repository, requests only Administration permission, and is revoked by the pinned token action at job completion.
+The normal `GITHUB_TOKEN` performs release writes; candidate code never receives either publishing or administrative credentials.
+Only trusted default-branch publisher code runs in the privileged job.
+
+Missing App configuration, inaccessible bypass lists, disabled immutability, or invalid protections fail before release writes.
+Slow uploads refresh control observations automatically; changed controls still fail strict validation.
+Existing exact-source, fresh intent, asset digest, conflicting-release and consumed-receipt protections remain in force.
+
+No collected controls snapshot is posted publicly or uploaded as an artifact.
+The old public-disclosure digest, signing key and Issue policy are unused by automatic mode.
+The old staged CLI remains for historical fixtures and manually selected attended recovery; the workflow never falls back to it.
+
+## Recovery and migration
+
+Rerun the trusted publisher after correcting configuration; do not rerun individual shell steps or replace assets.
+Matching interrupted drafts resume missing assets; conflicting contents remain quarantined.
+A governance merge advances main and invalidates older unpublished intents, so prepare a fresh recovery intent and successful exact-source CI before publication.
+
+Existing runs retain their old workflow and still require the old attended gates or cancellation.
+This change does not activate a GitHub App, change repository controls, alter version metadata, or publish a release by itself.
+
+## Historical attended protocol
+
+The following records the superseded manual protocol for audit and optional recovery.
+Its pending-activation statements describe the original implementation, not the automatic workflow above.
+
 # Owner-signed live publisher evidence
 
 Status: implementation for independent review; publisher remains hard-disabled.

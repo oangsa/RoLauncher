@@ -474,6 +474,18 @@ class HotfixTests(unittest.TestCase):
         api.governance_files[0]['filename'] = 'src/updates.rs'
         with self.assertRaisesRegex(ValueError, 'Non-governance'): check_branch_flow(event, api)
 
+    def test_unattended_governance_admits_only_governance_changes(self):
+        from hotfix_policy import check_branch_flow
+        api = RecoveryFixture()
+        event = dict(pull_request=dict(
+            head=dict(ref='codex/unattended-release-promotion', sha=GOVERNANCE_HEAD,
+                      repo={'full_name': reference.REPO}),
+            base=dict(ref='main', sha=SOURCE_MERGE, repo={'full_name': reference.REPO})))
+        self.assertEqual(check_branch_flow(event, api), 'governance-only')
+        api.governance_files[0]['filename'] = 'src/updates.rs'
+        with self.assertRaisesRegex(ValueError, 'Non-governance'):
+            check_branch_flow(event, api)
+
 
 if __name__ == "__main__":
     unittest.main()
