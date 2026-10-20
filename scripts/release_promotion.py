@@ -292,10 +292,10 @@ def promote(call, run, evidence=None):
         latest = call("/releases/latest", missing_ok=True)
         require(not latest or tuple(map(int, version.split("."))) > tuple(map(int, latest["tag_name"].removeprefix("v").split("."))),
                 "Version must advance latest published stable")
-    # All candidate admission above is read-only. No human request until it succeeds.
+    # All candidate admission above is read-only; obtain controls only after it succeeds.
     from owner_evidence import binding_for
     binding = binding_for(intent, run, linux_run, receipt_data)
-    require(evidence is not None, "Live owner evidence transport required")
+    require(evidence is not None, "Live control evidence transport required")
     finishing = evidence.stage == 'finish'
     if not finishing:
         controls = evidence.gate('preflight', call, binding)
@@ -447,17 +447,23 @@ def main(channel=None):
     require(os.environ.get("GITHUB_REPOSITORY") == REPO, "Official repository required")
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
     import argparse
-    from owner_evidence import StagedEvidence, ChallengeReady
+    from owner_evidence import StagedEvidence, ChallengeReady, AdmissionOnly, AutomaticEvidence
     parser = argparse.ArgumentParser()
-    parser.add_argument('--stage', choices=('prepare', 'stage', 'finish'), required=True)
+    parser.add_argument('--stage', choices=('admit', 'automatic', 'prepare', 'stage', 'finish'), required=True)
     args = parser.parse_args()
-    transport = StagedEvidence(args.stage)
+    if args.stage == 'admit':
+        transport = AdmissionOnly()
+    elif args.stage == 'automatic':
+        require(bool(os.environ.get('RELEASE_CONTROLS_TOKEN')), 'Configure the release-controls GitHub App first')
+        transport = AutomaticEvidence(github_api(os.environ['RELEASE_CONTROLS_TOKEN']))
+    else:
+        transport = StagedEvidence(args.stage)
     try:
         result = promote_event(github_api(os.environ['GITHUB_TOKEN']), event, channel, transport)
     except ChallengeReady:
         result = 'challenge-ready'
     print(result)
-    if args.stage == 'prepare':
+    if args.stage in ('admit', 'prepare'):
         with Path(os.environ['GITHUB_OUTPUT']).open('a', encoding='utf-8') as output:
             output.write('admitted=' + ('true' if result == 'challenge-ready' else 'false') + '\n')
 

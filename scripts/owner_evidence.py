@@ -138,6 +138,58 @@ def collect(call, bypass=True):
     return result
 
 
+class AdmissionOnly:
+    """Stop after candidate verification, before any control or release writes."""
+    stage = 'all'
+
+    def gate(self, phase, call, binding):
+        raise ChallengeReady()
+
+
+class AutomaticEvidence:
+    """Read live controls with a separate repository-scoped App credential."""
+    stage = 'all'
+
+    def __init__(self, app_call):
+        self.app_call = app_call
+        self.runtime = None
+        self.binding = None
+        self.checked = None
+
+    def read(self, path, *args, **kwargs):
+        require(not args and not kwargs and (
+            path in ('', '/immutable-releases', '/rulesets?includes_parents=true&per_page=100')
+            or re.fullmatch(r'/rulesets/[1-9][0-9]*', path)
+            or path in ('/rules/branches/main?per_page=100', '/rules/branches/dev?per_page=100')),
+            'App credential permits control GETs only')
+        return self.app_call(path)
+
+    def refresh(self):
+        from release_promotion import protected_branches
+        started = time.monotonic()
+        repository = self.read('')
+        require(repository['id'] == REPO_ID and repository['full_name'] == REPO
+                and repository['owner']['id'] == OWNER, 'Wrong App installation repository')
+        snapshot = collect(self.read)
+        controls = controls_call(self.runtime, snapshot)
+        protected_branches(controls, strict=True)
+        require(time.monotonic() - started <= 45, 'Live control collection took too long')
+        self.checked = started
+        return controls
+
+    def gate(self, phase, call, binding):
+        require(phase in ('preflight', 'final'), 'Unknown control phase')
+        require(self.binding is None or self.binding == binding, 'Release binding changed')
+        self.binding, self.runtime = binding, call
+        return self.refresh()
+
+    def fresh(self):
+        require(self.checked is not None, 'Live controls have not been checked')
+        # Refresh automatically during slow uploads, without extending an old observation.
+        if time.monotonic() - self.checked > 45:
+            self.refresh()
+
+
 def controls_call(call, snapshot):
     """Compare signed observations with live metadata, then expose complete strict evidence."""
     require(set(snapshot) == {'inventory', 'rulesets', 'branches', 'immutable'}
