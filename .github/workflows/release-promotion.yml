@@ -17,7 +17,6 @@ jobs:
   promote:
     name: Verify authority and promote
     if: >-
-      false &&
       vars.RELEASE_PROMOTION_ENABLED == 'true' &&
       github.repository == 'oangsa/RoLauncher' &&
       github.event.workflow_run.event == 'push' &&
