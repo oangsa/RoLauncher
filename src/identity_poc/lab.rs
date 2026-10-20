@@ -866,6 +866,38 @@ fn observe(public_user_state: &Path) -> Result<serde_json::Value, String> {
     )
 }
 
+fn rights_observations(
+    mut probe: impl FnMut(&str) -> Result<i32, String>,
+) -> Result<serde_json::Value, String> {
+    let mut observations = serde_json::Map::new();
+    let mut violations = 0;
+    for operation in [
+        "private_export",
+        "write_same_dacl",
+        "take_ownership",
+        "delete_exact_poc_machine_key",
+    ] {
+        let status = probe(operation)?;
+        observations.insert(
+            operation.into(),
+            policy::uploadable_observation(cng("fixed lab rights operation", status), false, 0),
+        );
+        violations += usize::from(status == 0);
+        if status == 0 {
+            // Preserve the first-failure state; another probe needs renewed approval.
+            break;
+        }
+    }
+    Ok(
+        serde_json::json!({"native_management_operations":observations,
+        "unexpected_management_successes":violations,"enrollment_accepted":false,
+        "complete_success":false,"independent_review":"pending",
+        "stopped_after_unexpected_success":violations != 0,
+        "renewed_approval_required":violations != 0,
+        "recovery_receipts":"retained_for_provisioner_review"}),
+    )
+}
+
 /// Sacrificial snapshot only: unexpected permission success can change/delete this PoC key.
 /// This command never marks P's receipt deleted on A's behalf.
 fn rights() -> Result<serde_json::Value, String> {
@@ -878,83 +910,79 @@ fn rights() -> Result<serde_json::Value, String> {
     }
     let mut key = Key::open(&info)?;
     check_machine_acl(&key, &config)?;
-    let mut observations = serde_json::Map::new();
     let descriptor = property(
         key.handle.0,
         NCRYPT_SECURITY_DESCR_PROPERTY,
         OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
     )?;
-    let mut violations = 0;
-    let record = |status: i32| {
-        policy::uploadable_observation(cng("fixed lab rights operation", status), false, 0)
-    };
-    let mut buffer = vec![0u8; 16384];
-    let mut length = 0;
-    let status = unsafe {
-        NCryptExportKey(
-            key.handle.0,
-            0,
-            BCRYPT_RSAPRIVATE_BLOB,
-            null(),
-            buffer.as_mut_ptr(),
-            buffer.len() as u32,
-            &mut length,
-            NCRYPT_SILENT_FLAG,
-        )
-    };
-    buffer.zeroize();
-    violations += usize::from(status == 0);
-    observations.insert("private_export".into(), record(status));
-    let status = unsafe {
-        NCryptSetProperty(
-            key.handle.0,
-            NCRYPT_SECURITY_DESCR_PROPERTY,
-            descriptor.as_ptr(),
-            descriptor.len() as u32,
-            DACL_SECURITY_INFORMATION | NCRYPT_PERSIST_FLAG,
-        )
-    };
-    violations += usize::from(status == 0);
-    observations.insert("write_same_dacl".into(), record(status));
-    let text = wide(&format!("O:{}", config.authorized_sid));
-    let mut pointer = null_mut();
-    let mut size = 0;
-    if unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            text.as_ptr(),
-            1,
-            &mut pointer,
-            &mut size,
-        )
-    } == 0
-    {
-        return Err("rights descriptor unavailable".into());
-    }
-    let allocation = LocalAllocation(pointer);
-    let status = unsafe {
-        NCryptSetProperty(
-            key.handle.0,
-            NCRYPT_SECURITY_DESCR_PROPERTY,
-            pointer.cast(),
-            size,
-            OWNER_SECURITY_INFORMATION | NCRYPT_PERSIST_FLAG,
-        )
-    };
-    violations += usize::from(status == 0);
-    observations.insert("take_ownership".into(), record(status));
-    drop(allocation);
-    let status = unsafe { NCryptDeleteKey(key.handle.0, NCRYPT_SILENT_FLAG) };
-    if status == 0 {
-        key.handle.0 = 0;
-    }
-    violations += usize::from(status == 0);
-    observations.insert("delete_exact_poc_machine_key".into(), record(status));
-    Ok(
-        serde_json::json!({"native_management_operations":observations,
-        "unexpected_management_successes":violations,"enrollment_accepted":false,
-        "complete_success":false,"independent_review":"pending",
-        "recovery_receipts":"retained_for_provisioner_review"}),
-    )
+    rights_observations(|operation| {
+        let status = match operation {
+            "private_export" => {
+                let mut buffer = vec![0u8; 16384];
+                let mut length = 0;
+                let status = unsafe {
+                    NCryptExportKey(
+                        key.handle.0,
+                        0,
+                        BCRYPT_RSAPRIVATE_BLOB,
+                        null(),
+                        buffer.as_mut_ptr(),
+                        buffer.len() as u32,
+                        &mut length,
+                        NCRYPT_SILENT_FLAG,
+                    )
+                };
+                buffer.zeroize();
+                status
+            }
+            "write_same_dacl" => unsafe {
+                NCryptSetProperty(
+                    key.handle.0,
+                    NCRYPT_SECURITY_DESCR_PROPERTY,
+                    descriptor.as_ptr(),
+                    descriptor.len() as u32,
+                    DACL_SECURITY_INFORMATION | NCRYPT_PERSIST_FLAG,
+                )
+            },
+            "take_ownership" => {
+                let text = wide(&format!("O:{}", config.authorized_sid));
+                let mut pointer = null_mut();
+                let mut size = 0;
+                if unsafe {
+                    ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                        text.as_ptr(),
+                        1,
+                        &mut pointer,
+                        &mut size,
+                    )
+                } == 0
+                {
+                    return Err("rights descriptor unavailable".into());
+                }
+                let allocation = LocalAllocation(pointer);
+                let status = unsafe {
+                    NCryptSetProperty(
+                        key.handle.0,
+                        NCRYPT_SECURITY_DESCR_PROPERTY,
+                        pointer.cast(),
+                        size,
+                        OWNER_SECURITY_INFORMATION | NCRYPT_PERSIST_FLAG,
+                    )
+                };
+                drop(allocation);
+                status
+            }
+            "delete_exact_poc_machine_key" => {
+                let status = unsafe { NCryptDeleteKey(key.handle.0, NCRYPT_SILENT_FLAG) };
+                if status == 0 {
+                    key.handle.0 = 0;
+                }
+                status
+            }
+            _ => unreachable!("fixed rights probe sequence"),
+        };
+        Ok(status)
+    })
 }
 
 pub(super) fn run(args: &[String]) -> Result<(), String> {
@@ -1068,6 +1096,61 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn rights_stop_at_first_unexpected_success() {
+        let operations = [
+            "private_export",
+            "write_same_dacl",
+            "take_ownership",
+            "delete_exact_poc_machine_key",
+        ];
+        for success_at in 0..operations.len() {
+            let mut calls = Vec::new();
+            let report = rights_observations(|operation| {
+                calls.push(operation.to_owned());
+                Ok(if calls.len() == success_at + 1 { 0 } else { -1 })
+            })
+            .unwrap();
+            assert_eq!(calls, operations[..=success_at]);
+            assert_eq!(
+                report["native_management_operations"]
+                    .as_object()
+                    .unwrap()
+                    .len(),
+                success_at + 1
+            );
+            assert_eq!(report["unexpected_management_successes"], 1);
+            assert_eq!(report["stopped_after_unexpected_success"], true);
+            assert_eq!(report["renewed_approval_required"], true);
+            assert_eq!(
+                report["recovery_receipts"],
+                "retained_for_provisioner_review"
+            );
+        }
+    }
+
+    #[test]
+    fn rights_denials_continue_but_errors_stop() {
+        let mut calls = 0;
+        let report = rights_observations(|_| {
+            calls += 1;
+            Ok(-1)
+        })
+        .unwrap();
+        assert_eq!(calls, 4);
+        assert_eq!(report["unexpected_management_successes"], 0);
+        assert_eq!(report["renewed_approval_required"], false);
+        calls = 0;
+        assert!(
+            rights_observations(|_| {
+                calls += 1;
+                Err("unavailable".into())
+            })
+            .is_err()
+        );
+        assert_eq!(calls, 1);
+    }
 
     fn review_config() -> Config {
         Config {

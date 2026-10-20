@@ -25,8 +25,17 @@ try {
     & "$PSScriptRoot\build.ps1" -UseCurrentVersion -OutputDirectory $taskDistribution
     Copy-Item -LiteralPath 'AGENTS.md' -Destination $taskDistribution
     Compress-Archive -LiteralPath $taskDistribution -DestinationPath $taskBinaryZip
-    & python "$PSScriptRoot\package-development-source.py" $taskSourceZip
-    if ($LASTEXITCODE -ne 0) { throw 'Source archive exclusion checks failed' }
+    # Release source must be the exact commit, including hidden build inputs.
+    # Local development packages retain working-tree files and their stamped identity.
+    if ($taskVersion -notmatch '-dev\.') {
+        & git diff --quiet HEAD --
+        if ($LASTEXITCODE -ne 0) { throw 'Stable source packaging requires a clean committed tree' }
+        & git archive --format=zip "--output=$taskSourceZip" HEAD
+        if ($LASTEXITCODE -ne 0) { throw 'Exact-commit source archive failed' }
+    } else {
+        & python "$PSScriptRoot\package-development-source.py" $taskSourceZip
+        if ($LASTEXITCODE -ne 0) { throw 'Development source archive failed' }
+    }
     & "$PSScriptRoot\build-installer.ps1" -DistributionDirectory $taskDistribution -OutputDirectory $taskOutput
     $taskLines = foreach ($taskArtifact in @($taskBinaryZip, $taskSourceZip, $taskInstaller)) {
         $taskHash = Get-FileHash -LiteralPath $taskArtifact -Algorithm SHA256
