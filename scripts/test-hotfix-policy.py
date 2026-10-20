@@ -308,6 +308,8 @@ class HotfixTests(unittest.TestCase):
         def call(path, *args, **kwargs):
             if path.startswith(f'/compare/{BASE}...{HEAD}'):
                 return comparison(BASE, HEAD, [dict(sha=HEAD, parents=[{'sha': BASE}])], files)
+            if path == f'/commits/{HEAD}?per_page=100':
+                return dict(files=files, parents=[{'sha': BASE}])
             return api(path, *args, **kwargs)
 
         event = dict(pull_request=dict(head=dict(ref=branch, sha=HEAD, repo={'full_name': reference.REPO}),
