@@ -20,6 +20,9 @@ GOVERNANCE_PATHS = {
     'scripts/test-owner-evidence.py', 'docs/OWNER-EVIDENCE.md',
     'docs/SANDBOX-RELEASE-LIFECYCLE.md',
 }
+# This owner-merged v1.7.1 intent was never published and is now stale; admit only its unchanged historical blob.
+STALE_RECOVERY_INTENT_PATH = '.github/release-intents/743ed1d2-247b-4bfd-8ad0-b3bb35356027.json'
+STALE_RECOVERY_INTENT_SHA = 'fd21a3df0e5601e0b77afe6ab278d3fe0d5673e7'
 HOTFIX_FIELDS = {'schema', 'id', 'version', 'channel', 'source', 'baseline_tag',
                 'baseline_sha', 'base_sha', 'reviewed_sha', 'commits', 'paths', 'patch_sha256', 'review'}
 HOTFIX_RECOVERY_FIELDS = HOTFIX_FIELDS | {'source_pr', 'source_merge_sha'}
@@ -33,6 +36,16 @@ WINDOWS_SYS_FEATURE_ADDITIONS = {
 def require(condition, message):
     if not condition:
         raise ValueError(message)
+
+
+def require_governance_file(file):
+    path = file['filename']
+    if path == STALE_RECOVERY_INTENT_PATH:
+        require(file['status'] == 'added' and file['sha'] == STALE_RECOVERY_INTENT_SHA
+                and 'previous_filename' not in file,
+                'Historical stale recovery intent must remain immutable')
+    else:
+        require(path in GOVERNANCE_PATHS, 'Non-governance change in stable base: ' + path)
 
 
 def verify_source(call, sha, data):
@@ -93,7 +106,7 @@ def patch_report(result, base, head, governance=False):
                 and re.fullmatch('[a-f0-9]{40}', file['sha']) and isinstance(file.get('patch'), str)
                 and file['patch'], 'Missing patch or ambiguous file evidence')
         if governance:
-            require(path in GOVERNANCE_PATHS, 'Non-governance change in stable base: ' + path)
+            require_governance_file(file)
         else:
             allowed = path in {'Cargo.toml', 'Cargo.lock', 'README.md', 'CHANGELOG.md', 'desktop/CHANGELOG.txt'} or (
                 path.startswith(('src/', 'desktop/', 'desktop.tests/', 'desktop.linux/', 'tests/'))
@@ -118,9 +131,12 @@ def governance_history(call, baseline, base):
     report = patch_report(call(f'/compare/{baseline}...{base}?per_page=100'), baseline, base, governance=True)
     for commit in report['commits']:
         changed = call(f'/commits/{commit}?per_page=100')['files']
-        require(len(changed) < 100 and all(f['filename'] in GOVERNANCE_PATHS
-                and f.get('previous_filename', f['filename']) in GOVERNANCE_PATHS for f in changed),
-                'Application changes hidden in stable governance history')
+        require(len(changed) < 100, 'Application changes hidden in stable governance history')
+        for file in changed:
+            require_governance_file(file)
+            previous = file.get('previous_filename', file['filename'])
+            require(previous == file['filename'] or previous in GOVERNANCE_PATHS,
+                    'Application changes hidden in stable governance history')
 
 
 def hotfix_report(call, base, reviewed):

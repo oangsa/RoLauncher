@@ -424,7 +424,26 @@ class HotfixTests(unittest.TestCase):
             head=dict(ref='hotfix-intent/2.3.4', sha=INTENT_HEAD,
                       repo={'full_name': reference.REPO}),
             base=dict(ref='main', sha=RECOVERY_BASE, repo={'full_name': reference.REPO})))
+        api.governance_files[0].update(
+            filename='.github/release-intents/743ed1d2-247b-4bfd-8ad0-b3bb35356027.json',
+            status='added', sha='fd21a3df0e5601e0b77afe6ab278d3fe0d5673e7')
         self.assertIn('semantic_review', check_branch_flow(event, api))
+        api.governance_files[0]['filename'] = '.github/release-intents/00000000-0000-4000-8000-000000000000.json'
+        with self.assertRaisesRegex(ValueError, 'Non-governance change'):
+            check_branch_flow(event, api)
+        api = RecoveryFixture()
+        api.governance_files[0].update(
+            filename='.github/release-intents/743ed1d2-247b-4bfd-8ad0-b3bb35356027.json',
+            status='modified', sha='fd21a3df0e5601e0b77afe6ab278d3fe0d5673e7')
+        with self.assertRaisesRegex(ValueError, 'Historical stale recovery intent must remain immutable'):
+            check_branch_flow(event, api)
+        api = RecoveryFixture()
+        api.governance_files[0].update(
+            filename='.github/release-intents/743ed1d2-247b-4bfd-8ad0-b3bb35356027.json',
+            status='added', sha='0000000000000000000000000000000000000000')
+        with self.assertRaisesRegex(ValueError, 'Historical stale recovery intent must remain immutable'):
+            check_branch_flow(event, api)
+        api = RecoveryFixture()
         api.intent_head_commit['files'].append(dict(filename='src/updates.rs', status='modified'))
         with self.assertRaises(ValueError): check_branch_flow(event, api)
 
