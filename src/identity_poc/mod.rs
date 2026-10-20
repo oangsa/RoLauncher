@@ -1,6 +1,8 @@
 //! Experimental example only: deliberately absent from lib.rs and production startup.
 use serde::{Deserialize, Serialize};
 
+pub mod provisioning;
+
 #[cfg(windows)]
 pub mod windows;
 

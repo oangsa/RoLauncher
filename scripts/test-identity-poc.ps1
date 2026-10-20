@@ -5,6 +5,8 @@ $taskPreviousRecovery = $env:ROLAUNCHER_IDENTITY_POC_RECOVERY_DIR
 Push-Location -LiteralPath $taskRoot
 try {
     . "$PSScriptRoot/environment.ps1"
+    & python "$PSScriptRoot/test-identity-lab.py"
+    if ($LASTEXITCODE -ne 0) { throw 'Portable receipt/source isolation checks failed' }
     $taskEvidence = [IO.Path]::GetFullPath((Join-Path $taskRoot $EvidenceDirectory))
     New-Item -ItemType Directory -Force -Path $taskEvidence | Out-Null
     $taskLocal = Join-Path $taskRoot ('target/identity-poc-local/' + [guid]::NewGuid().ToString())
@@ -14,7 +16,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'PoC contract tests failed' }
     & cargo build --locked --example windows-device-identity
     if ($LASTEXITCODE -ne 0) { throw 'PoC harness build failed' }
-    $taskHarness = Join-Path $taskRoot 'target/debug/examples/windows-device-identity.exe'
+    $taskTarget = if ($env:CARGO_TARGET_DIR) { [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR) } else { Join-Path $taskRoot 'target' }
+    $taskHarness = Join-Path $taskTarget 'debug/examples/windows-device-identity.exe'
     function Invoke-Poc([string[]]$Arguments) {
         $taskInfo = [Diagnostics.ProcessStartInfo]::new($taskHarness)
         $taskInfo.UseShellExecute = $false
@@ -42,37 +45,14 @@ try {
         reboot='Not tested: follow manual procedure'
         measurements=[ordered]@{}
     }
-    foreach ($taskProvider in @('software','tpm')) {
-        foreach ($taskScope in @('user','machine')) {
-            $taskReport.measurements["$taskProvider-$taskScope"] = Invoke-Poc @('key-probe',$taskProvider,$taskScope)
-        }
-    }
     foreach ($taskCandidate in @('A','B','C')) {
-        $taskState = Join-Path $taskLocal ("private-local-public-state-$taskCandidate-" + [guid]::NewGuid().ToString() + '.json')
-        $taskTrial = [ordered]@{ create=(Invoke-Poc @('measure',$taskCandidate,$taskState)) }
-        # Failed creation explicitly accounts cleanup and preserves partial state locally.
-        # Successful diagnostic state requires explicit disposal after all measurements.
-        if ($taskTrial.create.exit_code -eq 0) {
-            try {
-                $taskTrial.restart = Invoke-Poc @('measure-check',$taskState)
-                $taskTrial.inspect = Invoke-Poc @('inspect',$taskState)
-                $taskTrial.owner_native_probe = Invoke-Poc @('probe',$taskState)
-            } finally {
-                $taskTrial.cleanup = Invoke-Poc @('cleanup',$taskState)
-                if ($taskTrial.cleanup.exit_code -eq 0) { Remove-Item -LiteralPath $taskState }
-            }
-        }
-        $taskReport.measurements["candidate-$taskCandidate"] = $taskTrial
+        $taskReport.measurements["candidate-$taskCandidate"] = [ordered]@{ status='Pending human-confirmed disposable-lab test; no native mutations in CI'; enrollment_accepted=$false }
     }
     $taskReport.recovery_accounting = Invoke-Poc @('recovery-summary')
     # Only this sanitized report is uploadable. Never upload PoC public state, SID references,
     # registry evidence, names or blobs. Keep failed-cleanup state local for recovery.
     $taskReport | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $taskEvidence 'measurements.json') -Encoding utf8
     Write-Output 'PoC measurements saved; inspect operation exit codes. Missing hardware/contexts are not passes.'
-    foreach ($taskTrial in $taskReport.measurements.Values) {
-        if ($taskTrial.Contains('cleanup') -and $taskTrial.cleanup.exit_code -ne 0) { throw 'PoC cleanup failed; retain local public state for recovery' }
-        if ($taskTrial.Contains('error') -and $taskTrial.error.Contains('cleanup incomplete')) { throw 'PoC probe cleanup incomplete; retain local recovery receipts' }
-    }
     if ($taskReport.recovery_accounting.exit_code -ne 0) { throw 'PoC recovery accounting unavailable' }
     $taskAccounting = $taskReport.recovery_accounting.output | ConvertFrom-Json
     if ($taskAccounting.incomplete -ne 0 -or $taskAccounting.intentionally_retained -ne 0) { throw 'PoC key cleanup unconfirmed; retain strictly local recovery receipts' }

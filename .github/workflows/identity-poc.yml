@@ -25,7 +25,7 @@ jobs:
           rustup toolchain install 1.99.0 --profile minimal
           if ($LASTEXITCODE -ne 0) { throw 'Rust installation failed' }
           rustup default 1.99.0
-      - name: Synthetic contracts and sanitized native measurements
+      - name: Synthetic contracts and read-only native diagnostics
         shell: pwsh
         run: ./scripts/test-identity-poc.ps1
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

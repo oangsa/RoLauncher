@@ -69,7 +69,7 @@ fn path_for(key: &PublicKey) -> Result<PathBuf, String> {
     Ok(directory().join(format!("{:?}-{:?}-{id}.jsonl", key.provider, key.scope)))
 }
 
-fn private_new_file(path: &Path, identity: &Identity) -> Result<File, String> {
+pub(super) fn private_new_file(path: &Path, identity: &Identity) -> Result<File, String> {
     use std::os::windows::io::FromRawHandle;
     use windows_sys::Win32::{
         Foundation::*,
@@ -224,6 +224,10 @@ pub fn snapshot(path: &Path) -> Result<Snapshot, String> {
         if record.schema_version != 1
             || record.owner_sid_reference == [0; 32]
             || record.key.blob.len() > 4096
+            || (record.cleanup == Some(CleanupOutcome::Succeeded)
+                && record.native_status != Some(0))
+            || (record.cleanup == Some(CleanupOutcome::Absent)
+                && !matches!(record.native_status, Some(0 | 0x80090011)))
         {
             return Err("invalid local recovery receipt".into());
         }
@@ -245,6 +249,11 @@ pub fn recover(path: &Path) -> Result<CleanupOutcome, String> {
         return Err("unsupported local recovery token".into());
     }
     let receipt = Receipt::open(path, &identity)?;
+    if receipt.record.key.scope == super::Scope::Machine {
+        return Err(
+            "machine recovery requires separately authorized disposable-lab recovery".into(),
+        );
+    }
     if let Some(outcome) = receipt.record.cleanup
         && outcome != CleanupOutcome::Incomplete
     {

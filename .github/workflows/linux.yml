@@ -53,6 +53,8 @@ jobs:
           cargo test --locked
           cargo clippy --locked --all-targets -- -D warnings
           cargo fmt --check
+          python3 scripts/test-identity-lab.py
+          python3 scripts/test-package-development-source.py
           python3 scripts/check-release.py
           python3 scripts/test-linux-update.py
           python3 scripts/test-release-promotion.py
