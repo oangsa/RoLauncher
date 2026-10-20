@@ -296,6 +296,32 @@ class HotfixTests(unittest.TestCase):
         self.assertEqual(check_branch_flow(event, api), 'governance-only')
         self.assertEqual(api.writes, [])
 
+    def test_owner_evidence_enrollment_only_accepts_governance_delta_on_current_main(self):
+        from hotfix_policy import check_branch_flow
+        api = HotfixFixture()
+        branch = 'codex/phase-d-owner-evidence-enrollment-20261020'
+        api.pr.update(head=dict(ref=branch, sha=HEAD, repo={'full_name': reference.REPO}),
+                      base=dict(ref='main', sha=BASE, repo={'full_name': reference.REPO}))
+        files = [dict(filename='.github/owner-evidence-policy.json', status='modified', sha='2' * 40,
+                      patch='@@ -1 +1 @@\n-old\n+new')]
+
+        def call(path, *args, **kwargs):
+            if path.startswith(f'/compare/{BASE}...{HEAD}'):
+                return comparison(BASE, HEAD, [dict(sha=HEAD, parents=[{'sha': BASE}])], files)
+            if path == f'/commits/{HEAD}?per_page=100':
+                return dict(files=files, parents=[{'sha': BASE}])
+            return api(path, *args, **kwargs)
+
+        event = dict(pull_request=dict(head=dict(ref=branch, sha=HEAD, repo={'full_name': reference.REPO}),
+                                       base=dict(ref='main', sha=BASE, repo={'full_name': reference.REPO})))
+        self.assertEqual(check_branch_flow(event, call), 'governance-only')
+        self.assertEqual(api.writes, [])
+
+        files[0]['filename'] = 'src/updates.rs'
+        with self.assertRaisesRegex(ValueError, 'Non-governance change'):
+            check_branch_flow(event, call)
+        self.assertEqual(api.writes, [])
+
     def test_hotfix_pr_reports_reviewed_scope_before_owner_authorization(self):
         from hotfix_policy import check_branch_flow
         for head in (REVIEWED, HEAD):
