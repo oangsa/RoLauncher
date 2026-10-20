@@ -250,7 +250,7 @@ class HotfixTests(unittest.TestCase):
         for _ in range(2): self.assertEqual(promote(api, api.run), 'no-intent')
         self.assertEqual(api.writes, [])
 
-    def test_migration_workflows_cannot_publish_even_with_existing_activation_variable(self):
+    def test_migration_workflows_stay_read_only_and_publisher_requires_owner_guards(self):
         root = Path(__file__).resolve().parent.parent
         for file in ('ci-release.yml', 'linux.yml', 'beta-release.yml'):
             workflow = (root / '.github/workflows' / file).read_text()
@@ -258,7 +258,13 @@ class HotfixTests(unittest.TestCase):
             self.assertNotIn('scripts/publish-', workflow)
             self.assertNotIn('pull_request_target', workflow)
         workflow = (root / '.github/workflows/release-promotion.yml').read_text()
-        self.assertIn('if: >-\n      false &&\n', workflow)
+        self.assertNotIn('false &&', workflow)
+        self.assertIn("vars.RELEASE_PROMOTION_ENABLED == 'true'", workflow)
+        self.assertIn("github.repository == 'oangsa/RoLauncher'", workflow)
+        self.assertIn("github.event.workflow_run.event == 'push'", workflow)
+        self.assertIn("github.event.workflow_run.conclusion == 'success'", workflow)
+        self.assertIn('github.event.workflow_run.head_repository.full_name == github.repository', workflow)
+        self.assertIn("(github.event.workflow_run.head_branch == 'main' || github.event.workflow_run.name == 'Beta release')", workflow)
         self.assertIn('ref: ${{ github.sha }}', workflow)
         self.assertNotIn('ref: ${{ github.event.workflow_run.head_sha }}', workflow)
 
