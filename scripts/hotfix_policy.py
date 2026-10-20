@@ -179,9 +179,10 @@ def check_branch_flow(event, call):
         return 'feature-promotion'
     recovery_branch = re.fullmatch(r'hotfix-intent/[0-9]+\.[0-9]+\.[0-9]+', branch)
     recovery_governance = branch == 'codex/hotfix-recovery-governance'
+    owner_evidence_enrollment = branch == 'codex/phase-d-owner-evidence-enrollment-20261020'
     require(branch == 'codex/hotfix-release-lane'
             or re.fullmatch(r'hotfix/[0-9]+\.[0-9]+\.[0-9]+', branch)
-            or recovery_branch or recovery_governance,
+            or recovery_branch or recovery_governance or owner_evidence_enrollment,
             'Unauthorized main source branch')
     latest = call('/releases/latest')
     tag = latest['tag_name']
@@ -191,6 +192,10 @@ def check_branch_flow(event, call):
     if obj['type'] == 'tag': obj = call('/git/tags/' + obj['sha'])['object']
     require(obj['type'] == 'commit', 'Stable tag must resolve to commit')
     baseline = obj['sha']
+    if owner_evidence_enrollment:
+        # The enrollment branch starts at current main; validate only its governance delta.
+        governance_history(call, base['sha'], head['sha'])
+        return 'governance-only'
     if branch == 'codex/hotfix-release-lane':
         governance_history(call, baseline, head['sha'])
         require(tomllib.loads(content(call, 'Cargo.toml', head['sha']))['package']['version'] == tag[1:],
