@@ -303,7 +303,7 @@ class HotfixTests(unittest.TestCase):
         api.pr.update(head=dict(ref=branch, sha=HEAD, repo={'full_name': reference.REPO}),
                       base=dict(ref='main', sha=BASE, repo={'full_name': reference.REPO}))
         files = [dict(filename='.github/owner-evidence-policy.json', status='modified', sha='2' * 40,
-                      patch='@@ -1 +1 @@\\n-old\\n+new')]
+                      patch='@@ -1 +1 @@\n-old\n+new')]
 
         def call(path, *args, **kwargs):
             if path.startswith(f'/compare/{BASE}...{HEAD}'):
