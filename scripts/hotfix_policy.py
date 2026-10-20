@@ -23,6 +23,11 @@ GOVERNANCE_PATHS = {
 # This owner-merged v1.7.1 intent was never published and is now stale; admit only its unchanged historical blob.
 STALE_RECOVERY_INTENT_PATH = '.github/release-intents/743ed1d2-247b-4bfd-8ad0-b3bb35356027.json'
 STALE_RECOVERY_INTENT_SHA = 'fd21a3df0e5601e0b77afe6ab278d3fe0d5673e7'
+STALE_RECOVERY_INTENTS = {
+    STALE_RECOVERY_INTENT_PATH: STALE_RECOVERY_INTENT_SHA,
+    '.github/release-intents/4422944a-0a2e-450d-8f3d-103ae22eadba.json':
+        'd3e330b5b376624a3e158b9ba2ebe5a90acb371f',
+}
 HOTFIX_FIELDS = {'schema', 'id', 'version', 'channel', 'source', 'baseline_tag',
                 'baseline_sha', 'base_sha', 'reviewed_sha', 'commits', 'paths', 'patch_sha256', 'review'}
 HOTFIX_RECOVERY_FIELDS = HOTFIX_FIELDS | {'source_pr', 'source_merge_sha'}
@@ -40,8 +45,8 @@ def require(condition, message):
 
 def require_governance_file(file):
     path = file['filename']
-    if path == STALE_RECOVERY_INTENT_PATH:
-        require(file['status'] == 'added' and file['sha'] == STALE_RECOVERY_INTENT_SHA
+    if path in STALE_RECOVERY_INTENTS:
+        require(file['status'] == 'added' and file['sha'] == STALE_RECOVERY_INTENTS[path]
                 and 'previous_filename' not in file,
                 'Historical stale recovery intent must remain immutable')
     else:
