@@ -549,9 +549,13 @@ class OwnerEvidenceTests(unittest.TestCase):
         self.assertNotIn('src/updates.rs', GOVERNANCE_PATHS)
         self.assertNotIn('Cargo.toml', GOVERNANCE_PATHS)
 
-    def test_workflow_stays_hard_disabled_with_exact_owner_policy(self):
+    def test_workflow_is_owner_variable_gated_with_exact_owner_policy(self):
         workflow = (evidence.ROOT / '.github/workflows/release-promotion.yml').read_text()
-        self.assertIn('false &&', workflow)
+        self.assertNotIn('false &&', workflow)
+        self.assertIn("vars.RELEASE_PROMOTION_ENABLED == 'true'", workflow)
+        self.assertIn("github.event.workflow_run.event == 'push'", workflow)
+        self.assertIn("github.event.workflow_run.conclusion == 'success'", workflow)
+        self.assertIn("github.event.workflow_run.head_repository.full_name == github.repository", workflow)
         self.assertIn('timeout-minutes: 60', workflow)
         self.assertIn('cancel-in-progress: false', workflow)
         self.assertIn('issues: read', workflow)
