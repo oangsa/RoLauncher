@@ -18,6 +18,8 @@ pub fn default_directory(local_app_data: &Path) -> PathBuf {
 #[derive(Clone)]
 pub struct Store {
     pub directory: PathBuf,
+    #[cfg(test)]
+    pub(crate) save_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 impl Store {
     pub fn new(directory: PathBuf) -> Result<Self, String> {
@@ -25,7 +27,11 @@ impl Store {
         platform::private_directory(&directory)?;
         std::fs::create_dir_all(&directory)
             .map_err(|_| "Unable to create application data folder")?;
-        Ok(Self { directory })
+        Ok(Self {
+            directory,
+            #[cfg(test)]
+            save_calls: Default::default(),
+        })
     }
     pub fn load(&self) -> Result<Database, String> {
         let path = self.directory.join("accounts.json");
@@ -47,6 +53,9 @@ impl Store {
         Ok(db)
     }
     pub fn save(&self, database: &Database) -> Result<(), String> {
+        #[cfg(test)]
+        self.save_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = self.directory.join("accounts.json");
         let temp = self.directory.join("accounts.json.tmp");
         let bytes = serde_json::to_vec_pretty(database)
@@ -173,6 +182,7 @@ impl Store {
             a.status = crate::model::Status::Stopped;
             a.generation = uuid::Uuid::new_v4();
             a.operation_id = None;
+            a.close_intent = None;
             a.next_retry = None;
             a.connected_since = None;
             a.disconnected_since = None;

@@ -1,6 +1,6 @@
 # RoLauncher 1.7.1
 
-Upcoming patch based on stable 1.7.0. Linux remains a beta.
+Published 2026-10-20, based on stable 1.7.0. Linux remains a beta.
 
 ## Recovery
 

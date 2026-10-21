@@ -34,7 +34,7 @@ public sealed class ApiClient : IDisposable
         using var request = new HttpRequestMessage(method, path);
         // A full cookie batch may need thirteen 20-second validation waves.
         using var deadline = new CancellationTokenSource(method == HttpMethod.Post && path == "accounts"
-            ? TimeSpan.FromMinutes(10) : TimeSpan.FromSeconds(30));
+            ? TimeSpan.FromMinutes(10) : path == "instances/close-all" ? TimeSpan.FromMinutes(5) : TimeSpan.FromSeconds(30));
         if (body is not null)
             request.Content = new StringContent(JsonSerializer.Serialize(body, JsonOptions), Encoding.UTF8, "application/json");
         using var response = await _client.SendAsync(request, deadline.Token);
