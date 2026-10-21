@@ -290,7 +290,7 @@ public sealed partial class MainWindow
             Tab_Click(SettingsTab, new RoutedEventArgs());
             await Task.Delay(500);
             await CaptureAsync(directory, "settings.png");
-            foreach (var tab in new[] { SettingsTab, PresetsTab, BackupsTab, DiscordTab, UpdatesTab, SupportTab })
+            foreach (var tab in new[] { SettingsTab, GameJoiningTab, PresetsTab, BackupsTab, DiscordTab, UpdatesTab, SupportTab })
             {
                 Tab_Click(tab, new RoutedEventArgs()); await Task.Delay(150);
                 Assert(tab.IsChecked == true && AccountsPage.Visibility == Visibility.Collapsed,
@@ -434,7 +434,8 @@ public sealed partial class MainWindow
             CloseBehavior.SelectedIndex = 1; await Task.Delay(300);
             Assert(!_closeToTray && !(await _api.GetAsync<Snapshot>("status")).CloseToTray, "Close preference saves through the API.");
             CloseBehavior.SelectedIndex = 0; await Task.Delay(300);
-            Tab_Click(SettingsTab, new RoutedEventArgs()); await Task.Delay(250);
+            Tab_Click(GameJoiningTab, new RoutedEventArgs()); await Task.Delay(250);
+            Assert(GameJoiningPage.Visibility == Visibility.Visible && SettingsPage.Visibility == Visibility.Collapsed, "Game joining has a dedicated settings page.");
             ServerSelector.SelectedIndex = 2; await Task.Delay(300);
             GameJoinType.SelectedIndex = 0; await Task.Delay(300);
             var gameSettings = await _api.GetAsync<Snapshot>("status");
@@ -502,6 +503,21 @@ public sealed partial class MainWindow
             HistoryAccount.SelectedItem = HistoryAccount.Items.OfType<ComboBoxItem>().First(i => (i.Tag as string) == "0"); await Task.Delay(250);
             Assert(HistoryList.ItemsSource is Activity[] { Length: 0 }, "History can filter by account.");
             HistoryAccount.SelectedIndex = 0;
+            _timer.Stop();
+            _history = Enumerable.Range(0, 23).Select(i => new Activity(DateTimeOffset.UtcNow, "0", null, "stopped", 0, $"Event {i}")).ToArray();
+            _historyPage = 0; ShowHistoryPage();
+            Assert(HistoryList.ItemsSource is Activity[] { Length: 10 } && !HistoryPrevious.IsEnabled && HistoryNext.IsEnabled, "History starts with ten entries and bottom pagination.");
+            HistoryPage_Click(HistoryNext, new RoutedEventArgs());
+            HistoryPage_Click(HistoryNext, new RoutedEventArgs());
+            Assert(HistoryList.ItemsSource is Activity[] { Length: 3 } && !HistoryNext.IsEnabled, "History pagination reaches the final partial page.");
+            _recentActivity = Enumerable.Range(0, 23).Select(i => new Notice(DateTimeOffset.UtcNow, "Fixture", $"Event {i}", "Fixture activity", null)).ToArray();
+            _recentActivityPage = 0; ShowActivityPage();
+            Assert(ActivityList.ItemsSource is Notice[] { Length: 10 } && !ActivityPrevious.IsEnabled, "Recent activity starts with ten entries.");
+            ActivityPage_Click(ActivityNext, new RoutedEventArgs()); ActivityPage_Click(ActivityNext, new RoutedEventArgs());
+            Assert(ActivityList.ItemsSource is Notice[] { Length: 3 } && !ActivityNext.IsEnabled, "Recent activity pagination reaches all entries.");
+            _recentActivity = []; ShowActivityPage(); _history = []; ShowHistoryPage();
+            Assert(_recentActivityPage == 0 && _historyPage == 0 && !ActivityPrevious.IsEnabled && !HistoryPrevious.IsEnabled, "Shrinking activity lists clamp pagination.");
+            _activityJson = ""; _activityFingerprint = ""; await RefreshAsync(); _timer.Start();
             foreach (var row in _rows) row.IsSelected = false; UpdateSelectionSettings();
             Tab_Click(AccountsTab, new RoutedEventArgs());
             modal = ShowAccountAsync(_rows[1]); await Task.Delay(350);
@@ -620,7 +636,7 @@ public sealed partial class MainWindow
             AssertChangelogLayout();
             await CaptureAsync(directory, "changelog-small.png", OpenDialog());
             InvokeDialogButton("CloseButton"); await changelog;
-            foreach (var tab in new[] { AccountsTab, GamesTab, RecoveryTab, PresetsTab, SettingsTab, DiscordTab, BackupsTab, UpdatesTab, SupportTab })
+            foreach (var tab in new[] { AccountsTab, GamesTab, RecoveryTab, PresetsTab, SettingsTab, GameJoiningTab, DiscordTab, BackupsTab, UpdatesTab, SupportTab })
             {
                 Tab_Click(tab, new RoutedEventArgs()); await Task.Delay(80); Root.UpdateLayout();
                 var available = PageScroll.ActualWidth - PageScroll.Padding.Left - PageScroll.Padding.Right;

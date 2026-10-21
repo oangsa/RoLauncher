@@ -22,9 +22,10 @@ fn window_fixture() {
         return;
     };
     let visible = std::env::var_os("ROLAUNCHER_STARTUP_FIXTURE_VISIBLE").is_some();
+    let tray = std::env::var_os("ROLAUNCHER_STARTUP_FIXTURE_TRAY").is_some();
     let hwnd = unsafe {
         CreateWindowExW(
-            0,
+            if tray { WS_EX_TOOLWINDOW } else { 0 },
             wide("STATIC").as_ptr(),
             wide("RoLauncher cleanup test").as_ptr(),
             WS_OVERLAPPEDWINDOW,
@@ -39,7 +40,7 @@ fn window_fixture() {
         )
     };
     assert!(!hwnd.is_null());
-    if visible {
+    if visible || tray {
         unsafe {
             ShowWindow(hwnd, SW_SHOW);
         }
@@ -79,6 +80,7 @@ fn external_cleanup_protects_visible_owned_and_changed_processes() {
             .env("ROLAUNCHER_STARTUP_FIXTURE_READY", &ready)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
+        if name == "tray" { command.env("ROLAUNCHER_STARTUP_FIXTURE_TRAY", "1"); }
         if visible {
             command.env("ROLAUNCHER_STARTUP_FIXTURE_VISIBLE", "1");
         }
@@ -100,6 +102,7 @@ fn external_cleanup_protects_visible_owned_and_changed_processes() {
     let mut visible = spawn(true, "visible");
     let mut managed = spawn(false, "managed");
     let mut external = spawn(false, "external");
+    let mut tray = spawn(false, "tray");
     let identity = |child: &std::process::Child| {
         Player {
             pid: child.id(),
@@ -109,7 +112,7 @@ fn external_cleanup_protects_visible_owned_and_changed_processes() {
         .identity(Uuid::nil())
     };
     let discovered = all_players().unwrap();
-    for child in [&visible, &managed, &external] {
+    for child in [&visible, &managed, &external, &tray] {
         assert!(discovered.iter().any(|p| p.pid == child.id() && p.tracker.is_empty()),
             "global discovery must include visible and hidden untracked clients");
     }
@@ -137,7 +140,7 @@ fn external_cleanup_protects_visible_owned_and_changed_processes() {
     assert!(external.try_wait().unwrap().is_none());
     assert_eq!(
         close_startup_background_players_at(&[managed_id], &versions).unwrap(),
-        1
+        2
     );
     assert!(visible.try_wait().unwrap().is_none());
     assert!(managed.try_wait().unwrap().is_none());
@@ -149,9 +152,15 @@ fn external_cleanup_protects_visible_owned_and_changed_processes() {
     for child in [&visible, &managed] {
         close(&identity(child), true).unwrap();
     }
-    for child in [&mut visible, &mut managed, &mut external] {
+    for child in [&mut visible, &mut managed, &mut external, &mut tray] {
         let _ = child.kill();
         child.wait().unwrap();
     }
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn background_scan_tolerates_processes_that_disappeared_after_snapshot() {
+    assert!(background_process_handle(0).unwrap().is_none());
+    assert!(background_process_handle(unsafe { GetCurrentProcessId() }).unwrap().is_some());
 }

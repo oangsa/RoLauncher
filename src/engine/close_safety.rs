@@ -133,6 +133,48 @@ fn eligible(
 }
 
 impl Engine {
+    #[cfg(any(windows, test))]
+    pub(super) fn cleanup_launch_conflict(
+        &self,
+        state: &State,
+        cleanup: impl FnOnce(&[ProcessIdentity]) -> Result<(), String>,
+    ) -> Result<(), String> {
+        if self.0.launch_allowed.load(Ordering::Acquire)
+            || !state.database.external_background_cleanup_enabled
+        {
+            return Ok(());
+        }
+        // Unknown late launches must not be mistaken for external tray leftovers.
+        if state
+            .database
+            .accounts
+            .iter()
+            .any(|s| s.account.tracker.is_some() && s.account.process.is_none())
+            || state
+                .database
+                .retired_launches
+                .iter()
+                .any(|r| r.process.is_none())
+        {
+            return Err("A saved launch still needs inspection; use Stop and wait for process discovery before starting again".into());
+        }
+        let protected: Vec<_> = state
+            .database
+            .accounts
+            .iter()
+            .filter_map(|s| s.account.process.clone())
+            .chain(
+                state
+                    .database
+                    .retired_launches
+                    .iter()
+                    .filter_map(|r| r.process.clone()),
+            )
+            .collect();
+        // The command mutex remains held through cleanup, so new launches cannot race the scan.
+        cleanup(&protected)
+    }
+
     /// Explicit global stop: serialize launch cancellation and process termination.
     pub fn close_all_instances(&self) -> Result<usize, String> {
         #[cfg(windows)]
