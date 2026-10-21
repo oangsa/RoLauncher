@@ -108,6 +108,11 @@ fn external_cleanup_protects_visible_owned_and_changed_processes() {
         }
         .identity(Uuid::nil())
     };
+    let discovered = all_players().unwrap();
+    for child in [&visible, &managed, &external] {
+        assert!(discovered.iter().any(|p| p.pid == child.id() && p.tracker.is_empty()),
+            "global discovery must include visible and hidden untracked clients");
+    }
     let managed_id = identity(&managed);
     let external_id = identity(&external);
     let mut session = 0;
@@ -140,6 +145,10 @@ fn external_cleanup_protects_visible_owned_and_changed_processes() {
     let mut invalid = external_id;
     invalid.pid = 0;
     assert!(close_startup_candidate(&invalid, &root, session, true).is_err());
+    // Explicit close does not depend on a window, tracker, or launcher ownership.
+    for child in [&visible, &managed] {
+        close(&identity(child), true).unwrap();
+    }
     for child in [&mut visible, &mut managed, &mut external] {
         let _ = child.kill();
         child.wait().unwrap();

@@ -180,6 +180,34 @@ pub struct ProcessIdentity {
     pub generation: Uuid,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CloseReason {
+    UserStop,
+    ManualRestart,
+    ManualStartReplacement,
+    AutomaticRecovery,
+    TargetReplacement,
+    ObsoleteLaunch,
+}
+impl CloseReason {
+    pub fn automatic(self) -> bool {
+        matches!(self, Self::AutomaticRecovery | Self::TargetReplacement)
+    }
+}
+
+/// Intent is durable; permission is re-evaluated at every effect, never cached here.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloseIntent {
+    /// A new classification starts a new graceful/force episode, even within one operation.
+    #[serde(default)]
+    pub id: Uuid,
+    pub reason: CloseReason,
+    pub generation: Uuid,
+    pub operation_id: Option<Uuid>,
+    #[serde(default)]
+    pub denied: bool,
+}
+
 /// Runtime evidence is never restored from a database or backup.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RecoveryEvidence {
@@ -224,6 +252,8 @@ pub struct Account {
     pub last_error: Option<String>,
     pub operation_id: Option<Uuid>,
     #[serde(default)]
+    pub close_intent: Option<CloseIntent>,
+    #[serde(default)]
     pub public_fallback_active: bool,
     #[serde(default)]
     pub fallback_policy: FallbackPolicy,
@@ -258,6 +288,7 @@ impl Account {
             disconnect_notified: false,
             last_error: None,
             operation_id: None,
+            close_intent: None,
             public_fallback_active: false,
             fallback_policy: FallbackPolicy::default(),
             group: String::new(),
@@ -340,6 +371,11 @@ pub struct RetiredLaunch {
     pub generation: Uuid,
     pub account_id: String,
     pub deadline: DateTime<Utc>,
+    #[serde(default)]
+    pub close_intent: Option<CloseIntent>,
+    /// Freeze the first unambiguous discovery; never rebind an old tracker to a new PID.
+    #[serde(default)]
+    pub process: Option<ProcessIdentity>,
 }
 fn schema_version() -> u32 {
     2

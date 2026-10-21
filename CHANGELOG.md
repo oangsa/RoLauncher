@@ -1,6 +1,13 @@
 # Changelog
 
-## [1.7.1] — Unreleased
+## [1.7.2] — Unreleased
+
+- Add Close all Roblox to stop rejoin and close external, hidden, and tray clients in the current Windows session.
+- Rejoin after confirmed game kicks (267), with bounded retries and verified process exit before replacement.
+- Prevent duplicate launches while an earlier launch remains unresolved; require discovery before releasing expired launch tracking.
+- Honor Stop for verified clients discovered late, allowing cleanup after the launch discovery deadline.
+
+## [1.7.1] — 2026-10-20
 
 ### Fixed
 

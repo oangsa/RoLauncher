@@ -55,6 +55,15 @@ pub(super) fn validate_game_assignment(db: &Database, p: &AccountPatch) -> Resul
     Ok(())
 }
 pub(super) fn apply_patch(a: &mut Account, p: AccountPatch) {
+    if (p.target.is_some()
+        || p.clear_target
+        || p.fallback_policy.is_some()
+        || p.auto_recovery == Some(false))
+        && let Some(intent) = &mut a.close_intent
+        && intent.reason.automatic()
+    {
+        intent.denied = true;
+    }
     if let Some(alias) = p.alias {
         a.alias = alias;
     }
@@ -216,7 +225,12 @@ impl Engine {
             let pending = a.operation_id;
             if let Some(op) = pending.and_then(|id|s.operations.get(&id)).filter(|op|op.state == "queued").cloned() { return Ok(op); }
             let op = Operation { id: Uuid::new_v4(), account_id: id.into(), state: "queued".into(), error: None };
-            account_mut(s, id)?.operation_id = Some(op.id); s.operations.insert(op.id, op.clone()); Ok(op)
+            let a = account_mut(s, id)?;
+            a.operation_id = Some(op.id);
+            if let Some(intent) = &mut a.close_intent && intent.reason.automatic() && !intent.denied {
+                intent.operation_id = Some(op.id);
+            }
+            s.operations.insert(op.id, op.clone()); Ok(op)
         })
     }
     /// Validate every expanded patch before committing anything, including missing IDs.
@@ -437,7 +451,7 @@ impl Engine {
                     .database
                     .retired_launches
                     .iter()
-                    .any(|r| r.deadline > Utc::now())
+                    .any(|r| r.deadline > Utc::now() || r.process.is_some())
                 {
                     return Err(
                         "Stop all accounts and wait for pending launches before restoring".into(),

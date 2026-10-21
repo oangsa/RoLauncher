@@ -31,6 +31,7 @@ public sealed partial class MainWindow : Window
     public MainWindow(Bootstrap config)
     {
         InitializeComponent();
+        CloseAllRobloxButton.IsEnabled = OperatingSystem.IsWindows();
         // Linux detaches inline dialogs; keep them alive for subsequent opens.
         _accountDialog = AccountDialog;
         _presetLookupDialog = PresetLookupDialog;
@@ -57,6 +58,22 @@ public sealed partial class MainWindow : Window
 #else
         Root.Loaded += (_, _) => StartUpdateChecks();
 #endif
+    }
+
+    private async void CloseAllRoblox_Click(object sender, RoutedEventArgs e)
+    {
+        if (!await ConfirmAsync("Close all Roblox?", "Stops automatic rejoin for every account and closes all Roblox clients in this Windows session, including clients opened outside RoLauncher.", "Close all")) return;
+        CloseAllRobloxButton.IsEnabled = false;
+        try
+        {
+            await GuardAsync(async () =>
+            {
+                await _api.SendAsync(HttpMethod.Post, "instances/close-all");
+                await RefreshAsync();
+                FeedbackMessage("Roblox instances closed. Automatic rejoin is stopped.", InfoBarSeverity.Success);
+            });
+        }
+        finally { CloseAllRobloxButton.IsEnabled = OperatingSystem.IsWindows(); }
     }
 
     private AccountRow[] Selected() => _visibleRows.Where(r => r.IsSelected).ToArray();
