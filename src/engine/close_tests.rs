@@ -1743,3 +1743,35 @@ fn global_close_persistence_failure_has_no_effect_and_partial_failure_stops_rejo
             .all(|a| !a.desired_running)
     );
 }
+
+#[test]
+fn blocked_start_cleanup_requires_consent_and_protects_saved_launches() {
+    let f = Fixture::new();
+    f.engine.0.launch_allowed.store(false, Ordering::Release);
+    f.engine
+        .transaction(|s| {
+            f.engine
+                .cleanup_launch_conflict(s, |_| panic!("cleanup requires consent"))?;
+            s.database.external_background_cleanup_enabled = true;
+            f.engine.cleanup_launch_conflict(s, |protected| {
+                assert_eq!(protected.len(), 2);
+                assert_eq!(
+                    protected[0],
+                    s.database.accounts[0].account.process.clone().unwrap()
+                );
+                f.engine.0.launch_allowed.store(true, Ordering::Release);
+                Ok(())
+            })?;
+            f.engine
+                .cleanup_launch_conflict(s, |_| panic!("ready launches need no cleanup"))?;
+            f.engine.0.launch_allowed.store(false, Ordering::Release);
+            s.database.accounts[0].account.process = None;
+            assert!(
+                f.engine
+                    .cleanup_launch_conflict(s, |_| panic!("unresolved clients stay protected"))
+                    .is_err()
+            );
+            Ok(())
+        })
+        .unwrap();
+}

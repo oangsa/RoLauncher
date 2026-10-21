@@ -431,8 +431,9 @@ async fn command(
     State(engine): State<Engine>,
     Path((id, action)): Path<(String, String)>,
 ) -> Result<(StatusCode, Json<crate::model::Operation>), ApiError> {
-    engine
-        .command(&id, &action)
+    tokio::task::spawn_blocking(move || engine.command(&id, &action))
+        .await
+        .map_err(|_| error("Account command worker unavailable".into()))?
         .map(|op| (StatusCode::ACCEPTED, Json(op)))
         .map_err(error)
 }
