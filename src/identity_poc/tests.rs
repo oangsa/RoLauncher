@@ -74,6 +74,7 @@ fn effective_token_identity_is_stable_and_sid_is_not_logged() {
 
 #[cfg(windows)]
 #[test]
+#[ignore = "native key mutation requires interactive disposable-lab confirmation; never CI"]
 fn native_software_key_signs_and_public_key_verifies_without_exporting_private_bytes() {
     use super::windows::*;
     let identity = effective_identity().unwrap();
@@ -93,6 +94,7 @@ fn native_software_key_signs_and_public_key_verifies_without_exporting_private_b
 
 #[cfg(windows)]
 #[test]
+#[ignore = "native key mutation requires interactive disposable-lab confirmation; never CI"]
 fn native_key_reopens_with_verified_scope_policy_acl_and_deletion_requires_recovery() {
     use super::windows::*;
     let identity = effective_identity().unwrap();
@@ -112,6 +114,7 @@ fn native_key_reopens_with_verified_scope_policy_acl_and_deletion_requires_recov
 
 #[cfg(windows)]
 #[test]
+#[ignore = "native key mutation requires interactive disposable-lab confirmation; never CI"]
 fn offline_verifier_binds_both_keys_and_accepts_fresh_challenge_only_once() {
     use super::windows::*;
     let identity = effective_identity().unwrap();
@@ -141,6 +144,7 @@ fn offline_verifier_binds_both_keys_and_accepts_fresh_challenge_only_once() {
 
 #[cfg(windows)]
 #[test]
+#[ignore = "native key mutation requires interactive disposable-lab confirmation; never CI"]
 fn user_identity_persists_across_state_reload_with_live_user_and_machine_binding() {
     use super::windows::*;
     let path = std::env::temp_dir().join(format!(
@@ -157,6 +161,7 @@ fn user_identity_persists_across_state_reload_with_live_user_and_machine_binding
 
 #[cfg(windows)]
 #[test]
+#[ignore = "native key mutation requires interactive disposable-lab confirmation; never CI"]
 fn native_collisions_scope_mismatch_and_corrupt_public_keys_cannot_replace_identity() {
     use super::windows::*;
     let identity = effective_identity().unwrap();
@@ -190,6 +195,7 @@ fn native_collisions_scope_mismatch_and_corrupt_public_keys_cannot_replace_ident
 
 #[cfg(windows)]
 #[test]
+#[ignore = "native key mutation requires interactive disposable-lab confirmation; never CI"]
 fn offline_verifier_rejects_replay_into_changed_identity_context_and_wrong_or_missing_signatures() {
     use super::windows::*;
     let identity = effective_identity().unwrap();
@@ -278,6 +284,7 @@ impl Drop for PublicStateFixture {
 
 #[cfg(windows)]
 #[test]
+#[ignore = "native key mutation requires interactive disposable-lab confirmation; never CI"]
 fn public_state_tampering_changed_sid_machine_evidence_and_provider_substitution_fail_closed() {
     use super::windows::*;
     let fixture = PublicStateFixture::new();
@@ -333,6 +340,7 @@ fn impersonated_thread_identity_is_observed_but_never_used_for_poc_enrollment() 
 
 #[cfg(windows)]
 #[test]
+#[ignore = "native key mutation requires interactive disposable-lab confirmation; never CI"]
 fn cleanup_attempts_remaining_poc_key_even_after_user_key_loss() {
     use super::windows::*;
     let fixture = PublicStateFixture::new();
@@ -378,6 +386,7 @@ fn anonymous_thread_token_failure_never_falls_back_to_process_identity() {
 
 #[cfg(windows)]
 #[test]
+#[ignore = "native key mutation requires interactive disposable-lab confirmation; never CI"]
 fn failed_enrollment_after_first_key_preserves_recovery_when_delete_is_denied() {
     use super::windows::{recovery::*, *};
     let injection = FaultGuard::new(Some(FaultStage::AfterFirstKey), true);
@@ -409,6 +418,7 @@ fn failed_enrollment_after_first_key_preserves_recovery_when_delete_is_denied() 
 
 #[cfg(windows)]
 #[test]
+#[ignore = "native key mutation requires interactive disposable-lab confirmation; never CI"]
 fn faulted_native_lifecycle_accounts_every_key_and_recovers_only_verified_receipts() {
     use super::windows::{recovery::*, *};
     for (stage, count, denied) in [
@@ -503,6 +513,7 @@ fn enrollment_policy_distinguishes_elevated_session_zero_and_noninteractive_diag
 
 #[cfg(windows)]
 #[test]
+#[ignore = "native key mutation requires interactive disposable-lab confirmation; never CI"]
 fn diagnostic_state_cannot_be_accepted_as_enrollment_and_fixture_cleanup_failure_is_fatal() {
     use super::windows::{recovery::*, *};
     let guard = FaultGuard::new(None, false);
@@ -525,6 +536,7 @@ fn diagnostic_state_cannot_be_accepted_as_enrollment_and_fixture_cleanup_failure
 
 #[cfg(windows)]
 #[test]
+#[ignore = "native key mutation requires interactive disposable-lab confirmation; never CI"]
 fn ordinary_enrollment_is_explicit_and_hosted_diagnostics_cannot_bypass_it() {
     use super::windows::{recovery::*, *};
     let guard = FaultGuard::new(None, false);
@@ -548,6 +560,7 @@ fn ordinary_enrollment_is_explicit_and_hosted_diagnostics_cannot_bypass_it() {
 
 #[cfg(windows)]
 #[test]
+#[ignore = "native key mutation requires interactive disposable-lab confirmation; never CI"]
 fn recovery_refuses_namespace_owner_scope_provider_and_public_key_substitution() {
     use super::windows::{recovery::*, *};
     let guard = FaultGuard::new(None, false);

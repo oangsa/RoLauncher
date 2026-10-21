@@ -30,10 +30,11 @@ jobs:
         run: |
           if command -v apt-get >/dev/null; then
             apt-get update
-            DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential pkg-config libdbus-1-dev curl git python3 libicu74 libssl3 zlib1g libfontconfig1 libx11-6 libxrandr2 libxi6 libxtst6 libgl1 xvfb xauth fonts-dejavu-core
+            DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential pkg-config libdbus-1-dev dbus curl git python3 libicu74 libssl3 zlib1g libfontconfig1 libx11-6 libxrandr2 libxi6 libxtst6 libgl1 xvfb xauth fonts-dejavu-core
           else
             pacman -Syu --noconfirm --needed base-devel pkgconf dbus curl git python icu openssl zlib fontconfig libx11 libxrandr libxi libxtst mesa xorg-server-xvfb xorg-xauth ttf-dejavu
           fi
+          dbus-uuidgen --ensure
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -53,6 +54,8 @@ jobs:
           cargo test --locked
           cargo clippy --locked --all-targets -- -D warnings
           cargo fmt --check
+          python3 scripts/test-identity-lab.py
+          python3 scripts/test-package-development-source.py
           python3 scripts/check-release.py
           python3 scripts/test-linux-update.py
           python3 scripts/test-release-promotion.py
@@ -67,14 +70,14 @@ jobs:
           version="$(python3 -c 'import tomllib; print(tomllib.load(open("../Cargo.toml", "rb"))["package"]["version"])')"
           dotnet publish --no-restore -c Release -p:Version="$version" -p:UiSmoke=true -o ../target/linux-ui-smoke
           cd ..
-          xvfb-run -a -s '-screen 0 1280x1024x24' python3 scripts/ui-smoke-linux.py --shell target/linux-ui-smoke/RoLauncher.Desktop
+          dbus-run-session -- xvfb-run -a -s '-screen 0 1280x1024x24' python3 scripts/ui-smoke-linux.py --shell target/linux-ui-smoke/RoLauncher.Desktop
       - name: Package normal Linux shell
         shell: bash
         run: |
           bash scripts/build-linux.sh --use-current-version
           version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
           python3 scripts/package-linux.py --directory "target/linux/rolauncher-v$version"
-          xvfb-run -a -s '-screen 0 1280x1024x24' python3 scripts/verify-linux-package.py --directory "target/linux/rolauncher-v$version" --smoke-shell
+          dbus-run-session -- xvfb-run -a -s '-screen 0 1280x1024x24' python3 scripts/verify-linux-package.py --directory "target/linux/rolauncher-v$version" --smoke-shell
       - uses: actions/upload-artifact@v4
         if: always()
         with:

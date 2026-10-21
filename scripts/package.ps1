@@ -25,17 +25,17 @@ try {
     & "$PSScriptRoot\build.ps1" -UseCurrentVersion -OutputDirectory $taskDistribution
     Copy-Item -LiteralPath 'AGENTS.md' -Destination $taskDistribution
     Compress-Archive -LiteralPath $taskDistribution -DestinationPath $taskBinaryZip
-    $taskSource = Join-Path $taskRoot ('target\source-package-' + [guid]::NewGuid().ToString())
-    New-Item -ItemType Directory -Path $taskSource | Out-Null
-    foreach ($taskItem in @('Cargo.toml','Cargo.lock','build.rs','README.md','CHANGELOG.md','AGENTS.md','LICENSE','THIRD_PARTY_NOTICES.md','.gitignore','.gitattributes','.github','assets','installer','src','examples','scripts','docs','licenses')) {
-        Copy-Item -LiteralPath $taskItem -Destination $taskSource -Recurse
+    # Release source must be the exact commit, including hidden build inputs.
+    # Local development packages retain working-tree files and their stamped identity.
+    if ($taskVersion -notmatch '-dev\.') {
+        & git diff --quiet HEAD --
+        if ($LASTEXITCODE -ne 0) { throw 'Stable source packaging requires a clean committed tree' }
+        & git archive --format=zip "--output=$taskSourceZip" HEAD
+        if ($LASTEXITCODE -ne 0) { throw 'Exact-commit source archive failed' }
+    } else {
+        & python "$PSScriptRoot\package-development-source.py" $taskSourceZip
+        if ($LASTEXITCODE -ne 0) { throw 'Development source archive failed' }
     }
-    foreach ($taskProject in @('desktop','desktop.tests','desktop.linux')) {
-        $taskProjectSource = Join-Path $taskSource $taskProject
-        New-Item -ItemType Directory -Path $taskProjectSource | Out-Null
-        Get-ChildItem -LiteralPath $taskProject -File | Copy-Item -Destination $taskProjectSource
-    }
-    Get-ChildItem -LiteralPath $taskSource | Compress-Archive -DestinationPath $taskSourceZip
     & "$PSScriptRoot\build-installer.ps1" -DistributionDirectory $taskDistribution -OutputDirectory $taskOutput
     $taskLines = foreach ($taskArtifact in @($taskBinaryZip, $taskSourceZip, $taskInstaller)) {
         $taskHash = Get-FileHash -LiteralPath $taskArtifact -Algorithm SHA256

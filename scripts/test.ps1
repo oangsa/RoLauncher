@@ -3,6 +3,8 @@ $taskRoot = Split-Path -Parent $PSScriptRoot
 Push-Location -LiteralPath $taskRoot
 try {
     . "$PSScriptRoot\environment.ps1"
+    & python "$PSScriptRoot\test-package-development-source.py"
+    if ($LASTEXITCODE -ne 0) { throw 'Source archive checks failed' }
     & python "$PSScriptRoot\test-versioning.py"
     if ($LASTEXITCODE -ne 0) { throw 'Versioning checks failed' }
     & python "$PSScriptRoot\test-publish-beta.py"

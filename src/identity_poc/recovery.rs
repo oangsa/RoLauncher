@@ -69,7 +69,7 @@ fn path_for(key: &PublicKey) -> Result<PathBuf, String> {
     Ok(directory().join(format!("{:?}-{:?}-{id}.jsonl", key.provider, key.scope)))
 }
 
-fn private_new_file(path: &Path, identity: &Identity) -> Result<File, String> {
+pub(super) fn private_new_file(path: &Path, identity: &Identity) -> Result<File, String> {
     use std::os::windows::io::FromRawHandle;
     use windows_sys::Win32::{
         Foundation::*,
@@ -224,6 +224,10 @@ pub fn snapshot(path: &Path) -> Result<Snapshot, String> {
         if record.schema_version != 1
             || record.owner_sid_reference == [0; 32]
             || record.key.blob.len() > 4096
+            || (record.cleanup == Some(CleanupOutcome::Succeeded)
+                && record.native_status != Some(0))
+            || (record.cleanup == Some(CleanupOutcome::Absent)
+                && !matches!(record.native_status, Some(0 | 0x80090011)))
         {
             return Err("invalid local recovery receipt".into());
         }
@@ -245,6 +249,11 @@ pub fn recover(path: &Path) -> Result<CleanupOutcome, String> {
         return Err("unsupported local recovery token".into());
     }
     let receipt = Receipt::open(path, &identity)?;
+    if receipt.record.key.scope == super::Scope::Machine {
+        return Err(
+            "machine recovery requires separately authorized disposable-lab recovery".into(),
+        );
+    }
     if let Some(outcome) = receipt.record.cleanup
         && outcome != CleanupOutcome::Incomplete
     {
@@ -417,4 +426,60 @@ pub fn summary() -> Result<serde_json::Value, String> {
 #[cfg(test)]
 pub fn set_delete_denied(denied: bool) {
     FAULTS.with(|f| f.borrow_mut().as_mut().unwrap().deny_delete = denied);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contradictory_disposal_status_is_incomplete_even_in_history() {
+        let guard = FaultGuard::new(None, false);
+        let path = guard.directory.join("synthetic.jsonl");
+        let mut record = Snapshot {
+            schema_version: 1,
+            key: PublicKey {
+                name: "RoLauncher.IdentityPoC.12345678-1234-4234-8234-123456789abc".into(),
+                provider: super::super::Provider::Software,
+                scope: super::super::Scope::User,
+                blob: vec![1, 2, 3],
+            },
+            owner_sid_reference: [1; 32],
+            phase: Phase::Finalized,
+            cleanup: Some(CleanupOutcome::Succeeded),
+            native_status: Some(0),
+        };
+        for outcome in [CleanupOutcome::Succeeded, CleanupOutcome::Absent] {
+            record.cleanup = Some(outcome);
+            for status in [None, Some(0x80090016)] {
+                record.native_status = status;
+                let mut bytes = serde_json::to_vec(&record).unwrap();
+                bytes.push(b'\n');
+                // A later valid entry cannot erase a contradictory historical claim.
+                record.native_status = Some(0);
+                bytes.extend(serde_json::to_vec(&record).unwrap());
+                bytes.push(b'\n');
+                std::fs::write(&path, bytes).unwrap();
+                assert!(snapshot(&path).is_err());
+                let counts = summary().unwrap();
+                assert_eq!(counts["incomplete"], 1);
+                assert_eq!(counts["cleanup_succeeded"], 0);
+                assert_eq!(counts["absent"], 0);
+            }
+        }
+        for (outcome, status) in [
+            (CleanupOutcome::Succeeded, 0),
+            (CleanupOutcome::Absent, 0),
+            (CleanupOutcome::Absent, 0x80090011),
+        ] {
+            record.cleanup = Some(outcome);
+            record.native_status = Some(status);
+            let mut bytes = serde_json::to_vec(&record).unwrap();
+            bytes.push(b'\n');
+            std::fs::write(&path, bytes).unwrap();
+            assert!(snapshot(&path).is_ok());
+            assert_eq!(summary().unwrap()["incomplete"], 0);
+        }
+        std::fs::remove_file(path).unwrap();
+    }
 }

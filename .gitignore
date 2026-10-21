@@ -14,3 +14,30 @@ accounts*.tmp
 *.rolbackup
 *.rbxbackup
 **/__pycache__/
+
+# Local credentials, signing keys and machine-specific evidence.
+/.work/
+/_phase_d_test_tmp/
+*.pem
+*.key
+*.pfx
+*.p12
+*.jsonl
+private-local-public-state-*.json
+**/RoLauncher-IdentityLab/
+**/RoLauncher.IdentityPoC/
+/identity-poc-*/
+/identity-lab-*/
+/.aws/
+/.ssh/
+/.gnupg/
+lab-config*.json
+local-baseline*.json
+
+# Internal security designs and validation records stay local.
+/docs/security/SECRET-SCAN-REPORT.md
+/docs/security/SECURITY-GATES.md
+/docs/security/SUPPLY-CHAIN-THREAT-MODEL.md
+/docs/security/VALIDATION.md
+/docs/security/WINDOWS-DEVICE-IDENTITY-POC.md
+/docs/security/WINDOWS-MACHINE-KEY-PROVISIONING-VALIDATION.md
