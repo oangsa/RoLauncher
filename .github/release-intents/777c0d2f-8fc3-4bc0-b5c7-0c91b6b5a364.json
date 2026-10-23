@@ -1,0 +1,31 @@
+{
+  "schema": 2,
+  "id": "777c0d2f-8fc3-4bc0-b5c7-0c91b6b5a364",
+  "version": "1.7.5",
+  "channel": "stable",
+  "source": "hotfix",
+  "baseline_tag": "v1.7.4",
+  "baseline_sha": "279ffcffb8f0e7c02fc4385b43c0605b650abc1f",
+  "base_sha": "279ffcffb8f0e7c02fc4385b43c0605b650abc1f",
+  "reviewed_sha": "e7e479d7944432ed8ce9f41a652c49da5080814b",
+  "commits": [
+    "e7e479d7944432ed8ce9f41a652c49da5080814b"
+  ],
+  "paths": [
+    "CHANGELOG.md",
+    "Cargo.lock",
+    "Cargo.toml",
+    "README.md",
+    "desktop/CHANGELOG.txt",
+    "docs/RELEASE-1.7.5.md",
+    "src/engine/close_safety.rs",
+    "src/engine/close_tests.rs",
+    "src/platform_startup_tests.rs"
+  ],
+  "patch_sha256": "4dd64ea2f74381da34e1ccee6fa8420b4829f674fd122d6c5a5e4ee805e9bc83",
+  "review": {
+    "bug": "Confirmed disconnected clients can remain alive in the tray after WM_CLOSE, blocking replacement. Terminate only the freshly verified owned process and retain confirmed-exit and retry-backoff gates.",
+    "dependencies": "Based directly on published 1.7.4. Changes only the recovery close decision, existing engine regressions, disposable Windows process fixture, release notes and root version. No dependency changes or unpublished identity work; no cherry-pick prerequisites.",
+    "premium_excluded": true
+  }
+}

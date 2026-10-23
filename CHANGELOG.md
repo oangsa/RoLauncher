@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.7.5] — 2026-10-23
+
+- Rejoin after verified disconnected clients exit, including tray clients; retain retry backoff.
+
 ## [1.7.4] — Unreleased
 
 - Recover from confirmed game kicks when Roblox omits numeric error 267, retaining retry limits and verified exit before replacement.
