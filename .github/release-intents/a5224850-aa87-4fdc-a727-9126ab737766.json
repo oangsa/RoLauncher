@@ -1,0 +1,30 @@
+{
+  "schema": 2,
+  "id": "a5224850-aa87-4fdc-a727-9126ab737766",
+  "version": "1.7.8",
+  "channel": "stable",
+  "source": "hotfix",
+  "baseline_tag": "v1.7.7",
+  "baseline_sha": "695d93ee759c4f7d0616c50b916b5ad9504cc002",
+  "base_sha": "695d93ee759c4f7d0616c50b916b5ad9504cc002",
+  "reviewed_sha": "b92d661695d005d0b9275cdad3edfa65c6bebfb5",
+  "commits": [
+    "b92d661695d005d0b9275cdad3edfa65c6bebfb5"
+  ],
+  "paths": [
+    "CHANGELOG.md",
+    "Cargo.lock",
+    "Cargo.toml",
+    "README.md",
+    "desktop/CHANGELOG.txt",
+    "docs/RELEASE-1.7.8.md",
+    "src/engine/close_safety.rs",
+    "src/engine/close_tests.rs"
+  ],
+  "patch_sha256": "440559e4a890eae33b54e3aad2f7062d2366ea3a87008f801a39ae814b48da70",
+  "review": {
+    "bug": "Prevent permanent automatic-rejoin pause when a closing process disappears between the monitor alive check and fresh ownership verification.",
+    "dependencies": "Based directly on published stable 1.7.7 and reuses its exact exit watches, close intents and retry reservations. Extracts existing internal ownership checks without changing conflict policy. Missing discovery defers effects; manual, policy, conflicting-ownership and failed-discovery denials remain protected. No dependency or experimental code changes.",
+    "premium_excluded": true
+  }
+}
