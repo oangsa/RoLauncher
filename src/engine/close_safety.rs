@@ -443,10 +443,9 @@ impl Engine {
             self.commit_close_state(&mut state, next)?;
             return Err("Replacement readiness changed before close; client preserved".into());
         }
-        // A disconnected client may keep running in the tray after WM_CLOSE.
-        // End its verified process lifetime before allowing a replacement.
-        let force = intent.reason == CloseReason::AutomaticRecovery
-            || attempts.force(&expected.id, &intent, identity, now + started.elapsed());
+        // Give graceful closure five seconds, including clients that remain in the tray.
+        // Every escalation retains the same current intent and verified process identity.
+        let force = attempts.force(&expected.id, &intent, identity, now + started.elapsed());
         match effect(identity, force) {
             Ok(()) => {
                 attempts.record(&expected.id, &intent, identity, now + started.elapsed());
@@ -458,9 +457,7 @@ impl Engine {
                 let a = account_mut(&mut next, &expected.id)?;
                 a.close_intent.as_mut().unwrap().denied = true;
                 a.status = Status::NeedsAttention;
-                a.last_error = Some(format!(
-                    "{CLOSE_BLOCKED_PREFIX}verified process close failed; inspect the client and use Stop to retry"
-                ));
+                a.last_error = Some(CLOSE_FAILED_ERROR.into());
                 self.commit_close_state(&mut state, next)?;
                 Err("Verified process close failed; force escalation cancelled".into())
             }
