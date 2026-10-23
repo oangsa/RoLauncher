@@ -2110,7 +2110,7 @@ fn disk_reconnect_during_graceful_close_cancels_force_and_relaunch() {
 
 #[test]
 fn automatic_force_revalidates_ownership_after_graceful_submission() {
-    for scenario in ["ambiguous", "pid", "creation", "missing", "error"] {
+    for scenario in ["ambiguous", "pid", "creation", "error"] {
         let f = Fixture::new();
         f.recovery();
         let now = Instant::now();
@@ -2125,7 +2125,6 @@ fn automatic_force_revalidates_ownership_after_graceful_submission() {
             }),
             "pid" => players[0].pid = 9999,
             "creation" => players[0].creation_time = "reused".into(),
-            "missing" => players.clear(),
             _ => {}
         }
         let _ = f.engine.close_owned(
@@ -2144,5 +2143,86 @@ fn automatic_force_revalidates_ownership_after_graceful_submission() {
         assert_eq!(f.account().status, Status::NeedsAttention, "{scenario}");
         assert!(f.account().process.is_some());
         assert_eq!(f.account().failures, 1);
+    }
+}
+
+#[test]
+fn automatic_close_waits_for_exit_when_fresh_discovery_loses_the_process() {
+    for graceful_submitted in [false, true] {
+        let f = Fixture::new();
+        f.recovery();
+        let now = Instant::now();
+        let mut attempts = CloseAttempts::default();
+        if graceful_submitted {
+            assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
+        }
+        let before = f.account();
+        let identity = before.process.clone().unwrap();
+        let players = f
+            .players()
+            .into_iter()
+            .filter(|p| p.pid != identity.pid)
+            .collect();
+        f.engine
+            .close_owned(
+                &before,
+                now + Duration::from_secs(6),
+                &mut attempts,
+                || Ok(players),
+                |_, _| panic!("Missing process cannot authorize close"),
+            )
+            .unwrap();
+        let waiting = f.account();
+        assert_ne!(waiting.status, Status::NeedsAttention);
+        assert!(!waiting.close_intent.as_ref().is_some_and(|i| i.denied));
+        assert_eq!(waiting.failures, before.failures);
+        assert_eq!(waiting.next_retry, before.next_retry);
+        assert!(!launch_ready(
+            &waiting,
+            Utc::now() + ChronoDuration::hours(1)
+        ));
+        let mut stale = identity.clone();
+        stale.creation_time = "reused-pid".into();
+        f.engine.owned_exit_observed(&waiting, &stale, false);
+        assert!(f.account().process.is_some());
+        f.engine.owned_exit_observed(&waiting, &identity, false);
+        let exited = f.account();
+        assert_eq!(exited.status, Status::Backoff);
+        assert_eq!(exited.failures, 1);
+        assert!(exited.process.is_none() && exited.tracker.is_none());
+        assert!(launch_ready(&exited, Utc::now() + ChronoDuration::hours(1)));
+    }
+}
+
+#[test]
+fn missing_process_does_not_override_policy_manual_or_shared_ownership_denials() {
+    for scenario in ["policy", "manual", "shared"] {
+        let f = Fixture::new();
+        f.recovery();
+        let now = Instant::now();
+        let mut attempts = CloseAttempts::default();
+        assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
+        match scenario {
+            "policy" => f.engine.set_launch_allowed(false),
+            "manual" => {
+                f.engine.command("1", "restart").unwrap();
+            }
+            _ => {
+                let tracker = f.account().tracker;
+                let other = f.engine.snapshot().accounts[1].clone();
+                f.engine
+                    .update("2", other.generation, |a| a.tracker = tracker)
+                    .unwrap();
+            }
+        }
+        let _ = f.engine.close_owned(
+            &f.account(),
+            now + Duration::from_secs(6),
+            &mut attempts,
+            || Ok(Vec::new()),
+            |_, _| panic!("Missing process cannot override denial"),
+        );
+        assert_eq!(f.account().status, Status::NeedsAttention, "{scenario}");
+        assert!(f.account().close_intent.unwrap().denied);
     }
 }
