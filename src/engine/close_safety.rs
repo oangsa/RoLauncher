@@ -133,6 +133,160 @@ fn eligible(
 }
 
 impl Engine {
+    #[cfg(any(windows, test))]
+    pub(super) fn cleanup_launch_conflict(
+        &self,
+        state: &State,
+        cleanup: impl FnOnce(&[ProcessIdentity]) -> Result<(), String>,
+    ) -> Result<(), String> {
+        if self.0.launch_allowed.load(Ordering::Acquire)
+            || !state.database.external_background_cleanup_enabled
+        {
+            return Ok(());
+        }
+        // Unknown late launches must not be mistaken for external tray leftovers.
+        if state
+            .database
+            .accounts
+            .iter()
+            .any(|s| s.account.tracker.is_some() && s.account.process.is_none())
+            || state
+                .database
+                .retired_launches
+                .iter()
+                .any(|r| r.process.is_none())
+        {
+            return Err("A saved launch still needs inspection; use Stop and wait for process discovery before starting again".into());
+        }
+        let protected: Vec<_> = state
+            .database
+            .accounts
+            .iter()
+            .filter_map(|s| s.account.process.clone())
+            .chain(
+                state
+                    .database
+                    .retired_launches
+                    .iter()
+                    .filter_map(|r| r.process.clone()),
+            )
+            .collect();
+        // The command mutex remains held through cleanup, so new launches cannot race the scan.
+        cleanup(&protected)
+    }
+
+    /// Explicit global stop: serialize launch cancellation and process termination.
+    pub fn close_all_instances(&self) -> Result<usize, String> {
+        #[cfg(windows)]
+        {
+            self.close_all_with(platform::all_players, |identity| {
+                platform::close(identity, true)?;
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while platform::alive(identity)? {
+                    if Instant::now() >= deadline {
+                        return Err("Roblox process has not exited".into());
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Ok(())
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            Err("Close all Roblox instances is available on Windows".into())
+        }
+    }
+
+    #[cfg(any(windows, test))]
+    fn close_all_with(
+        &self,
+        discover: impl FnOnce() -> Result<Vec<platform::Player>, String>,
+        mut close: impl FnMut(&ProcessIdentity) -> Result<(), String>,
+    ) -> Result<usize, String> {
+        let mut state = self.0.state.lock().unwrap();
+        let mut next = state.clone();
+        for saved in &mut next.database.accounts {
+            let a = &mut saved.account;
+            a.finish_run(Utc::now());
+            a.desired_running = false;
+            a.status = Status::Stopped;
+            a.next_retry = None;
+            a.recovery_evidence = RecoveryEvidence::Unavailable;
+            a.recovery_process = None;
+            a.generation = Uuid::new_v4();
+            let operation = Uuid::new_v4();
+            if let Some(old) = a.operation_id.and_then(|id| next.operations.get_mut(&id))
+                && old.state == "queued"
+            {
+                old.state = "cancelled".into();
+            }
+            a.operation_id = Some(operation);
+            a.close_intent = Some(CloseIntent {
+                id: Uuid::new_v4(),
+                reason: CloseReason::UserStop,
+                generation: a.generation,
+                operation_id: Some(operation),
+                denied: false,
+            });
+            if a.process.is_none()
+                && let Some(tracker) = a.tracker.take()
+            {
+                next.database.retired_launches.push(RetiredLaunch {
+                    tracker,
+                    generation: a.generation,
+                    account_id: a.id.clone(),
+                    deadline: a
+                        .ownership_deadline
+                        .take()
+                        .unwrap_or_else(|| Utc::now() + ChronoDuration::seconds(90)),
+                    close_intent: a.close_intent.clone(),
+                    process: None,
+                });
+            }
+            next.operations.insert(
+                operation,
+                Operation {
+                    id: operation,
+                    account_id: a.id.clone(),
+                    state: if a.process.is_some() {
+                        "queued"
+                    } else {
+                        "completed"
+                    }
+                    .into(),
+                    error: None,
+                },
+            );
+            for retired in next
+                .database
+                .retired_launches
+                .iter_mut()
+                .filter(|r| r.account_id == a.id)
+            {
+                retired.close_intent = a.close_intent.clone();
+            }
+        }
+        // A failed discovery/close still leaves automatic relaunch durably stopped.
+        self.commit_close_state(&mut state, next)?;
+        let players = discover()?;
+        let mut closed = 0;
+        let mut failed = 0;
+        for player in players {
+            if close(&player.identity(Uuid::nil())).is_ok() {
+                closed += 1;
+            } else {
+                failed += 1;
+            }
+        }
+        if failed > 0 {
+            Err(format!(
+                "Closed {closed} Roblox instances; {failed} could not be closed. Automatic rejoin is stopped; retry Close all Roblox."
+            ))
+        } else {
+            Ok(closed)
+        }
+    }
+
     /// Non-destructive observation: stale exit reports cannot erase current ownership.
     pub(super) fn owned_exit_observed(
         &self,
@@ -339,11 +493,9 @@ impl Engine {
         if matches.is_empty() && expected.process.is_none() {
             return Ok(false);
         }
-        let mut binding_expired = false;
         if matches.len() == 1 && next.database.retired_launches[index].process.is_none() {
             next.database.retired_launches[index].process =
                 Some(matches[0].identity(expected.generation));
-            binding_expired = Utc::now() > expected.deadline;
         }
         let record = &next.database.retired_launches[index];
         let intent = record.close_intent.clone();
@@ -352,8 +504,7 @@ impl Engine {
             .as_ref()
             .zip(intent.as_ref())
             .is_some_and(|(identity, intent)| {
-                !binding_expired
-                    && !attempts.blocked(&expected.account_id, intent, identity)
+                !attempts.blocked(&expected.account_id, intent, identity)
                     && intent.reason == CloseReason::UserStop
                     && next
                         .database

@@ -82,6 +82,14 @@ pub fn parse_line(line: &str) -> Option<Signal> {
     if network && line.contains("Failed to connect to server") && line.contains("no response") {
         return Some(Signal::ConnectionFailed);
     }
+    // Native kick dialogs can omit the numeric 267 disconnect message entirely.
+    if network
+        && let Some((label, reason)) = tagged.and_then(|(_, message)| message.split_once(':'))
+        && label.trim() == "Lost connection with reason"
+        && reason.trim() == "You have been kicked from the game"
+    {
+        return Some(Signal::SessionLost(Some(267)));
+    }
     if network && let Some((_, reason)) = line.split_once("Sending disconnect with reason:") {
         let code = reason
             .trim()
@@ -278,6 +286,28 @@ pub fn timestamp(line: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_kick_reason_confirms_only_the_authoritative_network_message() {
+        for channel in ["FLog::Network", "DFLog::NetworkClient"] {
+            let line = format!(
+                "[{channel}] Lost connection with reason : You have been kicked from the game"
+            );
+            let event = parse_event(&line).expect("native kick must be recognized");
+            assert_eq!(event.signal, Signal::SessionLost(Some(267)));
+            assert!(event.confirmed_terminal);
+            assert!(parse_event(&format!("[FLog::Output] {line}")).is_none());
+            assert!(parse_event(&format!("[{channel}] chat: Lost connection with reason : You have been kicked from the game")).is_none());
+        }
+        for line in [
+            "[FLog::Output] Lost connection with reason : You have been kicked from the game",
+            "[FLog::Error] Lost connection with reason : You have been kicked from the game",
+            "[FLog::Network] Lost connection with reason : unknown",
+            "[FLog::Network] Lost connection with reason : You have been kicked from the game is sample text",
+            "[FLog::Network] Players service requests player disconnect",
+        ] {
+            assert!(parse_event(line).is_none(), "{line}");
+        }
+    }
     #[test]
     fn terminal_policy_uses_event_semantics_not_only_valid_log_format() {
         for line in [

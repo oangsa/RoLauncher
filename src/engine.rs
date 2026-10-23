@@ -58,7 +58,7 @@ const OWNERSHIP_TIMEOUT_ERROR: &str = "Launch tracker has no verified instance. 
 const CLOSE_BLOCKED_PREFIX: &str = "Managed client close blocked: ";
 const REJOIN_DISABLED: &str = "Automatic rejoin disabled; use Start to launch manually";
 #[cfg(windows)]
-const LAUNCH_COORDINATION_ERROR: &str = "Roblox launch coordination is not ready. Background clients are checked on startup; close any visible client and retry Start. Check Support and integrations if this persists";
+const LAUNCH_COORDINATION_ERROR: &str = "Roblox launch coordination is not ready. Enable background cleanup in Game joining and retry Start, or use Accounts → More actions → Stop all Roblox";
 #[cfg(not(windows))]
 const LAUNCH_COORDINATION_ERROR: &str = "Multi-instance initialization failed. Check Support and integrations, resolve the reported issue, then restart RoLauncher";
 
@@ -98,7 +98,7 @@ fn apply_observation(account: &mut Account, observation: Observation) {
         Observation::DiskLog(event) => (event.signal, event.confirmed_terminal),
     };
     let blocked = match signal {
-        Signal::PermissionDenied | Signal::SessionLost(Some(267 | 524 | 533 | 600 | 773)) => {
+        Signal::PermissionDenied | Signal::SessionLost(Some(524 | 533 | 600 | 773)) => {
             Some(Failure::new(
                 FailureKind::Permission,
                 "Game denied access; check permissions or bans before restarting",
@@ -289,10 +289,7 @@ fn normalize_accounts(next: &mut State) {
 }
 
 fn retired_blocks_launch(database: &Database, id: &str) -> bool {
-    database
-        .retired_launches
-        .iter()
-        .any(|r| r.account_id == id && (r.process.is_some() || r.deadline > Utc::now()))
+    database.retired_launches.iter().any(|r| r.account_id == id)
 }
 
 fn resume_after_confirmed_close(account: &mut Account) {
@@ -748,7 +745,7 @@ impl Engine {
                 || s.database
                     .retired_launches
                     .iter()
-                    .any(|r| r.account_id == id && (r.process.is_some() || r.deadline > Utc::now()))
+                    .any(|r| r.account_id == id)
             {
                 return Err(
                     "Stop the account and wait for its managed instance to exit before removing it"
@@ -797,9 +794,21 @@ impl Engine {
                 let op = Operation { id:Uuid::new_v4(), account_id:id.into(), state:"completed".into(), error:None }; s.operations.insert(op.id,op.clone()); return Ok(op);
             }
             if action != "stop" { existing.target.as_ref().ok_or("Set a launch target first")?.validate()?; }
-            if action!="stop" && !self.0.launch_allowed.load(Ordering::Acquire){return Err(LAUNCH_COORDINATION_ERROR.into());}
+            if action != "stop" && existing.process.is_none() && existing.tracker.is_some() { return Err("Previous launch is unresolved; use Stop and wait for process discovery before starting again".into()); }
             if action != "stop" && retired_blocks_launch(&s.database, id) { return Err("A cancelled launch is still being observed; inspect late clients and use Stop, or wait for discovery to confirm exit".into()); }
             if action == "restart" && matches!(existing.status,Status::Launching|Status::Queued) { return Err("A launch is already pending; Stop it before restarting".into()); }
+            #[cfg(windows)]
+            if action != "stop" {
+                self.cleanup_launch_conflict(s, |protected| {
+                    platform::close_startup_background_players(protected, true, true)?;
+                    let deadline = Instant::now() + Duration::from_secs(1);
+                    while !self.0.launch_allowed.load(Ordering::Acquire) && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+                    Ok(())
+                })?;
+            }
+            if action!="stop" && !self.0.launch_allowed.load(Ordering::Acquire){return Err(LAUNCH_COORDINATION_ERROR.into());}
             if let Some(previous) = existing.operation_id.and_then(|id|s.operations.get_mut(&id)) && previous.state == "queued" { previous.state = "cancelled".into(); }
             let op = Operation { id:Uuid::new_v4(),account_id:id.into(),state:if action=="stop" && existing.process.is_none(){"completed"}else{"queued"}.into(),error:None };
             let generation = Uuid::new_v4();
@@ -959,6 +968,9 @@ impl Engine {
         }
     }
     async fn launch_one(&self, account: Account) {
+        if !launch_ready(&account, Utc::now()) {
+            return;
+        }
         if !self.snapshot().active_multi_instance
             && self
                 .snapshot()
@@ -1183,6 +1195,20 @@ impl Engine {
             }
             if let Some(Ok(Ok(players))) = completed_task(&mut discovery).await {
                 for old in &retired {
+                    if old.process.is_none()
+                        && old.deadline <= Utc::now()
+                        && !players.iter().any(|p| p.tracker == old.tracker)
+                    {
+                        let _ = self.transaction(|s| {
+                            s.database.retired_launches.retain(|r| {
+                                !(r.tracker == old.tracker
+                                    && r.generation == old.generation
+                                    && r.process.is_none())
+                            });
+                            Ok(())
+                        });
+                        continue;
+                    }
                     if let Some(identity) = &old.process
                         && matches!(platform::alive(identity), Ok(false))
                     {
@@ -2245,7 +2271,7 @@ mod tests {
     }
     #[test]
     fn policy_nonrecoverable_codes_stay_in_attention_and_cannot_be_bypassed_by_connected() {
-        for code in [267, 268, 280, 524, 533, 600, 773] {
+        for code in [268, 280, 524, 533, 600, 773] {
             let (engine, path, identity) = owned_fixture();
             engine.observe(
                 "1",
@@ -3155,9 +3181,9 @@ mod tests {
             .unwrap();
         engine.command("1", "start").unwrap();
         let generation = engine.snapshot().accounts[0].generation;
-        engine.signal("1", generation, Signal::SessionLost(Some(267)));
+        engine.signal("1", generation, Signal::SessionLost(Some(524)));
         let count = engine.activity(None).len();
-        engine.signal("1", generation, Signal::SessionLost(Some(267)));
+        engine.signal("1", generation, Signal::SessionLost(Some(524)));
         assert_eq!(engine.activity(None).len(), count);
         assert!(
             engine.activity(Some("1"))[0]

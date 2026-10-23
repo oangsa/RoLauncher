@@ -154,6 +154,33 @@ class RecoveryFixture(HotfixFixture):
         return super().__call__(path, method, body, **kwargs)
 
 
+class MalformedIntentRecoveryFixture(RecoveryFixture):
+    """Owner-merged source has one immutable intent envelope with a wrong digest."""
+    old_path = '.github/release-intents/00000000-0000-4000-8000-000000000001.json'
+
+    def __init__(self):
+        super().__init__()
+        self.source_pr['head']['sha'] = HEAD
+        self.review_commits[0]['commit']['tree']['sha'] = '4' * 40
+        self.head_commit['files'] = [dict(filename=self.old_path, status='added')]
+        from hotfix_policy import HOTFIX_FIELDS
+        self.old_intent = {k: copy.deepcopy(v) for k, v in self.intent.items() if k in HOTFIX_FIELDS}
+        self.old_intent.update(schema=2, source='hotfix',
+                               id='00000000-0000-4000-8000-000000000001', patch_sha256='0' * 64)
+        self.old_history = [dict(sha=HEAD)]
+
+    def __call__(self, path, method='GET', body=None, **kwargs):
+        if method == 'GET':
+            if path == f'/commits/{HEAD}?per_page=100': return self.head_commit
+            if path == f'/commits/{SOURCE_MERGE}?per_page=100':
+                return dict(parents=[dict(sha=BASE), dict(sha=HEAD)],
+                            commit=dict(tree=dict(sha='5' * 40)))
+            if path == f'/contents/{self.old_path}?ref={HEAD}':
+                return dict(encoding='base64', content=base64.b64encode(json.dumps(self.old_intent).encode()).decode())
+            if path == f'/commits?path={self.old_path}&sha={HEAD}&per_page=2': return self.old_history
+        return super().__call__(path, method, body, **kwargs)
+
+
 class HotfixTests(unittest.TestCase):
     def test_exact_windows_sys_features_for_process_checks_do_not_change_dependency_versions(self):
         api = HotfixFixture()
@@ -416,6 +443,29 @@ class HotfixTests(unittest.TestCase):
         self.assertEqual(receipt['intent'], reference.INTENT)
         self.assertEqual(receipt['source'], SHA)
         self.assertEqual(len(receipt['files']), 5)
+
+    def test_recovery_corrects_digest_in_immutable_source_intent_envelope(self):
+        api = MalformedIntentRecoveryFixture()
+        self.assertEqual(promote(api, api.run), 'published')
+        self.assertEqual(api.old_intent['patch_sha256'], '0' * 64)
+
+    def test_malformed_envelope_recovery_rejects_scope_authority_and_binding_drift(self):
+        for fault in ('parent', 'extra-file', 'binding', 'valid-digest', 'bad-digest',
+                      'schema', 'reused-path', 'uuid', 'tree', 'owner'):
+            with self.subTest(fault=fault):
+                api = MalformedIntentRecoveryFixture()
+                if fault == 'parent': api.head_commit['parents'][0]['sha'] = '7' * 40
+                if fault == 'extra-file': api.head_commit['files'].append(dict(filename='src/updates.rs', status='modified'))
+                if fault == 'binding': api.old_intent['reviewed_sha'] = '7' * 40
+                if fault == 'valid-digest': api.old_intent['patch_sha256'] = api.intent['patch_sha256']
+                if fault == 'bad-digest': api.old_intent['patch_sha256'] = 'invalid'
+                if fault == 'schema': api.old_intent['schema'] = 3
+                if fault == 'reused-path': api.old_history.append(dict(sha=BASE))
+                if fault == 'uuid': api.old_intent['id'] = reference.INTENT
+                if fault == 'tree': api.head_commit['commit']['tree']['sha'] = '7' * 40
+                if fault == 'owner': api.source_pr['merged_by']['id'] = 8
+                with self.assertRaises(ValueError): promote(api, api.run)
+                self.assertEqual(api.writes, [])
 
     def test_recovery_intent_branch_flow_admits_only_intent_commit(self):
         from hotfix_policy import check_branch_flow

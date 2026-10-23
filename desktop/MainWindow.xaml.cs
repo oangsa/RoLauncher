@@ -31,6 +31,7 @@ public sealed partial class MainWindow : Window
     public MainWindow(Bootstrap config)
     {
         InitializeComponent();
+        CloseAllRobloxButton.IsEnabled = OperatingSystem.IsWindows();
         // Linux detaches inline dialogs; keep them alive for subsequent opens.
         _accountDialog = AccountDialog;
         _presetLookupDialog = PresetLookupDialog;
@@ -57,6 +58,38 @@ public sealed partial class MainWindow : Window
 #else
         Root.Loaded += (_, _) => StartUpdateChecks();
 #endif
+    }
+
+    private async void CloseAllRoblox_Click(object sender, RoutedEventArgs e)
+    {
+        if (!await ConfirmAsync("Stop all Roblox?", "Stops automatic rejoin for every account and closes all Roblox clients in this Windows session, including clients opened outside RoLauncher.", "Stop all")) return;
+        CloseAllRobloxButton.IsEnabled = false;
+        try
+        {
+            await GuardAsync(async () =>
+            {
+                await _api.SendAsync(HttpMethod.Post, "instances/close-all");
+                await RefreshAsync();
+                FeedbackMessage("Roblox instances closed. Automatic rejoin is stopped.", InfoBarSeverity.Success);
+            });
+        }
+        finally { CloseAllRobloxButton.IsEnabled = OperatingSystem.IsWindows(); }
+    }
+
+    private Notice[] _recentActivity = [];
+    private int _recentActivityPage;
+    private void ShowActivityPage()
+    {
+        _recentActivityPage = Math.Clamp(_recentActivityPage, 0, Math.Max(0, (_recentActivity.Length - 1) / 10));
+        ActivityList.ItemsSource = _recentActivity.Skip(_recentActivityPage * 10).Take(10).ToArray();
+        ActivityPageSummary.Text = _recentActivity.Length == 0 ? "No activity" : $"{_recentActivityPage * 10 + 1}–{Math.Min((_recentActivityPage + 1) * 10, _recentActivity.Length)} of {_recentActivity.Length}";
+        ActivityPrevious.IsEnabled = _recentActivityPage > 0;
+        ActivityNext.IsEnabled = (_recentActivityPage + 1) * 10 < _recentActivity.Length;
+    }
+    private void ActivityPage_Click(object sender, RoutedEventArgs e)
+    {
+        _recentActivityPage += int.Parse((string)((Button)sender).Tag);
+        ShowActivityPage();
     }
 
     private AccountRow[] Selected() => _visibleRows.Where(r => r.IsSelected).ToArray();
@@ -145,7 +178,8 @@ public sealed partial class MainWindow : Window
             var fingerprint = JsonSerializer.Serialize(discord.Recent);
             if (fingerprint != _activityFingerprint)
             {
-                ActivityList.ItemsSource = discord.Recent;
+                _recentActivity = discord.Recent;
+                ShowActivityPage();
                 ActivityEmpty.Visibility = discord.Recent.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
                 _activityFingerprint = fingerprint;
             }

@@ -117,6 +117,12 @@ mod imp {
         s.ends_with("\\robloxplayerbeta.exe") && s.contains("\\roblox\\versions\\")
     }
     pub fn players() -> Result<Vec<Player>, String> {
+        discover_players(false)
+    }
+    pub fn all_players() -> Result<Vec<Player>, String> {
+        discover_players(true)
+    }
+    fn discover_players(include_untracked: bool) -> Result<Vec<Player>, String> {
         #[derive(Deserialize)]
         #[serde(rename_all = "PascalCase")]
         struct Row {
@@ -128,18 +134,38 @@ mod imp {
         let rows: Vec<Row> = connection.raw_query("SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name = 'RobloxPlayerBeta.exe'").map_err(|_| "Windows process query failed")?;
         let mut out = Vec::new();
         for row in rows {
-            let Some(tracker) = row
+            let tracker = row
                 .command_line
                 .as_deref()
-                .and_then(tracker_from_command_line)
-            else {
+                .and_then(tracker_from_command_line);
+            if tracker.is_none() && !include_untracked {
                 continue;
-            };
-            let Ok(h) = process_handle(
+            }
+            if include_untracked {
+                let mut current_session = 0;
+                let mut player_session = 0;
+                if unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut current_session) } == 0
+                    || unsafe { ProcessIdToSessionId(row.process_id, &mut player_session) } == 0
+                {
+                    return Err("Unable to verify Roblox process session".into());
+                }
+                if current_session != player_session {
+                    continue;
+                }
+            }
+            let tracker = tracker.unwrap_or_default();
+            let h = match process_handle(
                 row.process_id,
                 PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
-            ) else {
-                continue;
+            ) {
+                Ok(h) => h,
+                Err(error)
+                    if include_untracked
+                        && unsafe { GetLastError() } != ERROR_INVALID_PARAMETER =>
+                {
+                    return Err(error);
+                }
+                Err(_) => continue,
             };
             if !valid_player_image(h.0) {
                 continue;
@@ -259,7 +285,9 @@ mod imp {
     }
     fn visible_processes() -> Result<std::collections::HashSet<u32>, String> {
         unsafe extern "system" fn collect_visible(hwnd: HWND, context: LPARAM) -> i32 {
-            if unsafe { IsWindowVisible(hwnd) } != 0 {
+            if unsafe { IsWindowVisible(hwnd) } != 0
+                && unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } & WS_EX_TOOLWINDOW as isize == 0
+            {
                 let mut pid = 0;
                 unsafe {
                     GetWindowThreadProcessId(hwnd, &mut pid);
@@ -368,7 +396,10 @@ mod imp {
                     GetWindowThreadProcessId(hwnd, &mut owner);
                 }
                 if owner == *pid
-                    && unsafe { IsWindowVisible(hwnd) } == 0
+                    && (unsafe { IsWindowVisible(hwnd) } == 0
+                        || unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) }
+                            & WS_EX_TOOLWINDOW as isize
+                            != 0)
                     && unsafe { WaitForSingleObject(*handle, 0) } == WAIT_TIMEOUT
                     && visible_processes().is_ok_and(|visible| !visible.contains(pid))
                 {
@@ -384,6 +415,14 @@ mod imp {
             }
         }
         Ok(true)
+    }
+    fn background_process_handle(pid: u32) -> Result<Option<Handle>, String> {
+        match process_handle(pid, PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE) {
+            Ok(handle) => Ok(Some(handle)),
+            // A process may exit between the Toolhelp snapshot and inspection.
+            Err(_) if unsafe { GetLastError() } == ERROR_INVALID_PARAMETER => Ok(None),
+            Err(error) => Err(error),
+        }
     }
     fn close_startup_background_players_at(
         protected: &[ProcessIdentity],
@@ -417,17 +456,22 @@ mod imp {
                 && !visible.contains(&row.th32ProcessID)
             {
                 let candidate = (|| -> Result<Option<ProcessIdentity>, String> {
+                    let Some(handle) = background_process_handle(row.th32ProcessID)? else {
+                        return Ok(None);
+                    };
+                    if unsafe { WaitForSingleObject(handle.0, 0) } == WAIT_OBJECT_0 {
+                        return Ok(None);
+                    }
                     let mut owner_session = 0;
                     if unsafe { ProcessIdToSessionId(row.th32ProcessID, &mut owner_session) } == 0 {
+                        if unsafe { WaitForSingleObject(handle.0, 0) } == WAIT_OBJECT_0 {
+                            return Ok(None);
+                        }
                         return Err(last_error("Background client session unavailable"));
                     }
                     if owner_session != session {
                         return Ok(None);
                     }
-                    let handle = process_handle(
-                        row.th32ProcessID,
-                        PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
-                    )?;
                     let creation_time = process_time(handle.0)?;
                     if protected
                         .iter()
@@ -441,6 +485,9 @@ mod imp {
                         QueryFullProcessImageNameW(handle.0, 0, path.as_mut_ptr(), &mut length)
                     } == 0
                     {
+                        if unsafe { WaitForSingleObject(handle.0, 0) } == WAIT_OBJECT_0 {
+                            return Ok(None);
+                        }
                         return Err(last_error("Background client image unavailable"));
                     }
                     if !valid_player_image(handle.0)

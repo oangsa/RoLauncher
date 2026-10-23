@@ -1,6 +1,25 @@
 # Changelog
 
-## [1.7.1] — Unreleased
+## [1.7.4] — Unreleased
+
+- Recover from confirmed game kicks when Roblox omits numeric error 267, retaining retry limits and verified exit before replacement.
+
+## [1.7.3] — 2026-10-21
+
+- Clean up tray helper clients and tolerate exited processes while preserving visible games and verified managed clients.
+- Retry opted-in background cleanup when Start is blocked by a lingering Roblox process.
+- Move the all-client stop action to Accounts and remove Integration status from Dashboard.
+- Give Game joining its own settings tab with separate joining preferences and Roblox instance controls.
+- Show 10 history and recent activity entries per page, with pagination below each list.
+
+## [1.7.2] — Unreleased
+
+- Add Close all Roblox to stop rejoin and close external, hidden, and tray clients in the current Windows session.
+- Rejoin after confirmed game kicks (267), with bounded retries and verified process exit before replacement.
+- Prevent duplicate launches while an earlier launch remains unresolved; require discovery before releasing expired launch tracking.
+- Honor Stop for verified clients discovered late, allowing cleanup after the launch discovery deadline.
+
+## [1.7.1] — 2026-10-20
 
 ### Fixed
 

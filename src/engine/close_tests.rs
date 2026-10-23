@@ -703,10 +703,10 @@ async fn obsolete_pending_launch_blocks_replacement_before_credentials_or_dispat
             a.status = Status::NeedsAttention;
         })
         .unwrap();
-    f.engine.command("1", "start").unwrap();
+    assert!(f.engine.command("1", "start").is_err());
     let queued = f.account();
     f.engine.launch_one(queued).await;
-    assert_eq!(f.account().status, Status::Queued);
+    assert_eq!(f.account().status, Status::NeedsAttention);
     assert!(f.account().last_error.is_none());
     assert_eq!(f.account().failures, 0);
 }
@@ -1124,7 +1124,7 @@ fn late_explicit_stop_closes_and_force_requires_the_same_current_stop() {
     assert_eq!(f.account().status, Status::NeedsAttention);
 }
 #[test]
-fn retired_ambiguous_obsolete_expired_and_reused_identities_never_close() {
+fn retired_stop_accepts_late_discovery_but_rejects_ambiguous_obsolete_and_reused_identity() {
     for scenario in ["ambiguous", "obsolete", "expired", "pid-reuse"] {
         let f = Fixture::new();
         let (mut old, mut players) = pending_stop(&f);
@@ -1186,8 +1186,15 @@ fn retired_ambiguous_obsolete_expired_and_reused_identities_never_close() {
                 },
             )
             .unwrap();
-        assert!(!closed, "{scenario}");
-        assert_eq!(f.account().status, Status::NeedsAttention);
+        assert_eq!(closed, scenario == "expired", "{scenario}");
+        assert_eq!(
+            f.account().status,
+            if scenario == "expired" {
+                Status::Stopped
+            } else {
+                Status::NeedsAttention
+            }
+        );
     }
 }
 #[test]
@@ -1605,4 +1612,207 @@ fn merged_recovery_at_retry_cap_preserves_the_live_client() {
     assert_eq!(f.account().failures, 5);
     assert_eq!(f.account().status, Status::NeedsAttention);
     assert!(f.account().process.is_some());
+}
+
+#[test]
+fn native_kick_log_recovers_instead_of_waiting_for_confirmation() {
+    let f = Fixture::new();
+    let a = f.account();
+    let identity = a.process.clone().unwrap();
+    let log = f.path.join("native-kick.log");
+    // Native network messages from the reported client; no numeric 267 is logged.
+    std::fs::write(&log, concat!(
+        "2026-10-22T20:38:09.411Z,15627.411133,51ec,7 [FLog::Network] Players service requests player disconnect\n",
+        "2026-10-22T20:38:09.469Z,15627.469727,5ccc,7,Warning [FLog::Network] Lost connection with reason : You have been kicked from the game\n",
+        "2026-10-22T20:38:11.176Z,15629.176758,5ccc,6,Info [DFLog::RbxTransportDummyClient] Connection closed by server for reason: RCC: 288 (DisconnectServerShutdown)\n",
+    )).unwrap();
+    let mut tail = crate::logs::Tail::new(log, false).unwrap();
+    for event in tail.read_events().unwrap() {
+        f.engine
+            .observe("1", a.generation, &identity, Observation::DiskLog(event));
+    }
+    assert_eq!(
+        f.account().recovery_evidence,
+        RecoveryEvidence::ConfirmedTerminalDisconnect
+    );
+    assert_eq!(f.account().status, Status::Reconnecting);
+    assert!(f.account().last_error.unwrap().contains("267"));
+    let mut attempts = CloseAttempts::default();
+    assert_eq!(
+        f.tick(&f.account(), Instant::now(), &mut attempts),
+        vec![false]
+    );
+    assert!(!launch_ready(
+        &f.account(),
+        Utc::now() + ChronoDuration::hours(1)
+    ));
+    let closing = f.account();
+    f.engine.owned_exit_observed(&closing, &identity, true);
+    assert!(launch_ready(
+        &f.account(),
+        Utc::now() + ChronoDuration::hours(1)
+    ));
+    assert_eq!(f.account().failures, 1);
+}
+
+#[test]
+fn kicked_267_closes_then_rejoins_only_after_exit() {
+    let f = Fixture::new();
+    let a = f.account();
+    let identity = a.process.clone().unwrap();
+    f.engine.observe(
+        "1",
+        a.generation,
+        &identity,
+        Observation::DiskLog(
+            crate::logs::parse_event("[FLog::Network] Sending disconnect with reason: 267")
+                .unwrap(),
+        ),
+    );
+    let mut attempts = CloseAttempts::default();
+    let now = Instant::now();
+    assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
+    assert!(!launch_ready(
+        &f.account(),
+        Utc::now() + ChronoDuration::hours(1)
+    ));
+    assert_eq!(
+        f.tick(&f.account(), now + Duration::from_secs(6), &mut attempts),
+        vec![true]
+    );
+    let closing = f.account();
+    f.engine.owned_exit_observed(&closing, &identity, true);
+    assert!(launch_ready(
+        &f.account(),
+        Utc::now() + ChronoDuration::hours(1)
+    ));
+    assert_eq!(f.account().failures, 1);
+}
+
+#[test]
+fn start_cannot_replace_an_unresolved_expired_launch() {
+    let f = Fixture::new();
+    let a = f.account();
+    f.engine
+        .update("1", a.generation, |a| {
+            a.process = None;
+            a.status = Status::NeedsAttention;
+            a.ownership_deadline = Some(Utc::now() - ChronoDuration::seconds(1));
+        })
+        .unwrap();
+    assert!(f.engine.command("1", "start").is_err());
+    assert_eq!(f.account().tracker, a.tracker);
+    f.engine.command("1", "stop").unwrap();
+    assert!(f.engine.command("1", "start").is_err());
+}
+
+#[test]
+fn global_close_stops_recovery_and_includes_untracked_players() {
+    let f = Fixture::new();
+    let mut players = f.players();
+    players.push(platform::Player {
+        pid: 9999,
+        creation_time: "external".into(),
+        tracker: String::new(),
+    });
+    let mut closed = Vec::new();
+    assert_eq!(
+        f.engine
+            .close_all_with(
+                || Ok(players),
+                |p| {
+                    closed.push(p.pid);
+                    Ok(())
+                }
+            )
+            .unwrap(),
+        3
+    );
+    assert_eq!(closed, vec![4201, 4202, 9999]);
+    let saved = Store::new(f.path.clone()).unwrap().load().unwrap();
+    assert!(
+        saved
+            .accounts
+            .iter()
+            .all(|a| !a.account.desired_running && a.account.next_retry.is_none())
+    );
+    assert!(
+        f.engine
+            .snapshot()
+            .accounts
+            .iter()
+            .all(|a| !launch_ready(a, Utc::now()))
+    );
+}
+
+#[test]
+fn global_close_persistence_failure_has_no_effect_and_partial_failure_stops_rejoin() {
+    let f = Fixture::new();
+    std::fs::create_dir(f.path.join("accounts.json.tmp")).unwrap();
+    assert!(
+        f.engine
+            .close_all_with(
+                || panic!("must persist before discovery"),
+                |_| panic!("must not close")
+            )
+            .is_err()
+    );
+    std::fs::remove_dir(f.path.join("accounts.json.tmp")).unwrap();
+    let players = f.players();
+    let mut calls = 0;
+    let error = f
+        .engine
+        .close_all_with(
+            || Ok(players),
+            |_| {
+                calls += 1;
+                if calls == 1 {
+                    Err("access denied".into())
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+    assert_eq!(calls, 2);
+    assert!(error.contains("Closed 1") && error.contains("1 could not"));
+    assert!(
+        f.engine
+            .snapshot()
+            .accounts
+            .iter()
+            .all(|a| !a.desired_running)
+    );
+}
+
+#[test]
+fn blocked_start_cleanup_requires_consent_and_protects_saved_launches() {
+    let f = Fixture::new();
+    f.engine.0.launch_allowed.store(false, Ordering::Release);
+    f.engine
+        .transaction(|s| {
+            f.engine
+                .cleanup_launch_conflict(s, |_| panic!("cleanup requires consent"))?;
+            s.database.external_background_cleanup_enabled = true;
+            f.engine.cleanup_launch_conflict(s, |protected| {
+                assert_eq!(protected.len(), 2);
+                assert_eq!(
+                    protected[0],
+                    s.database.accounts[0].account.process.clone().unwrap()
+                );
+                f.engine.0.launch_allowed.store(true, Ordering::Release);
+                Ok(())
+            })?;
+            f.engine
+                .cleanup_launch_conflict(s, |_| panic!("ready launches need no cleanup"))?;
+            f.engine.0.launch_allowed.store(false, Ordering::Release);
+            s.database.accounts[0].account.process = None;
+            assert!(
+                f.engine
+                    .cleanup_launch_conflict(s, |_| panic!("unresolved clients stay protected"))
+                    .is_err()
+            );
+            Ok(())
+        })
+        .unwrap();
 }

@@ -1,0 +1,39 @@
+{
+  "schema": 2,
+  "id": "8132b759-5c48-4a90-8324-196da0c7b6b8",
+  "version": "1.7.3",
+  "channel": "stable",
+  "source": "hotfix",
+  "baseline_tag": "v1.7.2",
+  "baseline_sha": "55b47c09fed8b0a0dbb02438c5edb67965e67f70",
+  "base_sha": "55b47c09fed8b0a0dbb02438c5edb67965e67f70",
+  "reviewed_sha": "1aa6803147b1109bfebb9e2d86f0ece867cc1975",
+  "commits": [
+    "1aa6803147b1109bfebb9e2d86f0ece867cc1975"
+  ],
+  "paths": [
+    "CHANGELOG.md",
+    "Cargo.lock",
+    "Cargo.toml",
+    "README.md",
+    "desktop/CHANGELOG.txt",
+    "desktop/MainWindow.Appearance.cs",
+    "desktop/MainWindow.Management.cs",
+    "desktop/MainWindow.Smoke.cs",
+    "desktop/MainWindow.xaml",
+    "desktop/MainWindow.xaml.cs",
+    "docs/RELEASE-1.7.3.md",
+    "src/api.rs",
+    "src/engine.rs",
+    "src/engine/close_safety.rs",
+    "src/engine/close_tests.rs",
+    "src/platform.rs",
+    "src/platform_startup_tests.rs"
+  ],
+  "patch_sha256": "38b49d2855ba5a3e858f8e8e90469a73bec8a9044cc23f0c75584f0ecd8b9e1f",
+  "review": {
+    "bug": "Fix lingering tray helper clients and blocked Start, remove redundant dashboard/settings controls, and compact activity pagination as explicitly requested by the owner.",
+    "dependencies": "Based directly on published v1.7.2; no cherry-picks, new dependencies, workflow changes, or experimental development code. Existing Windows process identity checks and opt-in consent remain enforced.",
+    "premium_excluded": true
+  }
+}

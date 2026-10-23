@@ -32,6 +32,7 @@ fn error(message: String) -> ApiError {
 pub fn router(engine: Engine) -> Router {
     Router::new()
         .route("/v1/status", get(status))
+        .route("/v1/instances/close-all", post(close_all_instances))
         .route("/v1/accounts", get(accounts).post(import))
         .route("/v1/accounts/bulk", patch(bulk_update))
         .route("/v1/game-profiles", post(game_profile_save))
@@ -430,8 +431,9 @@ async fn command(
     State(engine): State<Engine>,
     Path((id, action)): Path<(String, String)>,
 ) -> Result<(StatusCode, Json<crate::model::Operation>), ApiError> {
-    engine
-        .command(&id, &action)
+    tokio::task::spawn_blocking(move || engine.command(&id, &action))
+        .await
+        .map_err(|_| error("Account command worker unavailable".into()))?
         .map(|op| (StatusCode::ACCEPTED, Json(op)))
         .map_err(error)
 }
@@ -714,6 +716,7 @@ mod tests {
             ("GET", "/v1/diagnostics"),
             ("GET", "/v1/backups"),
             ("POST", "/v1/accounts/1/repair"),
+            ("POST", "/v1/instances/close-all"),
         ] {
             for origin in [false, true] {
                 let mut request = Request::builder().method(method).uri(route);
@@ -993,4 +996,14 @@ mod tests {
         drop(engine);
         std::fs::remove_dir_all(path).unwrap();
     }
+}
+
+async fn close_all_instances(
+    State(engine): State<Engine>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    tokio::task::spawn_blocking(move || engine.close_all_instances())
+        .await
+        .map_err(|_| error("Instance cleanup task failed".into()))?
+        .map(|closed| Json(serde_json::json!({"closed": closed})))
+        .map_err(error)
 }
