@@ -75,6 +75,10 @@ Schema 3 is only for a hotfix source PR already merged by owner `oangsa` without
 
 The original PR must be official `hotfix/<version>`, owner-merged to `main`, and have merge parents `[base_sha, reviewed_sha]` with the reviewed tree unchanged. Governance history from the stable baseline to `base_sha` and the complete hotfix report are checked again.
 
+An original PR may also end in one immutable schema-2 intent whose patch digest was generated incorrectly. Recovery accepts that envelope only when it adds one fresh UUID file directly after `reviewed_sha`, its merged tree is exact, and every field except the digest matches the new schema-3 binding. The old digest must be a different SHA256; source drift, reused intent paths, extra files, changed review attestations, and already-correct digests remain rejected.
+
+Generate reports through `release_promotion.github_api` or parse raw UTF-8 JSON bytes from `gh api`. Python subprocess text decoding defaults to the Windows locale and can corrupt Unicode before hashing; do not use locale-dependent decoding.
+
 The recovery PR branch must be `hotfix-intent/<version>` and start directly at current `main`. If governance support has merged since the original hotfix, every intervening commit from `source_merge_sha` to the recovery PR base must be governance-only. Package and lockfile bytes must match the original hotfix tree. The intent branch has one commit adding only the fresh file; the owner-merged commit must preserve its exact base/head parents and tree. Any application drift, mismatched source PR, changed patch or extra file is rejected.
 
 The recovery implementation itself can enter `main` only through `codex/hotfix-recovery-governance`, based directly on current `main`. Branch flow permits governance paths only and requires Cargo package version to remain the exact next patch over latest stable. This exception does not enable the publisher or satisfy owner-signed live controls.
