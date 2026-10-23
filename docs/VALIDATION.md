@@ -3,6 +3,20 @@
 Recorded checks below are historical results, not guarantees of live Roblox compatibility.
 Fixtures use isolated data and simulated accounts unless stated otherwise.
 
+## Upcoming 1.7.6 redirect recovery — 2026-10-23
+
+- Compared 1.6.0 and 1.7.0: both allowed 30 seconds for reconnection before closing a client.
+- The new log replay failed before the fix: a disconnect poll terminated the client before the later reconnect poll.
+- Existing policy checks ruled out broken reconnect cancellation, ambiguous-event handling, and ownership checks before restoring grace.
+- The replay now passes for generic connection loss and codes 267/273; reconnection retains the process, destination, and retry budget.
+- Boundary checks cover 29/30 seconds, duplicate events, persistent kicks, verified exit, retry backoff, Stop, disabled recovery, and other accounts.
+- Passed: 156 Windows Rust tests, 49 identity example tests, 98 desktop checks, formatting, and Clippy; six Rust tests remain explicitly ignored.
+- Versioning, source packaging, beta publication, release promotion, hotfix policy, and owner-evidence checks passed.
+- Brief generic redirects emit no Discord incident; persistent losses deduplicate, and known errors still notify promptly.
+- WinUI smoke and authenticated Rust/WinUI bootstrap passed with isolated fixtures; desktop checks passed again after restoring the reconnect labels.
+- Initial sandbox checks hit temporary-file restrictions; a later rebuild exhausted disk space. Isolated reruns passed after clearing generated incremental cache.
+- No live Roblox redirect/rejoin cycle or native Linux recovery was tested; replay uses simulated clients and isolated logs.
+
 ## Upcoming 1.7.5 process termination before rejoin — 2026-10-23
 
 - After merging upstream through 1.7.4: 155 Windows Rust tests, 49 identity example tests, 98 desktop checks, formatting, and Clippy passed; six Rust tests remain explicitly ignored.

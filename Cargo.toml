@@ -1,6 +1,6 @@
 [package]
 name = "rolauncher"
-version = "1.7.5-dev.16da0ea08001"
+version = "1.7.6-dev.0796fbdc055c"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "Roblox account launcher and recovery supervisor for Windows and Linux"

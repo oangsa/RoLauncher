@@ -1713,7 +1713,7 @@ dependencies = [
 
 [[package]]
 name = "rolauncher"
-version = "1.7.5-dev.16da0ea08001"
+version = "1.7.6-dev.0796fbdc055c"
 dependencies = [
  "axum",
  "base64 0.22.1",

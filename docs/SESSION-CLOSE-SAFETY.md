@@ -34,7 +34,7 @@ UI/login `WM_CLOSE` handlers close RoLauncher windows, not managed Roblox client
 | `UserStop` | Explicit API/UI/Discord Stop, including cancellation of an issued launch. | Same account generation and operation; desired state is stopped; verified unique process. No launch coordination, target, network or commercial prerequisite. |
 | `ManualRestart` | Explicit Restart of an existing client. | Same intent/generation/operation, desired running, Queued replacement, destination and OS coordination ready. |
 | `ManualStartReplacement` | Explicit Start from an attention state that still owns a client. | Same checks as manual Restart. A fresh Start without a client grants no close intent to the new client. |
-| `AutomaticRecovery` | Owned disk log confirms a terminal disconnect. | Recovery enabled, current destination, retry budget, connectivity and OS coordination; still Reconnecting or its scheduled Backoff. |
+| `AutomaticRecovery` | Owned disk log confirms a terminal disconnect that persists for 30 seconds. | Recovery enabled, current destination, retry budget, connectivity and OS coordination; still Reconnecting or its scheduled Backoff. |
 | `TargetReplacement` | TargetUnavailable schedules an eligible fallback/retry. | Current fallback/recovery settings, destination, retry budget, connectivity and OS coordination; scheduled replacement still valid. |
 | `ObsoleteLaunch` | Start supersedes an unresolved tracker from an attention state. | Observation only. Obsolescence never authorizes closing a late client. |
 
@@ -61,7 +61,8 @@ Each actionable retired close requires one fresh scan under the mutex, including
 
 ## Graceful, force and denial behavior
 
-- Automatic recovery immediately terminates the verified disconnected process, avoiding background lifetimes left by window closure; replacement still waits for verified exit and backoff.
+- Automatic recovery allows 30 seconds for reconnection before terminating the verified disconnected process; reconnection cancels recovery without spending a retry.
+- Persistent confirmed disconnects terminate the process, including its tray lifetime; replacement waits for verified exit and backoff.
 - Other close reasons start with graceful submission and an in-memory timer bound to account, full intent and exact process identity.
 - Discovery/disk latency before submission does not count toward the five-second grace interval.
 - Every force attempt repeats current intent, generation, operation, unique ownership and native identity checks.
