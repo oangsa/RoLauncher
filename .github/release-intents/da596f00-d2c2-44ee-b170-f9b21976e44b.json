@@ -1,0 +1,30 @@
+{
+  "schema": 2,
+  "id": "da596f00-d2c2-44ee-b170-f9b21976e44b",
+  "version": "1.7.4",
+  "channel": "stable",
+  "source": "hotfix",
+  "baseline_tag": "v1.7.3",
+  "baseline_sha": "74947dc5980009fb7cbc0dbcb55938fb757ed4f2",
+  "base_sha": "74947dc5980009fb7cbc0dbcb55938fb757ed4f2",
+  "reviewed_sha": "587a6a9f63703e7806e10a11b9c14a36a4ef6c5f",
+  "commits": [
+    "587a6a9f63703e7806e10a11b9c14a36a4ef6c5f"
+  ],
+  "paths": [
+    "CHANGELOG.md",
+    "Cargo.lock",
+    "Cargo.toml",
+    "README.md",
+    "desktop/CHANGELOG.txt",
+    "docs/RELEASE-1.7.4.md",
+    "src/engine/close_tests.rs",
+    "src/logs.rs"
+  ],
+  "patch_sha256": "fe9c02396446a4aab5db6b5310b3acf7bdf3966eb5add01e10007d91edefbf02",
+  "review": {
+    "bug": "Recover confirmed native game kicks that omit numeric error 267 while retaining verified exit, retry limits and access restrictions.",
+    "dependencies": "Based directly on published 1.7.3. Only the native network parser and two regression tests change; no dependencies or unpublished identity work are included.",
+    "premium_excluded": true
+  }
+}
