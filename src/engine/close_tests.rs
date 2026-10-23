@@ -331,12 +331,12 @@ fn restart_closes_current_generation_but_stale_restart_cannot_close_newer_client
     );
 }
 #[test]
-fn recovery_and_force_escalation_remain_available_under_the_same_valid_intent() {
+fn recovery_termination_remains_available_under_the_same_valid_intent() {
     let f = Fixture::new();
     f.recovery();
     let now = Instant::now();
     let mut attempts = CloseAttempts::default();
-    assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
+    assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![true]);
     assert_eq!(f.account().failures, 1);
     assert!(
         !f.account().disconnect_notified,
@@ -353,12 +353,12 @@ fn recovery_and_force_escalation_remain_available_under_the_same_valid_intent() 
     assert_eq!(f.account().failures, 1);
 }
 #[test]
-fn recovery_disabled_after_graceful_close_cannot_force_or_consume_more_retries() {
+fn recovery_disabled_after_close_cannot_repeat_termination_or_consume_more_retries() {
     let f = Fixture::new();
     f.recovery();
     let now = Instant::now();
     let mut attempts = CloseAttempts::default();
-    assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
+    assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![true]);
     f.engine
         .patch(
             "1",
@@ -495,12 +495,12 @@ fn failed_graceful_close_never_becomes_a_force_attempt_on_later_ticks() {
     assert_eq!(f.account().failures, 0);
 }
 #[test]
-fn connected_signal_revokes_recovery_before_force_escalation() {
+fn connected_signal_revokes_further_recovery_termination() {
     let f = Fixture::new();
     f.recovery();
     let now = Instant::now();
     let mut attempts = CloseAttempts::default();
-    assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
+    assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![true]);
     let a = f.account();
     f.engine.signal("1", a.generation, Signal::Connected);
     assert!(
@@ -752,7 +752,7 @@ fn repeated_owned_denial_has_no_storage_or_broadcast_work_and_accepts_new_comman
         f.recovery();
         let now = Instant::now();
         let mut attempts = CloseAttempts::default();
-        assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
+        assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![true]);
         f.engine.set_launch_allowed(false);
         assert!(
             f.tick(&f.account(), now + Duration::from_secs(6), &mut attempts)
@@ -854,7 +854,7 @@ fn owned_denial_retries_only_unsaved_state_and_never_restores_automatic_force() 
     f.recovery();
     let now = Instant::now();
     let mut attempts = CloseAttempts::default();
-    assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
+    assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![true]);
     let blocked_path = f.path.join("accounts.json.tmp");
     std::fs::create_dir(&blocked_path).unwrap();
     f.engine.set_launch_allowed(false);
@@ -1437,7 +1437,10 @@ fn a_new_recovery_episode_cannot_reuse_the_previous_episodes_force_timer() {
         } else {
             f.recovery();
         }
-        assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
+        assert_eq!(
+            f.tick(&f.account(), now, &mut attempts),
+            vec![!target_replacement]
+        );
         let a = f.account();
         f.engine.signal("1", a.generation, Signal::Connected);
         // Both events occur before another monitor tick can discard the old timer.
@@ -1449,7 +1452,7 @@ fn a_new_recovery_episode_cannot_reuse_the_previous_episodes_force_timer() {
         }
         assert_eq!(
             f.tick(&f.account(), now + Duration::from_secs(40), &mut attempts),
-            vec![false]
+            vec![!target_replacement]
         );
     }
 }
@@ -1640,7 +1643,7 @@ fn native_kick_log_recovers_instead_of_waiting_for_confirmation() {
     let mut attempts = CloseAttempts::default();
     assert_eq!(
         f.tick(&f.account(), Instant::now(), &mut attempts),
-        vec![false]
+        vec![true]
     );
     assert!(!launch_ready(
         &f.account(),
@@ -1653,6 +1656,44 @@ fn native_kick_log_recovers_instead_of_waiting_for_confirmation() {
         Utc::now() + ChronoDuration::hours(1)
     ));
     assert_eq!(f.account().failures, 1);
+}
+
+#[test]
+fn terminal_disconnect_terminates_the_client_before_relaunch() {
+    for code in [267, 273, 279] {
+        let f = Fixture::new();
+        let other = f.engine.snapshot().accounts[1].process.clone();
+        let a = f.account();
+        let identity = a.process.clone().unwrap();
+        f.engine.observe(
+            "1",
+            a.generation,
+            &identity,
+            Observation::DiskLog(
+                crate::logs::parse_event(&format!(
+                    "[FLog::Network] Sending disconnect with reason: {code}"
+                ))
+                .unwrap(),
+            ),
+        );
+        let mut attempts = CloseAttempts::default();
+        assert_eq!(
+            f.tick(&f.account(), Instant::now(), &mut attempts),
+            vec![true],
+            "disconnect {code} must terminate the process, including its tray lifetime"
+        );
+        assert!(!launch_ready(
+            &f.account(),
+            Utc::now() + ChronoDuration::hours(1)
+        ));
+        let closing = f.account();
+        f.engine.owned_exit_observed(&closing, &identity, true);
+        assert!(launch_ready(
+            &f.account(),
+            Utc::now() + ChronoDuration::hours(1)
+        ));
+        assert_eq!(f.engine.snapshot().accounts[1].process, other);
+    }
 }
 
 #[test]
@@ -1671,7 +1712,7 @@ fn kicked_267_closes_then_rejoins_only_after_exit() {
     );
     let mut attempts = CloseAttempts::default();
     let now = Instant::now();
-    assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
+    assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![true]);
     assert!(!launch_ready(
         &f.account(),
         Utc::now() + ChronoDuration::hours(1)

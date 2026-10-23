@@ -3,6 +3,16 @@
 Recorded checks below are historical results, not guarantees of live Roblox compatibility.
 Fixtures use isolated data and simulated accounts unless stated otherwise.
 
+## Upcoming 1.7.5 process termination before rejoin — 2026-10-23
+
+- After merging upstream through 1.7.4: 155 Windows Rust tests, 49 identity example tests, 98 desktop checks, formatting, and Clippy passed; six Rust tests remain explicitly ignored.
+- Versioning, source packaging, beta publication, release promotion, hotfix policy, and owner-evidence checks passed.
+- Regression failed with upstream window-close behavior, then passed with immediate termination for confirmed disconnects 267/273/279.
+- A disposable Windows process acknowledged window closure and stayed alive; forced closure then confirmed process exit.
+- Recovery checks cover verified exit, retry backoff, other accounts, Stop, disabled rejoin, reconnection, and ownership verification.
+- Earlier native kick and global cleanup changes shipped in 1.7.2–1.7.4; they remain regression coverage.
+- No live Roblox tray/rejoin cycle was tested; native closure uses a disposable process fixture.
+
 ## 1.7.0 HTTP join recovery — 2026-10-15
 
 - Passed on Windows: 75 Rust tests, separate authenticated Rust/WinUI bootstrap, 74 desktop checks, WinUI fixture, formatting, Clippy, and release consistency.

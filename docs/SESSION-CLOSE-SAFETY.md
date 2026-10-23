@@ -34,7 +34,7 @@ UI/login `WM_CLOSE` handlers close RoLauncher windows, not managed Roblox client
 | `UserStop` | Explicit API/UI/Discord Stop, including cancellation of an issued launch. | Same account generation and operation; desired state is stopped; verified unique process. No launch coordination, target, network or commercial prerequisite. |
 | `ManualRestart` | Explicit Restart of an existing client. | Same intent/generation/operation, desired running, Queued replacement, destination and OS coordination ready. |
 | `ManualStartReplacement` | Explicit Start from an attention state that still owns a client. | Same checks as manual Restart. A fresh Start without a client grants no close intent to the new client. |
-| `AutomaticRecovery` | Current disconnect exceeds the 30-second reconnect grace period. | Recovery enabled, current destination, retry budget, connectivity and OS coordination; still Reconnecting or its scheduled Backoff. |
+| `AutomaticRecovery` | Owned disk log confirms a terminal disconnect. | Recovery enabled, current destination, retry budget, connectivity and OS coordination; still Reconnecting or its scheduled Backoff. |
 | `TargetReplacement` | TargetUnavailable schedules an eligible fallback/retry. | Current fallback/recovery settings, destination, retry budget, connectivity and OS coordination; scheduled replacement still valid. |
 | `ObsoleteLaunch` | Start supersedes an unresolved tracker from an attention state. | Observation only. Obsolescence never authorizes closing a late client. |
 
@@ -61,11 +61,12 @@ Each actionable retired close requires one fresh scan under the mutex, including
 
 ## Graceful, force and denial behavior
 
-- Successful graceful submission starts an in-memory timer bound to account, full intent and exact process identity.
+- Automatic recovery immediately terminates the verified disconnected process, avoiding background lifetimes left by window closure; replacement still waits for verified exit and backoff.
+- Other close reasons start with graceful submission and an in-memory timer bound to account, full intent and exact process identity.
 - Discovery/disk latency before submission does not count toward the five-second grace interval.
 - Every force attempt repeats current intent, generation, operation, unique ownership and native identity checks.
 - A new Stop or Restart starts a fresh graceful phase even when it targets the same process.
-- A new recovery episode has a fresh intent UUID, so reconnect/recovery events between monitor ticks cannot reuse an earlier force timer.
+- Each recovery episode has a fresh intent UUID and must satisfy current eligibility; reconnection revokes further automatic termination.
 - Changed recovery settings, recovered connection, lost coordination, ambiguous ownership or native errors stop escalation.
 - Denial retains client/process evidence, reports an attention state and does not consume another recovery retry.
 - Failed close attempts are latched in memory even if persisting their denial fails; no tick can silently retry with stronger force.
@@ -74,7 +75,7 @@ Each actionable retired close requires one fresh scan under the mutex, including
 - An unsaved denial also blocks newly classified automatic intents for the same account/process; a new episode UUID cannot restore authority.
 - A natural exit after a denied close does not silently resume replacement. An explicit valid command is required.
 - Confirmed exit of a current client preserves explicit Stop authority for separate retired clients still awaiting cleanup.
-- Current eligible recovery schedules its existing retry only after a successful graceful submission.
+- Eligible recovery persists its retry reservation before termination; replacement waits for confirmed process exit and the retry deadline.
 - Activity recording, status notifications, durable-before-visible state changes and snapshot delivery are preserved.
 
 ## Retired ownership and legacy data

@@ -23,6 +23,7 @@ fn window_fixture() {
     };
     let visible = std::env::var_os("ROLAUNCHER_STARTUP_FIXTURE_VISIBLE").is_some();
     let tray = std::env::var_os("ROLAUNCHER_STARTUP_FIXTURE_TRAY").is_some();
+    let tray_lifetime = std::env::var_os("ROLAUNCHER_FIXTURE_TRAY_LIFETIME").is_some();
     let hwnd = unsafe {
         CreateWindowExW(
             if tray { WS_EX_TOOLWINDOW } else { 0 },
@@ -46,8 +47,11 @@ fn window_fixture() {
         }
     }
     std::fs::write(&ready, b"ready").unwrap();
+    let mut window_closed = false;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while unsafe { IsWindow(hwnd) } != 0 && std::time::Instant::now() < deadline {
+    while (tray_lifetime || unsafe { IsWindow(hwnd) } != 0)
+        && std::time::Instant::now() < deadline
+    {
         let mut message = unsafe { std::mem::zeroed() };
         while unsafe { PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, PM_REMOVE) } != 0 {
             unsafe {
@@ -55,8 +59,67 @@ fn window_fixture() {
                 DispatchMessageW(&message);
             }
         }
+        if tray_lifetime && !window_closed && unsafe { IsWindow(hwnd) } == 0 {
+            std::fs::write(PathBuf::from(&ready).with_extension("closed"), b"closed").unwrap();
+            window_closed = true;
+        }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+}
+
+#[test]
+fn forced_close_ends_a_clients_background_lifetime() {
+    let directory = std::env::temp_dir().join(format!("rbx-tray-{}", Uuid::new_v4()));
+    let versions = directory.join("Roblox").join("Versions");
+    std::fs::create_dir_all(&versions).unwrap();
+    let executable = versions.join("RobloxPlayerBeta.exe");
+    std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+    let ready = directory.join("ready");
+    let mut child = std::process::Command::new(executable)
+        .args([
+            "--exact",
+            "platform::imp::startup_tests::window_fixture",
+            "--ignored",
+        ])
+        .creation_flags(0x08000000)
+        .env("ROLAUNCHER_STARTUP_FIXTURE_READY", &ready)
+        .env("ROLAUNCHER_FIXTURE_TRAY_LIFETIME", "1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !ready.exists() {
+        assert!(child.try_wait().unwrap().is_none());
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let identity = Player {
+        pid: child.id(),
+        creation_time: process_time(child.as_raw_handle() as _).unwrap(),
+        tracker: String::new(),
+    }
+    .identity(Uuid::nil());
+    close(&identity, false).unwrap();
+    let closed = ready.with_extension("closed");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !closed.exists() {
+        assert!(child.try_wait().unwrap().is_none());
+        assert!(std::time::Instant::now() < deadline, "window close not processed");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        alive(&identity).unwrap(),
+        "window close leaves background client alive"
+    );
+    close(&identity, true).unwrap();
+    assert_eq!(
+        unsafe { WaitForSingleObject(child.as_raw_handle() as _, 2000) },
+        WAIT_OBJECT_0
+    );
+    assert!(!alive(&identity).unwrap());
+    child.wait().unwrap();
+    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
