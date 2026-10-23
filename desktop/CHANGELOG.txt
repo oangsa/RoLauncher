@@ -1,3 +1,7 @@
+1.7.8 — 2026-10-24
+
+- Avoid permanently pausing automatic rejoin when a closing client disappears before fresh process verification.
+
 1.7.7 — 2026-10-24
 
 - Close disconnected clients gracefully before five-second force escalation; keep reconnect cancellation and verified exit before rejoin.
