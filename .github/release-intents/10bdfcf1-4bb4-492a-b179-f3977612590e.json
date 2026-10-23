@@ -1,0 +1,31 @@
+{
+  "schema": 2,
+  "id": "10bdfcf1-4bb4-492a-b179-f3977612590e",
+  "version": "1.7.7",
+  "channel": "stable",
+  "source": "hotfix",
+  "baseline_tag": "v1.7.6",
+  "baseline_sha": "b2a7e06d7b9f22ef0d41cc1d7f154bf42b152b0f",
+  "base_sha": "b2a7e06d7b9f22ef0d41cc1d7f154bf42b152b0f",
+  "reviewed_sha": "6b6571871b667b7ffa2c3e889117dac93f693fa0",
+  "commits": [
+    "6b6571871b667b7ffa2c3e889117dac93f693fa0"
+  ],
+  "paths": [
+    "CHANGELOG.md",
+    "Cargo.lock",
+    "Cargo.toml",
+    "README.md",
+    "desktop/CHANGELOG.txt",
+    "docs/RELEASE-1.7.7.md",
+    "src/engine.rs",
+    "src/engine/close_safety.rs",
+    "src/engine/close_tests.rs"
+  ],
+  "patch_sha256": "51c20615fd18a76e89b9d2e85580f1a70834dcd515b55627c11eb9ffe4db8b47",
+  "review": {
+    "bug": "Restore graceful-first automatic recovery, cancel escalation on reconnection, and resume paused automatic rejoin only after verified failed-close process exit.",
+    "dependencies": "Ports the recovery helper, shared close-effect change and four regression tests from the isolated fix branch onto stable 1.7.6. Existing close intent, five-second timer, log monitoring and exact process-exit verification supply all prerequisites. No dependency changes or experimental identity code.",
+    "premium_excluded": true
+  }
+}
