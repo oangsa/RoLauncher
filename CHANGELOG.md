@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.7.5] — Unreleased
+## [1.7.5] — 2026-10-23
 
 - Rejoin after verified disconnected clients exit, including tray clients; retain retry backoff.
 

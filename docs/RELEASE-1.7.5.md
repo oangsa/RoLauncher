@@ -1,6 +1,6 @@
 # RoLauncher 1.7.5
 
-Upcoming bug-fix release. Based on published stable 1.7.4. Local packages carry a unique development suffix.
+Bug-fix release based on published stable 1.7.4.
 
 ## Changes
 
