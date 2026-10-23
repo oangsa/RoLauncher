@@ -362,15 +362,38 @@ def verify_hotfix_recovery(call, intent, pr, merge, path, source, content):
             and original['base']['ref'] == 'main' and original['base']['sha'] == base
             and original['base']['repo']['full_name'] == 'oangsa/RoLauncher'
             and original['head']['ref'] == 'hotfix/' + intent['version']
-            and original['head']['sha'] == reviewed
             and original['head']['repo']['full_name'] == 'oangsa/RoLauncher'
             and (original.get('merged_by') or {}).get('id') == owner['id'],
             'Exact owner-merged source hotfix PR required')
     source_merge = call(f'/commits/{source_merge_sha}?per_page=100')
-    reviewed_commit = call(f'/commits/{reviewed}?per_page=100')
-    require([p['sha'] for p in source_merge['parents']] == [base, reviewed]
-            and source_merge['commit']['tree']['sha'] == reviewed_commit['commit']['tree']['sha'],
+    original_head = original['head']['sha']
+    require(isinstance(original_head, str) and re.fullmatch('[a-f0-9]{40}', original_head),
+            'Invalid original source head')
+    source_head = call(f'/commits/{original_head}?per_page=100')
+    require([p['sha'] for p in source_merge['parents']] == [base, original_head]
+            and source_merge['commit']['tree']['sha'] == source_head['commit']['tree']['sha'],
             'Original hotfix merge must preserve its exact reviewed source tree')
+    if original_head != reviewed:
+        # Reauthorize a malformed digest without editing its immutable schema-2 envelope.
+        files = source_head['files']
+        require([p['sha'] for p in source_head['parents']] == [reviewed]
+                and len(files) == 1 and files[0]['status'] == 'added',
+                'Original intent envelope must add only one file directly after reviewed source')
+        old_path = files[0]['filename']
+        old = json.loads(content(call, old_path, original_head), object_pairs_hook=_unique_pairs)
+        require(isinstance(old, dict) and set(old) == HOTFIX_FIELDS
+                and type(old['schema']) is int and old['schema'] == 2 and old['source'] == 'hotfix',
+                'Original envelope must be an exact schema-2 hotfix intent')
+        require(isinstance(old['id'], str) and str(UUID(old['id'], version=4)) == old['id']
+                and old_path == '.github/release-intents/' + old['id'] + '.json',
+                'Original intent identity mismatch')
+        require(len(call(f'/commits?path={old_path}&sha={original_head}&per_page=2')) == 1,
+                'Original intent path was edited or reused')
+        require(all(old[k] == intent[k] for k in HOTFIX_FIELDS - {'schema', 'source', 'id', 'patch_sha256'})
+                and isinstance(old['patch_sha256'], str)
+                and re.fullmatch('[a-f0-9]{64}', old['patch_sha256'])
+                and old['patch_sha256'] != intent['patch_sha256'],
+                'Recovery may correct only the original patch digest')
     governance_history(call, baseline, base)
     report = hotfix_report(call, base, reviewed)
     require(all(report[k] == intent[k] for k in report),
