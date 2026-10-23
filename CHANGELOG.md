@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.7.4] — Unreleased
+
+- Recover from confirmed game kicks when Roblox omits numeric error 267, retaining retry limits and verified exit before replacement.
+
 ## [1.7.3] — 2026-10-21
 
 - Clean up tray helper clients and tolerate exited processes while preserving visible games and verified managed clients.

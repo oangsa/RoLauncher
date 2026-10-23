@@ -1615,6 +1615,47 @@ fn merged_recovery_at_retry_cap_preserves_the_live_client() {
 }
 
 #[test]
+fn native_kick_log_recovers_instead_of_waiting_for_confirmation() {
+    let f = Fixture::new();
+    let a = f.account();
+    let identity = a.process.clone().unwrap();
+    let log = f.path.join("native-kick.log");
+    // Native network messages from the reported client; no numeric 267 is logged.
+    std::fs::write(&log, concat!(
+        "2026-10-22T20:38:09.411Z,15627.411133,51ec,7 [FLog::Network] Players service requests player disconnect\n",
+        "2026-10-22T20:38:09.469Z,15627.469727,5ccc,7,Warning [FLog::Network] Lost connection with reason : You have been kicked from the game\n",
+        "2026-10-22T20:38:11.176Z,15629.176758,5ccc,6,Info [DFLog::RbxTransportDummyClient] Connection closed by server for reason: RCC: 288 (DisconnectServerShutdown)\n",
+    )).unwrap();
+    let mut tail = crate::logs::Tail::new(log, false).unwrap();
+    for event in tail.read_events().unwrap() {
+        f.engine
+            .observe("1", a.generation, &identity, Observation::DiskLog(event));
+    }
+    assert_eq!(
+        f.account().recovery_evidence,
+        RecoveryEvidence::ConfirmedTerminalDisconnect
+    );
+    assert_eq!(f.account().status, Status::Reconnecting);
+    assert!(f.account().last_error.unwrap().contains("267"));
+    let mut attempts = CloseAttempts::default();
+    assert_eq!(
+        f.tick(&f.account(), Instant::now(), &mut attempts),
+        vec![false]
+    );
+    assert!(!launch_ready(
+        &f.account(),
+        Utc::now() + ChronoDuration::hours(1)
+    ));
+    let closing = f.account();
+    f.engine.owned_exit_observed(&closing, &identity, true);
+    assert!(launch_ready(
+        &f.account(),
+        Utc::now() + ChronoDuration::hours(1)
+    ));
+    assert_eq!(f.account().failures, 1);
+}
+
+#[test]
 fn kicked_267_closes_then_rejoins_only_after_exit() {
     let f = Fixture::new();
     let a = f.account();
