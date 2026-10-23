@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.7.6] — 2026-10-23
+
+- Restore 30-second reconnect grace so redirects can finish without closing and reopening the client.
+- Keep brief connection-loss redirects silent in Discord; retain prompt alerts for known errors.
+
 ## [1.7.5] — 2026-10-23
 
 - Rejoin after verified disconnected clients exit, including tray clients; retain retry backoff.

@@ -1433,7 +1433,7 @@ fn run_window(
         let settings_note = control(
             hwnd,
             "STATIC",
-            "Confirmed disconnects begin controlled recovery immediately. Replacement waits for the old client to exit and retry backoff. Unverified events cannot close a client. Turn rejoin off to prevent automatic replacement.",
+            "Confirmed disconnects allow 30 seconds to reconnect before recovery. Replacement waits for the old client to exit and retry backoff. Unverified events cannot close a client. Turn rejoin off to prevent automatic replacement.",
             213,
             12,
             184,

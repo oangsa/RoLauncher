@@ -1618,6 +1618,81 @@ fn merged_recovery_at_retry_cap_preserves_the_live_client() {
 }
 
 #[test]
+fn redirect_across_monitor_polls_preserves_the_client_and_retry_budget() {
+    for disconnect in [
+        "[FLog::Network] Connection lost",
+        "[DFLog::NetworkClient] ID_CONNECTION_LOST",
+        "[FLog::Network] Sending disconnect with reason: 267",
+        "[FLog::Network] Sending disconnect with reason: 273",
+    ] {
+        let f = Fixture::new();
+        let original = f.account();
+        let identity = original.process.clone().unwrap();
+        let other = f.engine.snapshot().accounts[1].clone();
+        let log = f.path.join("redirect.log");
+        std::fs::write(&log, format!("{disconnect}\n")).unwrap();
+        let mut tail = crate::logs::Tail::new(log.clone(), false).unwrap();
+        let mut attempts = CloseAttempts::default();
+        for event in tail.read_events().unwrap() {
+            f.engine.observe(
+                "1",
+                original.generation,
+                &identity,
+                Observation::DiskLog(event),
+            );
+        }
+        assert!(
+            f.tick(&f.account(), Instant::now(), &mut attempts)
+                .is_empty(),
+            "{disconnect}"
+        );
+        let start = Utc::now() - ChronoDuration::seconds(29);
+        f.engine
+            .update("1", original.generation, |a| {
+                a.disconnected_since = Some(start)
+            })
+            .unwrap();
+        assert!(
+            f.tick(&f.account(), Instant::now(), &mut attempts)
+                .is_empty()
+        );
+        // The new connection arrives in a later read, after a close opportunity.
+        use std::io::Write;
+        writeln!(
+            std::fs::OpenOptions::new().append(true).open(&log).unwrap(),
+            "[FLog::Network] Replicator created"
+        )
+        .unwrap();
+        for event in tail.read_events().unwrap() {
+            f.engine.observe(
+                "1",
+                original.generation,
+                &identity,
+                Observation::DiskLog(event),
+            );
+        }
+        assert!(
+            f.tick(&f.account(), Instant::now(), &mut attempts)
+                .is_empty()
+        );
+        let connected = f.account();
+        assert_eq!(connected.status, Status::Running);
+        assert_eq!(connected.process, original.process);
+        assert_eq!(connected.tracker, original.tracker);
+        assert_eq!(connected.target, original.target);
+        assert_eq!(connected.failures, 0);
+        assert!(connected.next_retry.is_none());
+        assert!(connected.close_intent.is_none());
+        assert!(connected.disconnected_since.is_none());
+        assert!(!launch_ready(
+            &connected,
+            Utc::now() + ChronoDuration::hours(1)
+        ));
+        assert_eq!(f.engine.snapshot().accounts[1].process, other.process);
+    }
+}
+
+#[test]
 fn native_kick_log_recovers_instead_of_waiting_for_confirmation() {
     let f = Fixture::new();
     let a = f.account();
@@ -1640,6 +1715,7 @@ fn native_kick_log_recovers_instead_of_waiting_for_confirmation() {
     );
     assert_eq!(f.account().status, Status::Reconnecting);
     assert!(f.account().last_error.unwrap().contains("267"));
+    f.engine.elapse_reconnect_grace("1", a.generation);
     let mut attempts = CloseAttempts::default();
     assert_eq!(
         f.tick(&f.account(), Instant::now(), &mut attempts),
@@ -1676,6 +1752,7 @@ fn terminal_disconnect_terminates_the_client_before_relaunch() {
                 .unwrap(),
             ),
         );
+        f.engine.elapse_reconnect_grace("1", a.generation);
         let mut attempts = CloseAttempts::default();
         assert_eq!(
             f.tick(&f.account(), Instant::now(), &mut attempts),
@@ -1710,6 +1787,7 @@ fn kicked_267_closes_then_rejoins_only_after_exit() {
                 .unwrap(),
         ),
     );
+    f.engine.elapse_reconnect_grace("1", a.generation);
     let mut attempts = CloseAttempts::default();
     let now = Instant::now();
     assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![true]);

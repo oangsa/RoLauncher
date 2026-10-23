@@ -62,11 +62,14 @@ const LAUNCH_COORDINATION_ERROR: &str = "Roblox launch coordination is not ready
 #[cfg(not(windows))]
 const LAUNCH_COORDINATION_ERROR: &str = "Multi-instance initialization failed. Check Support and integrations, resolve the reported issue, then restart RoLauncher";
 
-fn recovery_due(account: &Account, _now: chrono::DateTime<Utc>) -> bool {
+fn recovery_due(account: &Account, now: chrono::DateTime<Utc>) -> bool {
     account.desired_running
         && account.auto_recovery
         && account.status == Status::Reconnecting
         && account.recovery_evidence == RecoveryEvidence::ConfirmedTerminalDisconnect
+        && account
+            .disconnected_since
+            .is_some_and(|t| now - t >= ChronoDuration::seconds(30))
 }
 
 #[derive(Clone, Copy)]
@@ -184,13 +187,13 @@ fn apply_observation(account: &mut Account, observation: Observation) {
     }
     account.last_error = Some(match signal {
         Signal::ConnectionFailed => {
-            "Connection failed: server did not respond (279); controlled recovery requested".into()
+            "Connection failed: server did not respond (279); allowing 30 seconds to reconnect before recovery".into()
         }
         Signal::SessionLost(Some(code)) => {
-            format!("Session lost (code {code}); controlled recovery requested")
+            format!("Session lost (code {code}); allowing 30 seconds to reconnect before recovery")
         }
-        Signal::SessionLost(None) => "Session lost; controlled recovery requested".into(),
-        _ => "Confirmed connection lost; controlled recovery requested".into(),
+        Signal::SessionLost(None) => "Session lost; allowing 30 seconds to reconnect before recovery".into(),
+        _ => "Game connection lost; allowing 30 seconds to reconnect before recovery".into(),
     });
 }
 
@@ -280,8 +283,15 @@ fn normalize_accounts(next: &mut State) {
         let a = &mut saved.account;
         a.track_run(now);
         if a.status == Status::Reconnecting && a.desired_running {
-            a.disconnect_notified =
-                a.recovery_evidence == RecoveryEvidence::ConfirmedTerminalDisconnect;
+            let known_error = a.last_error.as_deref().is_some_and(|error| {
+                error.starts_with("Session lost (code") || error.starts_with("Connection failed:")
+            });
+            a.disconnect_notified = a.recovery_evidence
+                == RecoveryEvidence::ConfirmedTerminalDisconnect
+                && (a.disconnect_notified
+                    || known_error
+                    || a.disconnected_since
+                        .is_some_and(|t| now - t >= ChronoDuration::seconds(30)));
         } else {
             a.disconnect_notified = false;
         }
@@ -1387,6 +1397,10 @@ impl Engine {
                 else {
                     continue;
                 };
+                // As in 1.7.0, report a generic loss only after fresh logs and grace.
+                if !account.disconnect_notified && recovery_due(&account, Utc::now()) {
+                    let _ = self.update(&account.id, account.generation, |_| {});
+                }
                 // This boundary reads current intent under the command mutex and verifies
                 // the process again, including on every force escalation.
                 if self
@@ -1598,7 +1612,7 @@ impl Engine {
         force: bool,
         close: impl FnOnce(&ProcessIdentity, bool) -> Result<(), String>,
     ) -> Result<bool, String> {
-        // Commit the retry exactly once, before controlled shutdown. No grace timer.
+        // Commit the retry exactly once, after reconnect grace and before shutdown.
         let pending = self
             .0
             .state
@@ -1652,6 +1666,15 @@ impl Engine {
         }
         close(identity, force)?;
         Ok(true)
+    }
+
+    #[cfg(test)]
+    fn elapse_reconnect_grace(&self, id: &str, generation: Uuid) {
+        self.update(id, generation, |a| {
+            assert!(a.disconnected_since.is_some());
+            a.disconnected_since = Some(Utc::now() - ChronoDuration::seconds(31));
+        })
+        .unwrap();
     }
 
     #[cfg(test)]
@@ -1826,6 +1849,7 @@ mod tests {
                 engine
                     .update("1", identity.generation, |a| {
                         a.status = Status::Running;
+                        a.disconnected_since = None;
                         a.failures = 0;
                         a.next_retry = None;
                         a.recovery_reason.clear();
@@ -1861,6 +1885,7 @@ mod tests {
                     &identity,
                     Observation::DiskLog(events[0]),
                 );
+                engine.elapse_reconnect_grace("1", identity.generation);
                 assert!(recovery_due(&engine.snapshot().accounts[0], Utc::now()));
                 scheduling.push(accepted.elapsed().as_secs_f64() * 1000.0);
                 assert!(
@@ -1885,7 +1910,7 @@ mod tests {
                 "backlog_bytes": if backlog { 3_500_000 } else { 0 },
                 "detection": summary(detection), "recovery_scheduling": summary(scheduling),
                 "accepted_event_to_controlled_close": summary(controlled_close),
-                "old_fixed_grace_ms": 30000, "new_fixed_grace_ms": 0
+                "reconnect_grace_ms": 30000, "grace_elapsed_by_fixture": true
             }));
             drop(engine);
             std::fs::remove_dir_all(path).unwrap();
@@ -1896,7 +1921,7 @@ mod tests {
         );
     }
     #[test]
-    fn policy_confirmed_events_start_close_now_and_wait_for_verified_exit() {
+    fn policy_confirmed_events_wait_for_grace_then_verified_exit() {
         for line in [
             "[FLog::Network] Connection lost",
             "[DFLog::NetworkClient] ID_CONNECTION_LOST",
@@ -1906,6 +1931,8 @@ mod tests {
         ] {
             let (engine, path, identity) = owned_fixture();
             engine.observe("1", identity.generation, &identity, disk(line));
+            assert!(!recovery_due(&engine.snapshot().accounts[0], Utc::now()));
+            engine.elapse_reconnect_grace("1", identity.generation);
             let accepted = engine.snapshot().accounts.remove(0);
             assert_eq!(
                 accepted.recovery_evidence,
@@ -2031,6 +2058,7 @@ mod tests {
             &identity,
             Observation::UnverifiedMemory(Signal::Connected),
         );
+        engine.elapse_reconnect_grace("1", identity.generation);
         assert!(recovery_due(&engine.snapshot().accounts[0], Utc::now()));
         drop(engine);
         std::fs::remove_dir_all(path).unwrap();
@@ -2084,6 +2112,7 @@ mod tests {
                 disk("[FLog::Network] Connection lost"),
             );
             if already_started {
+                engine.elapse_reconnect_grace("1", identity.generation);
                 assert!(
                     engine
                         .close_managed_with("1", identity.generation, &identity, false, |_, _| Ok(
@@ -2116,6 +2145,7 @@ mod tests {
         let (engine, path, identity) = owned_fixture();
         let event = disk("[FLog::Network] Sending disconnect with reason: 273");
         engine.observe("1", identity.generation, &identity, event);
+        engine.elapse_reconnect_grace("1", identity.generation);
         engine
             .close_managed_with("1", identity.generation, &identity, false, |_, _| Ok(()))
             .unwrap();
@@ -2203,6 +2233,7 @@ mod tests {
         engine
             .update("1", identity.generation, process_unavailable)
             .unwrap();
+        engine.elapse_reconnect_grace("1", identity.generation);
         assert!(recovery_due(&engine.snapshot().accounts[0], Utc::now()));
         engine
             .close_managed_with("1", identity.generation, &identity, false, |_, _| Ok(()))
@@ -2332,6 +2363,7 @@ mod tests {
             engine.observe("1", Uuid::new_v4(), &identity, event);
             assert_eq!(engine.snapshot().accounts[0].status, Status::Running);
             engine.observe("1", identity.generation, &identity, event);
+            engine.elapse_reconnect_grace("1", identity.generation);
             match action {
                 "stop" => {
                     engine.command("1", "stop").unwrap();
@@ -2372,7 +2404,7 @@ mod tests {
         }
     }
     #[test]
-    fn policy_rate_limit_deadline_and_failure_limit_survive_immediate_shutdown() {
+    fn policy_rate_limit_deadline_and_failure_limit_survive_reconnect_grace() {
         let (engine, path, identity) = owned_fixture();
         let cooldown = Utc::now() + ChronoDuration::seconds(120);
         engine
@@ -2387,6 +2419,7 @@ mod tests {
             &identity,
             disk("[FLog::Network] Connection lost"),
         );
+        engine.elapse_reconnect_grace("1", identity.generation);
         assert!(
             engine
                 .close_managed_with("1", identity.generation, &identity, false, |_, _| Ok(()))
@@ -2399,6 +2432,7 @@ mod tests {
                 a.failures = 4;
                 a.recovery_evidence = RecoveryEvidence::ConfirmedTerminalDisconnect;
                 a.status = Status::Reconnecting;
+                a.disconnected_since = Some(Utc::now() - ChronoDuration::seconds(31));
             })
             .unwrap();
         engine
@@ -2435,12 +2469,21 @@ mod tests {
         std::fs::remove_dir_all(path).unwrap();
     }
     #[test]
-    fn confirmed_disconnect_starts_without_reconnection_grace() {
+    fn confirmed_disconnect_waits_30_seconds_without_resetting_on_duplicates() {
         let (engine, path) = fixture(1);
         engine.command("1", "start").unwrap();
         let generation = engine.snapshot().accounts[0].generation;
         engine.signal("1", generation, Signal::Disconnected);
-        assert!(recovery_due(&engine.snapshot().accounts[0], Utc::now()));
+        let account = engine.snapshot().accounts.remove(0);
+        let start = account.disconnected_since.unwrap();
+        assert!(!recovery_due(&account, start));
+        assert!(!recovery_due(&account, start + ChronoDuration::seconds(29)));
+        assert!(recovery_due(&account, start + ChronoDuration::seconds(30)));
+        engine.signal("1", generation, Signal::Disconnected);
+        assert_eq!(
+            engine.snapshot().accounts[0].disconnected_since,
+            Some(start)
+        );
         drop(engine);
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -2684,28 +2727,30 @@ mod tests {
         std::fs::remove_dir_all(path).unwrap();
     }
     #[test]
-    fn discord_reports_confirmed_disconnect_immediately_and_deduplicates() {
+    fn discord_redirect_grace_reports_only_persistent_disconnects_once() {
         let (engine, path) = fixture(1);
         engine.command("1", "start").unwrap();
         let generation = engine.snapshot().accounts[0].generation;
         engine.signal("1", generation, Signal::Connected);
         engine.signal("1", generation, Signal::Disconnected);
+        assert!(engine.discord_settings().recent.is_empty());
+        engine.signal("1", generation, Signal::Connected);
+        assert!(engine.discord_settings().recent.is_empty());
+        engine.signal("1", generation, Signal::Disconnected);
+        assert!(engine.discord_settings().recent.is_empty());
+        engine.elapse_reconnect_grace("1", generation);
+        assert_eq!(engine.discord_settings().recent.len(), 1);
+        engine.signal("1", generation, Signal::Disconnected);
+        engine.update("1", generation, |_| {}).unwrap();
         assert_eq!(engine.discord_settings().recent.len(), 1);
         engine.signal("1", generation, Signal::Connected);
         assert_eq!(engine.discord_settings().recent.len(), 2);
-        engine.signal("1", generation, Signal::Disconnected);
-        assert_eq!(engine.discord_settings().recent.len(), 3);
-        engine.signal("1", generation, Signal::Disconnected);
-        engine.update("1", generation, |_| {}).unwrap();
-        assert_eq!(engine.discord_settings().recent.len(), 3);
-        engine.signal("1", generation, Signal::Connected);
-        assert_eq!(engine.discord_settings().recent.len(), 4);
         assert_eq!(
             engine.discord_settings().recent[0].title,
             "Account is back online"
         );
         engine.command("1", "stop").unwrap();
-        assert_eq!(engine.discord_settings().recent.len(), 4);
+        assert_eq!(engine.discord_settings().recent.len(), 2);
         drop(engine);
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -2769,14 +2814,15 @@ mod tests {
     }
     #[cfg(any(windows, target_os = "linux"))]
     #[test]
-    fn recoverable_disconnect_is_immediate_and_connected_stop_or_disable_cancel() {
+    fn recoverable_disconnect_waits_for_grace_and_connected_stop_or_disable_cancel() {
         let (engine, path) = fixture(1);
         engine.command("1", "start").unwrap();
         let generation = engine.snapshot().accounts[0].generation;
         engine.signal("1", generation, Signal::SessionLost(Some(273)));
         let mut account = engine.snapshot().accounts.remove(0);
         let start = account.disconnected_since.unwrap();
-        assert!(recovery_due(&account, start));
+        assert!(!recovery_due(&account, start + ChronoDuration::seconds(29)));
+        assert!(recovery_due(&account, start + ChronoDuration::seconds(30)));
         assert!(!account.public_fallback_active);
         assert_eq!(account.failures, 0);
         engine.signal("1", generation, Signal::Connected);
@@ -2859,7 +2905,11 @@ mod tests {
             assert_eq!(failed.target, before.target);
             assert!(!failed.public_fallback_active);
             assert_eq!(failed.failures, 0);
-            assert_eq!(recovery_due(&failed, Utc::now()), terminal);
+            assert!(!recovery_due(&failed, Utc::now()));
+            assert_eq!(
+                recovery_due(&failed, Utc::now() + ChronoDuration::seconds(30)),
+                terminal
+            );
             engine.observe("1", generation, &identity, Observation::DiskLog(events[0]));
             assert_eq!(
                 engine.snapshot().accounts[0].disconnected_since,
@@ -2868,7 +2918,10 @@ mod tests {
             engine
                 .update("1", generation, |a| a.auto_recovery = false)
                 .unwrap();
-            assert!(!recovery_due(&engine.snapshot().accounts[0], Utc::now()));
+            assert!(!recovery_due(
+                &engine.snapshot().accounts[0],
+                Utc::now() + ChronoDuration::seconds(31)
+            ));
             engine
                 .update("1", generation, |a| a.auto_recovery = true)
                 .unwrap();
@@ -2879,7 +2932,10 @@ mod tests {
                 disk("[FLog::Network] Connection accepted"),
             );
             assert_eq!(engine.snapshot().accounts[0].status, Status::Running);
-            assert!(!recovery_due(&engine.snapshot().accounts[0], Utc::now()));
+            assert!(!recovery_due(
+                &engine.snapshot().accounts[0],
+                Utc::now() + ChronoDuration::seconds(31)
+            ));
             engine.command("1", "stop").unwrap();
             engine.observe("1", generation, &identity, Observation::DiskLog(events[0]));
             assert_eq!(engine.snapshot().accounts[0].status, Status::Stopped);
