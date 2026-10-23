@@ -443,7 +443,10 @@ impl Engine {
             self.commit_close_state(&mut state, next)?;
             return Err("Replacement readiness changed before close; client preserved".into());
         }
-        let force = attempts.force(&expected.id, &intent, identity, now + started.elapsed());
+        // A disconnected client may keep running in the tray after WM_CLOSE.
+        // End its verified process lifetime before allowing a replacement.
+        let force = intent.reason == CloseReason::AutomaticRecovery
+            || attempts.force(&expected.id, &intent, identity, now + started.elapsed());
         match effect(identity, force) {
             Ok(()) => {
                 attempts.record(&expected.id, &intent, identity, now + started.elapsed());
