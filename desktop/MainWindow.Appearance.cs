@@ -17,7 +17,7 @@ public sealed partial class MainWindow
     [
         (AccountsTab, AccountsPage, 0), (GamesTab, GamesPage, 4),
         (RecoveryTab, RecoveryPage, 3), (PresetsTab, PresetsPage, 6),
-        (SettingsTab, SettingsPage, 1), (DiscordTab, DiscordPage, 7),
+        (SettingsTab, SettingsPage, 1), (GameJoiningTab, GameJoiningPage, 11), (DiscordTab, DiscordPage, 7),
         (BackupsTab, BackupsPage, 8), (UpdatesTab, UpdatesPage, 9),
         (SupportTab, SupportPage, 10)
     ];

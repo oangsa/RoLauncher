@@ -26,7 +26,6 @@ public sealed partial class MainWindow
     private void UpdateManagement(Snapshot snapshot)
     {
         UpdateWorkspace(snapshot);
-        CompatibilityText.Text = snapshot.Compatibility;
         if (!_savingUpdateSettings)
         {
             _syncingUpdateSettings = true;
@@ -78,10 +77,10 @@ public sealed partial class MainWindow
     }
     private void ShowHistoryPage()
     {
-        _historyPage = Math.Clamp(_historyPage, 0, Math.Max(0, (_history.Length - 1) / 100));
-        HistoryList.ItemsSource = _history.Skip(_historyPage * 100).Take(100).ToArray();
-        HistoryPageSummary.Text = _history.Length == 0 ? "No matching activity" : $"{_historyPage * 100 + 1}–{Math.Min((_historyPage + 1) * 100, _history.Length)} of {_history.Length}";
-        HistoryPrevious.IsEnabled = _historyPage > 0; HistoryNext.IsEnabled = (_historyPage + 1) * 100 < _history.Length;
+        _historyPage = Math.Clamp(_historyPage, 0, Math.Max(0, (_history.Length - 1) / 10));
+        HistoryList.ItemsSource = _history.Skip(_historyPage * 10).Take(10).ToArray();
+        HistoryPageSummary.Text = _history.Length == 0 ? "No matching activity" : $"{_historyPage * 10 + 1}–{Math.Min((_historyPage + 1) * 10, _history.Length)} of {_history.Length}";
+        HistoryPrevious.IsEnabled = _historyPage > 0; HistoryNext.IsEnabled = (_historyPage + 1) * 10 < _history.Length;
     }
     private void HistoryPage_Click(object sender, RoutedEventArgs e) { _historyPage += int.Parse((string)((Button)sender).Tag); ShowHistoryPage(); }
     private async void History_Changed(object sender, SelectionChangedEventArgs e)

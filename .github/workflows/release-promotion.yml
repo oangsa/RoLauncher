@@ -24,7 +24,7 @@ jobs:
       github.event.workflow_run.head_repository.full_name == github.repository &&
       (github.event.workflow_run.head_branch == 'main' || github.event.workflow_run.name == 'Beta release')
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     permissions:
       contents: write
       actions: read
@@ -35,8 +35,36 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Verify source, intent, checks, rules and data-only artifacts
+      - name: Verify candidate without release writes
+        id: admission
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_PROMOTION_ENABLED: ${{ vars.RELEASE_PROMOTION_ENABLED }}
-        run: python3 scripts/release_promotion.py
+        run: python3 scripts/release_promotion.py --stage admit
+      - name: Check one-time App configuration
+        if: steps.admission.outputs.admitted == 'true'
+        env:
+          CLIENT_ID: ${{ vars.RELEASE_CONTROLS_APP_CLIENT_ID }}
+          PRIVATE_KEY: ${{ secrets.RELEASE_CONTROLS_APP_PRIVATE_KEY }}
+        run: |
+          if [ -z "$CLIENT_ID" ] || [ -z "$PRIVATE_KEY" ]; then
+            echo "::error::Configure the release-controls App once; see docs/OWNER-EVIDENCE.md. No local signing is required."
+            exit 1
+          fi
+      - name: Create repository-scoped control token
+        if: steps.admission.outputs.admitted == 'true'
+        id: controls
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        with:
+          client-id: ${{ vars.RELEASE_CONTROLS_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_CONTROLS_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: RoLauncher
+          permission-administration: write
+      - name: Verify live controls and publish checked artifacts
+        if: steps.admission.outputs.admitted == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_CONTROLS_TOKEN: ${{ steps.controls.outputs.token }}
+          RELEASE_PROMOTION_ENABLED: ${{ vars.RELEASE_PROMOTION_ENABLED }}
+        run: python3 scripts/release_promotion.py --stage automatic

@@ -4,6 +4,310 @@ struct Fixture {
     engine: Engine,
     path: std::path::PathBuf,
 }
+
+#[test]
+fn transient_discovery_failure_defers_recovery_without_latching_a_pause() {
+    for submitted in [false, true] {
+        let f = Fixture::new();
+        f.recovery();
+        let now = Instant::now();
+        let mut attempts = CloseAttempts::default();
+        if submitted {
+            assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
+        }
+        let before = f.account();
+        let _ = f.engine.close_owned(
+            &before,
+            now + Duration::from_secs(6),
+            &mut attempts,
+            || Err("Windows process query failed".into()),
+            |_, _| panic!("No close without verification"),
+        );
+        let waiting = f.account();
+        assert_ne!(
+            waiting.status,
+            Status::NeedsAttention,
+            "Temporary discovery failure must not permanently pause recovery"
+        );
+        assert_eq!(waiting.failures, before.failures);
+        assert_eq!(waiting.next_retry, before.next_retry);
+        assert!(!waiting.close_intent.as_ref().is_some_and(|i| i.denied));
+        assert!(!launch_ready(
+            &waiting,
+            Utc::now() + ChronoDuration::hours(1)
+        ));
+        assert_eq!(
+            f.tick(&waiting, now + Duration::from_secs(12), &mut attempts),
+            vec![submitted]
+        );
+    }
+}
+
+#[test]
+fn exited_bootstrap_adopts_a_unique_surviving_client_without_a_second_launch() {
+    let f = Fixture::new();
+    let original = f.account();
+    let identity = original.process.clone().unwrap();
+    let mut players = f.players();
+    players[0].pid += 100;
+    players[0].creation_time = "successor-start".into();
+    let successor = players[0].identity(original.generation);
+    assert!(
+        f.engine
+            .reconcile_exit(&original, &identity, true, &players, false)
+    );
+    let current = f.account();
+    assert_eq!(current.process, Some(successor));
+    assert_eq!(current.status, Status::Unknown);
+    assert_eq!(current.failures, original.failures);
+    assert_eq!(current.tracker, original.tracker);
+    assert!(!launch_ready(
+        &current,
+        Utc::now() + ChronoDuration::hours(1)
+    ));
+}
+
+#[test]
+fn exited_client_waits_for_fresh_discovery_and_the_launch_handoff_window() {
+    let f = Fixture::new();
+    let original = f.account();
+    let identity = original.process.clone().unwrap();
+    assert!(
+        !f.engine
+            .reconcile_exit(&original, &identity, true, &[], false)
+    );
+    let waiting = f.account();
+    assert_eq!(waiting.process, original.process);
+    assert_eq!(waiting.failures, original.failures);
+    assert!(!launch_ready(
+        &waiting,
+        Utc::now() + ChronoDuration::hours(1)
+    ));
+    assert!(
+        f.engine
+            .reconcile_exit(&waiting, &identity, true, &[], true)
+    );
+    let exited = f.account();
+    assert!(exited.process.is_none() && exited.tracker.is_none());
+    assert_eq!(exited.failures, original.failures + 1);
+    assert!(launch_ready(&exited, Utc::now() + ChronoDuration::hours(1)));
+}
+
+#[test]
+fn exit_reconciliation_rejects_ambiguity_shared_ownership_and_stale_commands() {
+    for scenario in [
+        "ambiguous",
+        "shared",
+        "stale",
+        "old-process",
+        "different-tracker",
+    ] {
+        let f = Fixture::new();
+        let original = f.account();
+        let identity = original.process.clone().unwrap();
+        let mut players = f.players();
+        if scenario != "old-process" {
+            players[0].pid += 100;
+        }
+        match scenario {
+            "ambiguous" => players.push(players[0].clone()),
+            "shared" => {
+                let other = f.engine.snapshot().accounts[1].clone();
+                f.engine
+                    .update("2", other.generation, |a| {
+                        a.tracker = original.tracker.clone()
+                    })
+                    .unwrap();
+            }
+            "stale" => {
+                f.engine.command("1", "stop").unwrap();
+            }
+            "different-tracker" => players[0].tracker = "unrelated".into(),
+            _ => {}
+        }
+        assert!(
+            !f.engine
+                .reconcile_exit(&original, &identity, true, &players, false),
+            "{scenario}"
+        );
+        assert_eq!(f.account().process, original.process, "{scenario}");
+        assert!(!launch_ready(
+            &f.account(),
+            Utc::now() + ChronoDuration::hours(1)
+        ));
+    }
+}
+
+#[test]
+fn handoff_discards_old_automatic_authority_but_retains_explicit_commands_and_pauses() {
+    for action in ["recover", "stop", "restart", "permission"] {
+        let f = Fixture::new();
+        let now = Instant::now();
+        let mut attempts = CloseAttempts::default();
+        match action {
+            "recover" => {
+                f.recovery();
+                assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
+            }
+            "permission" => {
+                let a = f.account();
+                f.engine.signal("1", a.generation, Signal::PermissionDenied);
+            }
+            _ => {
+                f.engine.command("1", action).unwrap();
+            }
+        }
+        let original = f.account();
+        let identity = original.process.clone().unwrap();
+        let mut players = f.players();
+        players[0].pid += 100;
+        players[0].creation_time = "successor".into();
+        assert!(
+            f.engine
+                .reconcile_exit(&original, &identity, true, &players, false)
+        );
+        let successor = f.account();
+        assert_eq!(successor.failures, original.failures);
+        match action {
+            "recover" => {
+                assert!(successor.close_intent.is_none());
+                assert_eq!(successor.recovery_evidence, RecoveryEvidence::Unavailable);
+                assert!(
+                    f.tick(&successor, now + Duration::from_secs(6), &mut attempts)
+                        .is_empty()
+                );
+                f.engine.observe(
+                    "1",
+                    successor.generation,
+                    successor.process.as_ref().unwrap(),
+                    Observation::DiskLog(
+                        crate::logs::parse_event("[FLog::Network] Connection accepted").unwrap(),
+                    ),
+                );
+                assert_eq!(f.account().status, Status::Running);
+            }
+            "permission" => {
+                assert_eq!(successor.status, Status::NeedsAttention);
+                assert_eq!(successor.recovery_reason, "Permission");
+            }
+            _ => {
+                assert_eq!(successor.close_intent, original.close_intent);
+                assert_eq!(
+                    f.tick(&successor, now + Duration::from_secs(6), &mut attempts),
+                    vec![false]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn exit_settlement_requires_both_a_five_second_grace_and_the_existing_launch_deadline() {
+    let now = Instant::now();
+    let utc = Utc::now();
+    let pending = PendingExit {
+        observed: now,
+        clean: true,
+    };
+    let mut a = Account::new("1".into(), "fixture".into());
+    assert!(!pending.settled(&a, now + Duration::from_secs(4), utc));
+    assert!(pending.settled(&a, now + Duration::from_secs(5), utc));
+    a.ownership_deadline = Some(utc + ChronoDuration::seconds(90));
+    assert!(!pending.settled(
+        &a,
+        now + Duration::from_secs(89),
+        utc + ChronoDuration::seconds(89)
+    ));
+    assert!(pending.settled(
+        &a,
+        now + Duration::from_secs(90),
+        utc + ChronoDuration::seconds(90)
+    ));
+}
+
+#[test]
+fn recovery_flow_replays_redirect_handoff_kick_verification_retry_and_other_account() {
+    let f = Fixture::new();
+    let other = f.engine.snapshot().accounts[1].clone();
+    let original = f.account();
+    let identity = original.process.clone().unwrap();
+    let mut attempts = CloseAttempts::default();
+    let now = Instant::now();
+    for line in [
+        "[FLog::Network] Connection lost",
+        "[FLog::Network] Connection accepted",
+    ] {
+        f.engine.observe(
+            "1",
+            original.generation,
+            &identity,
+            Observation::DiskLog(crate::logs::parse_event(line).unwrap()),
+        );
+    }
+    assert!(f.tick(&f.account(), now, &mut attempts).is_empty());
+    assert_eq!(f.account().failures, 0);
+    let mut players = f.players();
+    players[0].pid += 100;
+    players[0].creation_time = "handoff".into();
+    assert!(
+        f.engine
+            .reconcile_exit(&original, &identity, true, &players, false)
+    );
+    let successor = f.account();
+    let identity = successor.process.clone().unwrap();
+    f.engine.observe(
+        "1",
+        successor.generation,
+        &identity,
+        Observation::DiskLog(
+            crate::logs::parse_event("[FLog::Network] Connection accepted").unwrap(),
+        ),
+    );
+    f.engine.observe(
+        "1",
+        successor.generation,
+        &identity,
+        Observation::DiskLog(
+            crate::logs::parse_event("[FLog::Network] Sending disconnect with reason: 267")
+                .unwrap(),
+        ),
+    );
+    f.engine.elapse_reconnect_grace("1", successor.generation);
+    f.engine
+        .close_owned(
+            &f.account(),
+            now,
+            &mut attempts,
+            || Err("query unavailable".into()),
+            |_, _| panic!("Unverified close"),
+        )
+        .unwrap();
+    assert_eq!(f.account().failures, 0);
+    assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
+    assert_eq!(
+        f.tick(&f.account(), now + Duration::from_secs(6), &mut attempts),
+        vec![true]
+    );
+    let closing = f.account();
+    assert_eq!(closing.failures, 1);
+    assert!(!launch_ready(
+        &closing,
+        Utc::now() + ChronoDuration::hours(1)
+    ));
+    assert!(
+        f.engine
+            .reconcile_exit(&closing, &identity, false, &[], true)
+    );
+    let retry = f.account();
+    assert_eq!(retry.failures, 1);
+    assert!(!launch_ready(&retry, Utc::now()));
+    assert!(launch_ready(&retry, retry.next_retry.unwrap()));
+    let unchanged = f.engine.snapshot().accounts[1].clone();
+    assert_eq!(unchanged.process, other.process);
+    assert_eq!(unchanged.generation, other.generation);
+    assert_eq!(unchanged.failures, other.failures);
+    assert_eq!(unchanged.status, other.status);
+}
 impl Fixture {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!("pr07-effects-{}", Uuid::new_v4()));
@@ -331,7 +635,7 @@ fn restart_closes_current_generation_but_stale_restart_cannot_close_newer_client
     );
 }
 #[test]
-fn recovery_and_force_escalation_remain_available_under_the_same_valid_intent() {
+fn recovery_termination_remains_available_under_the_same_valid_intent() {
     let f = Fixture::new();
     f.recovery();
     let now = Instant::now();
@@ -346,14 +650,31 @@ fn recovery_and_force_escalation_remain_available_under_the_same_valid_intent() 
         f.engine.activity(Some("1")).first().unwrap().status,
         Status::Backoff
     );
+    let submitted = attempts.0[0].started;
+    let retry = f.account().next_retry;
+    let intent = f.account().close_intent;
     assert_eq!(
-        f.tick(&f.account(), now + Duration::from_secs(6), &mut attempts),
+        f.tick(
+            &f.account(),
+            submitted + Duration::from_secs(4),
+            &mut attempts
+        ),
+        vec![false]
+    );
+    assert_eq!(
+        f.tick(
+            &f.account(),
+            submitted + Duration::from_secs(5),
+            &mut attempts
+        ),
         vec![true]
     );
     assert_eq!(f.account().failures, 1);
+    assert_eq!(f.account().next_retry, retry);
+    assert_eq!(f.account().close_intent, intent);
 }
 #[test]
-fn recovery_disabled_after_graceful_close_cannot_force_or_consume_more_retries() {
+fn recovery_disabled_after_close_cannot_repeat_termination_or_consume_more_retries() {
     let f = Fixture::new();
     f.recovery();
     let now = Instant::now();
@@ -495,7 +816,7 @@ fn failed_graceful_close_never_becomes_a_force_attempt_on_later_ticks() {
     assert_eq!(f.account().failures, 0);
 }
 #[test]
-fn connected_signal_revokes_recovery_before_force_escalation() {
+fn connected_signal_revokes_further_recovery_termination() {
     let f = Fixture::new();
     f.recovery();
     let now = Instant::now();
@@ -703,10 +1024,10 @@ async fn obsolete_pending_launch_blocks_replacement_before_credentials_or_dispat
             a.status = Status::NeedsAttention;
         })
         .unwrap();
-    f.engine.command("1", "start").unwrap();
+    assert!(f.engine.command("1", "start").is_err());
     let queued = f.account();
     f.engine.launch_one(queued).await;
-    assert_eq!(f.account().status, Status::Queued);
+    assert_eq!(f.account().status, Status::NeedsAttention);
     assert!(f.account().last_error.is_none());
     assert_eq!(f.account().failures, 0);
 }
@@ -932,13 +1253,15 @@ fn unsaved_first_recovery_denial_cannot_regain_authority_with_a_new_automatic_in
         let blocked_path = f.path.join("accounts.json.tmp");
         std::fs::create_dir(&blocked_path).unwrap();
         let a = f.account();
+        let mut ambiguous = f.players();
+        ambiguous.push(ambiguous[0].clone());
         assert!(
             f.engine
                 .close_owned(
                     &a,
                     now,
                     &mut attempts,
-                    || Err("synthetic discovery failure".into()),
+                    || Ok(ambiguous),
                     |_, _| panic!("unverified recovery cannot close"),
                 )
                 .is_err()
@@ -1124,7 +1447,7 @@ fn late_explicit_stop_closes_and_force_requires_the_same_current_stop() {
     assert_eq!(f.account().status, Status::NeedsAttention);
 }
 #[test]
-fn retired_ambiguous_obsolete_expired_and_reused_identities_never_close() {
+fn retired_stop_accepts_late_discovery_but_rejects_ambiguous_obsolete_and_reused_identity() {
     for scenario in ["ambiguous", "obsolete", "expired", "pid-reuse"] {
         let f = Fixture::new();
         let (mut old, mut players) = pending_stop(&f);
@@ -1186,8 +1509,15 @@ fn retired_ambiguous_obsolete_expired_and_reused_identities_never_close() {
                 },
             )
             .unwrap();
-        assert!(!closed, "{scenario}");
-        assert_eq!(f.account().status, Status::NeedsAttention);
+        assert_eq!(closed, scenario == "expired", "{scenario}");
+        assert_eq!(
+            f.account().status,
+            if scenario == "expired" {
+                Status::Stopped
+            } else {
+                Status::NeedsAttention
+            }
+        );
     }
 }
 #[test]
@@ -1547,4 +1877,652 @@ fn legacy_intent_without_episode_identity_requires_and_accepts_fresh_stop() {
         )
         .unwrap();
     assert!(closed);
+}
+
+#[test]
+fn merged_recovery_reserves_retry_before_close_and_preserves_rate_limit() {
+    let f = Fixture::new();
+    f.recovery();
+    let deadline = Utc::now() + ChronoDuration::seconds(120);
+    let a = f.account();
+    f.engine
+        .update("1", a.generation, |a| {
+            a.recovery_reason = "RateLimit".into();
+            a.next_retry = Some(deadline);
+        })
+        .unwrap();
+    let a = f.account();
+    let mut attempts = CloseAttempts::default();
+    let players = f.players();
+    assert!(
+        f.engine
+            .close_owned(
+                &a,
+                Instant::now(),
+                &mut attempts,
+                || Ok(players),
+                |_, _| {
+                    let saved = f.engine.0.store.load().unwrap().accounts.remove(0).account;
+                    assert_eq!(
+                        saved.failures, 1,
+                        "retry must be durable before the close effect"
+                    );
+                    assert!(saved.next_retry.is_some_and(|time| time >= deadline));
+                    Ok(())
+                }
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        f.account().recovery_evidence,
+        RecoveryEvidence::RecoveryStarted
+    );
+}
+
+#[test]
+fn merged_recovery_at_retry_cap_preserves_the_live_client() {
+    let f = Fixture::new();
+    f.recovery();
+    let a = f.account();
+    f.engine
+        .update("1", a.generation, |a| a.failures = 4)
+        .unwrap();
+    let mut attempts = CloseAttempts::default();
+    assert!(
+        f.tick(&f.account(), Instant::now(), &mut attempts)
+            .is_empty()
+    );
+    assert_eq!(f.account().failures, 5);
+    assert_eq!(f.account().status, Status::NeedsAttention);
+    assert!(f.account().process.is_some());
+}
+
+#[test]
+fn redirect_across_monitor_polls_preserves_the_client_and_retry_budget() {
+    for disconnect in [
+        "[FLog::Network] Connection lost",
+        "[DFLog::NetworkClient] ID_CONNECTION_LOST",
+        "[FLog::Network] Sending disconnect with reason: 267",
+        "[FLog::Network] Sending disconnect with reason: 273",
+    ] {
+        let f = Fixture::new();
+        let original = f.account();
+        let identity = original.process.clone().unwrap();
+        let other = f.engine.snapshot().accounts[1].clone();
+        let log = f.path.join("redirect.log");
+        std::fs::write(&log, format!("{disconnect}\n")).unwrap();
+        let mut tail = crate::logs::Tail::new(log.clone(), false).unwrap();
+        let mut attempts = CloseAttempts::default();
+        for event in tail.read_events().unwrap() {
+            f.engine.observe(
+                "1",
+                original.generation,
+                &identity,
+                Observation::DiskLog(event),
+            );
+        }
+        assert!(
+            f.tick(&f.account(), Instant::now(), &mut attempts)
+                .is_empty(),
+            "{disconnect}"
+        );
+        let start = Utc::now() - ChronoDuration::seconds(29);
+        f.engine
+            .update("1", original.generation, |a| {
+                a.disconnected_since = Some(start)
+            })
+            .unwrap();
+        assert!(
+            f.tick(&f.account(), Instant::now(), &mut attempts)
+                .is_empty()
+        );
+        // The new connection arrives in a later read, after a close opportunity.
+        use std::io::Write;
+        writeln!(
+            std::fs::OpenOptions::new().append(true).open(&log).unwrap(),
+            "[FLog::Network] Replicator created"
+        )
+        .unwrap();
+        for event in tail.read_events().unwrap() {
+            f.engine.observe(
+                "1",
+                original.generation,
+                &identity,
+                Observation::DiskLog(event),
+            );
+        }
+        assert!(
+            f.tick(&f.account(), Instant::now(), &mut attempts)
+                .is_empty()
+        );
+        let connected = f.account();
+        assert_eq!(connected.status, Status::Running);
+        assert_eq!(connected.process, original.process);
+        assert_eq!(connected.tracker, original.tracker);
+        assert_eq!(connected.target, original.target);
+        assert_eq!(connected.failures, 0);
+        assert!(connected.next_retry.is_none());
+        assert!(connected.close_intent.is_none());
+        assert!(connected.disconnected_since.is_none());
+        assert!(!launch_ready(
+            &connected,
+            Utc::now() + ChronoDuration::hours(1)
+        ));
+        assert_eq!(f.engine.snapshot().accounts[1].process, other.process);
+    }
+}
+
+#[test]
+fn native_kick_log_recovers_instead_of_waiting_for_confirmation() {
+    let f = Fixture::new();
+    let a = f.account();
+    let identity = a.process.clone().unwrap();
+    let log = f.path.join("native-kick.log");
+    // Native network messages from the reported client; no numeric 267 is logged.
+    std::fs::write(&log, concat!(
+        "2026-10-22T20:38:09.411Z,15627.411133,51ec,7 [FLog::Network] Players service requests player disconnect\n",
+        "2026-10-22T20:38:09.469Z,15627.469727,5ccc,7,Warning [FLog::Network] Lost connection with reason : You have been kicked from the game\n",
+        "2026-10-22T20:38:11.176Z,15629.176758,5ccc,6,Info [DFLog::RbxTransportDummyClient] Connection closed by server for reason: RCC: 288 (DisconnectServerShutdown)\n",
+    )).unwrap();
+    let mut tail = crate::logs::Tail::new(log, false).unwrap();
+    for event in tail.read_events().unwrap() {
+        f.engine
+            .observe("1", a.generation, &identity, Observation::DiskLog(event));
+    }
+    assert_eq!(
+        f.account().recovery_evidence,
+        RecoveryEvidence::ConfirmedTerminalDisconnect
+    );
+    assert_eq!(f.account().status, Status::Reconnecting);
+    assert!(f.account().last_error.unwrap().contains("267"));
+    f.engine.elapse_reconnect_grace("1", a.generation);
+    let mut attempts = CloseAttempts::default();
+    assert_eq!(
+        f.tick(&f.account(), Instant::now(), &mut attempts),
+        vec![false]
+    );
+    assert!(!launch_ready(
+        &f.account(),
+        Utc::now() + ChronoDuration::hours(1)
+    ));
+    let closing = f.account();
+    f.engine.owned_exit_observed(&closing, &identity, true);
+    assert!(launch_ready(
+        &f.account(),
+        Utc::now() + ChronoDuration::hours(1)
+    ));
+    assert_eq!(f.account().failures, 1);
+}
+
+#[test]
+fn terminal_disconnect_terminates_the_client_before_relaunch() {
+    for code in [267, 273, 279] {
+        let f = Fixture::new();
+        let other = f.engine.snapshot().accounts[1].process.clone();
+        let a = f.account();
+        let identity = a.process.clone().unwrap();
+        f.engine.observe(
+            "1",
+            a.generation,
+            &identity,
+            Observation::DiskLog(
+                crate::logs::parse_event(&format!(
+                    "[FLog::Network] Sending disconnect with reason: {code}"
+                ))
+                .unwrap(),
+            ),
+        );
+        f.engine.elapse_reconnect_grace("1", a.generation);
+        let mut attempts = CloseAttempts::default();
+        let now = Instant::now();
+        assert_eq!(
+            f.tick(&f.account(), now, &mut attempts),
+            vec![false],
+            "disconnect {code} must begin with a graceful close"
+        );
+        assert!(!launch_ready(
+            &f.account(),
+            Utc::now() + ChronoDuration::hours(1)
+        ));
+        assert_eq!(
+            f.tick(&f.account(), now + Duration::from_secs(6), &mut attempts),
+            vec![true],
+            "disconnect {code} must terminate a client that remains in the tray"
+        );
+        assert!(!launch_ready(
+            &f.account(),
+            Utc::now() + ChronoDuration::hours(1)
+        ));
+        let closing = f.account();
+        f.engine.owned_exit_observed(&closing, &identity, true);
+        assert!(launch_ready(
+            &f.account(),
+            Utc::now() + ChronoDuration::hours(1)
+        ));
+        assert_eq!(f.engine.snapshot().accounts[1].process, other);
+    }
+}
+
+#[test]
+fn kicked_267_closes_then_rejoins_only_after_exit() {
+    let f = Fixture::new();
+    let a = f.account();
+    let identity = a.process.clone().unwrap();
+    f.engine.observe(
+        "1",
+        a.generation,
+        &identity,
+        Observation::DiskLog(
+            crate::logs::parse_event("[FLog::Network] Sending disconnect with reason: 267")
+                .unwrap(),
+        ),
+    );
+    f.engine.elapse_reconnect_grace("1", a.generation);
+    let mut attempts = CloseAttempts::default();
+    let now = Instant::now();
+    assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
+    assert!(!launch_ready(
+        &f.account(),
+        Utc::now() + ChronoDuration::hours(1)
+    ));
+    assert_eq!(
+        f.tick(&f.account(), now + Duration::from_secs(6), &mut attempts),
+        vec![true]
+    );
+    let closing = f.account();
+    f.engine.owned_exit_observed(&closing, &identity, true);
+    assert!(launch_ready(
+        &f.account(),
+        Utc::now() + ChronoDuration::hours(1)
+    ));
+    assert_eq!(f.account().failures, 1);
+}
+
+#[test]
+fn start_cannot_replace_an_unresolved_expired_launch() {
+    let f = Fixture::new();
+    let a = f.account();
+    f.engine
+        .update("1", a.generation, |a| {
+            a.process = None;
+            a.status = Status::NeedsAttention;
+            a.ownership_deadline = Some(Utc::now() - ChronoDuration::seconds(1));
+        })
+        .unwrap();
+    assert!(f.engine.command("1", "start").is_err());
+    assert_eq!(f.account().tracker, a.tracker);
+    f.engine.command("1", "stop").unwrap();
+    assert!(f.engine.command("1", "start").is_err());
+}
+
+#[test]
+fn global_close_stops_recovery_and_includes_untracked_players() {
+    let f = Fixture::new();
+    let mut players = f.players();
+    players.push(platform::Player {
+        pid: 9999,
+        creation_time: "external".into(),
+        tracker: String::new(),
+    });
+    let mut closed = Vec::new();
+    assert_eq!(
+        f.engine
+            .close_all_with(
+                || Ok(players),
+                |p| {
+                    closed.push(p.pid);
+                    Ok(())
+                }
+            )
+            .unwrap(),
+        3
+    );
+    assert_eq!(closed, vec![4201, 4202, 9999]);
+    let saved = Store::new(f.path.clone()).unwrap().load().unwrap();
+    assert!(
+        saved
+            .accounts
+            .iter()
+            .all(|a| !a.account.desired_running && a.account.next_retry.is_none())
+    );
+    assert!(
+        f.engine
+            .snapshot()
+            .accounts
+            .iter()
+            .all(|a| !launch_ready(a, Utc::now()))
+    );
+}
+
+#[test]
+fn global_close_persistence_failure_has_no_effect_and_partial_failure_stops_rejoin() {
+    let f = Fixture::new();
+    std::fs::create_dir(f.path.join("accounts.json.tmp")).unwrap();
+    assert!(
+        f.engine
+            .close_all_with(
+                || panic!("must persist before discovery"),
+                |_| panic!("must not close")
+            )
+            .is_err()
+    );
+    std::fs::remove_dir(f.path.join("accounts.json.tmp")).unwrap();
+    let players = f.players();
+    let mut calls = 0;
+    let error = f
+        .engine
+        .close_all_with(
+            || Ok(players),
+            |_| {
+                calls += 1;
+                if calls == 1 {
+                    Err("access denied".into())
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+    assert_eq!(calls, 2);
+    assert!(error.contains("Closed 1") && error.contains("1 could not"));
+    assert!(
+        f.engine
+            .snapshot()
+            .accounts
+            .iter()
+            .all(|a| !a.desired_running)
+    );
+}
+
+#[test]
+fn blocked_start_cleanup_requires_consent_and_protects_saved_launches() {
+    let f = Fixture::new();
+    f.engine.0.launch_allowed.store(false, Ordering::Release);
+    f.engine
+        .transaction(|s| {
+            f.engine
+                .cleanup_launch_conflict(s, |_| panic!("cleanup requires consent"))?;
+            s.database.external_background_cleanup_enabled = true;
+            f.engine.cleanup_launch_conflict(s, |protected| {
+                assert_eq!(protected.len(), 2);
+                assert_eq!(
+                    protected[0],
+                    s.database.accounts[0].account.process.clone().unwrap()
+                );
+                f.engine.0.launch_allowed.store(true, Ordering::Release);
+                Ok(())
+            })?;
+            f.engine
+                .cleanup_launch_conflict(s, |_| panic!("ready launches need no cleanup"))?;
+            f.engine.0.launch_allowed.store(false, Ordering::Release);
+            s.database.accounts[0].account.process = None;
+            assert!(
+                f.engine
+                    .cleanup_launch_conflict(s, |_| panic!("unresolved clients stay protected"))
+                    .is_err()
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn automatic_close_failure_resumes_only_after_exact_exit() {
+    let f = Fixture::new();
+    f.recovery();
+    let original = f.account();
+    let identity = original.process.clone().unwrap();
+    let other = f.engine.snapshot().accounts[1].clone();
+    let players = f.players();
+    let mut attempts = CloseAttempts::default();
+    assert!(
+        f.engine
+            .close_owned(
+                &original,
+                Instant::now(),
+                &mut attempts,
+                || Ok(players),
+                |_, _| Err("synthetic native close failure".into()),
+            )
+            .is_err()
+    );
+    let denied = f.account();
+    assert_eq!(denied.status, Status::NeedsAttention);
+    assert!(denied.close_intent.as_ref().unwrap().denied);
+    let retry = denied.next_retry;
+    assert!(
+        f.tick(
+            &denied,
+            Instant::now() + Duration::from_secs(60),
+            &mut attempts
+        )
+        .is_empty()
+    );
+    assert!(!launch_ready(
+        &f.account(),
+        Utc::now() + ChronoDuration::hours(1)
+    ));
+    let mut stale = identity.clone();
+    stale.creation_time = "reused-pid".into();
+    f.engine.owned_exit_observed(&denied, &stale, false);
+    assert_eq!(f.account().status, Status::NeedsAttention);
+    f.engine.owned_exit_observed(&denied, &identity, false);
+    let resumed = f.account();
+    assert_eq!(resumed.status, Status::Backoff);
+    assert_eq!(resumed.failures, 1);
+    assert_eq!(resumed.next_retry, retry);
+    assert!(resumed.close_intent.is_none());
+    assert!(resumed.process.is_none() && resumed.tracker.is_none());
+    assert!(launch_ready(
+        &resumed,
+        Utc::now() + ChronoDuration::hours(1)
+    ));
+    assert_eq!(f.engine.snapshot().accounts[1].process, other.process);
+}
+
+#[test]
+fn saved_automatic_close_failure_resumes_only_without_a_client() {
+    for exited in [false, true] {
+        let f = Fixture::new();
+        f.recovery();
+        let players = f.players();
+        assert!(
+            f.engine
+                .close_owned(
+                    &f.account(),
+                    Instant::now(),
+                    &mut CloseAttempts::default(),
+                    || Ok(players),
+                    |_, _| Err("synthetic native close failure".into()),
+                )
+                .is_err()
+        );
+        let denied = f.account();
+        if exited {
+            // Replay the persisted state from versions that retained the denial after exit.
+            f.engine
+                .update("1", denied.generation, |a| {
+                    a.process = None;
+                    a.tracker = None;
+                    a.recovery_process = None;
+                    a.recovery_evidence = RecoveryEvidence::Unavailable;
+                })
+                .unwrap();
+        }
+        let reopened = Engine::open(Store::new(f.path.clone()).unwrap(), "test".into()).unwrap();
+        let a = reopened.snapshot().accounts.remove(0);
+        assert_eq!(
+            a.status,
+            if exited {
+                Status::Backoff
+            } else {
+                Status::NeedsAttention
+            }
+        );
+        assert_eq!(a.failures, 1);
+        assert_eq!(a.next_retry, denied.next_retry);
+        assert_eq!(a.close_intent.is_none(), exited);
+    }
+}
+
+#[test]
+fn disk_reconnect_during_graceful_close_cancels_force_and_relaunch() {
+    let f = Fixture::new();
+    let original = f.account();
+    let identity = original.process.clone().unwrap();
+    let log = f.path.join("closing-reconnect.log");
+    std::fs::write(&log, "[FLog::Network] Connection lost\n").unwrap();
+    let mut tail = crate::logs::Tail::new(log.clone(), false).unwrap();
+    for event in tail.read_events().unwrap() {
+        f.engine.observe(
+            "1",
+            original.generation,
+            &identity,
+            Observation::DiskLog(event),
+        );
+    }
+    f.engine.elapse_reconnect_grace("1", original.generation);
+    let now = Instant::now();
+    let mut attempts = CloseAttempts::default();
+    assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
+    use std::io::Write;
+    writeln!(
+        std::fs::OpenOptions::new().append(true).open(log).unwrap(),
+        "[FLog::Network] Replicator created"
+    )
+    .unwrap();
+    for event in tail.read_events().unwrap() {
+        f.engine.observe(
+            "1",
+            original.generation,
+            &identity,
+            Observation::DiskLog(event),
+        );
+    }
+    assert!(
+        f.tick(&f.account(), now + Duration::from_secs(6), &mut attempts)
+            .is_empty()
+    );
+    let connected = f.account();
+    assert_eq!(connected.status, Status::Running);
+    assert_eq!(connected.process, original.process);
+    assert!(connected.close_intent.is_none());
+    assert!(connected.next_retry.is_none());
+    assert!(!launch_ready(
+        &connected,
+        Utc::now() + ChronoDuration::hours(1)
+    ));
+}
+
+#[test]
+fn automatic_force_revalidates_ownership_after_graceful_submission() {
+    for scenario in ["ambiguous", "pid", "creation"] {
+        let f = Fixture::new();
+        f.recovery();
+        let now = Instant::now();
+        let mut attempts = CloseAttempts::default();
+        assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
+        let mut players = f.players();
+        match scenario {
+            "ambiguous" => players.push(platform::Player {
+                pid: 9999,
+                creation_time: "other".into(),
+                tracker: players[0].tracker.clone(),
+            }),
+            "pid" => players[0].pid = 9999,
+            "creation" => players[0].creation_time = "reused".into(),
+            _ => {}
+        }
+        let _ = f.engine.close_owned(
+            &f.account(),
+            now + Duration::from_secs(6),
+            &mut attempts,
+            || Ok(players),
+            |_, _| panic!("invalid ownership must prevent force"),
+        );
+        assert_eq!(f.account().status, Status::NeedsAttention, "{scenario}");
+        assert!(f.account().process.is_some());
+        assert_eq!(f.account().failures, 1);
+    }
+}
+
+#[test]
+fn automatic_close_waits_for_exit_when_fresh_discovery_loses_the_process() {
+    for graceful_submitted in [false, true] {
+        let f = Fixture::new();
+        f.recovery();
+        let now = Instant::now();
+        let mut attempts = CloseAttempts::default();
+        if graceful_submitted {
+            assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
+        }
+        let before = f.account();
+        let identity = before.process.clone().unwrap();
+        let players = f
+            .players()
+            .into_iter()
+            .filter(|p| p.pid != identity.pid)
+            .collect();
+        f.engine
+            .close_owned(
+                &before,
+                now + Duration::from_secs(6),
+                &mut attempts,
+                || Ok(players),
+                |_, _| panic!("Missing process cannot authorize close"),
+            )
+            .unwrap();
+        let waiting = f.account();
+        assert_ne!(waiting.status, Status::NeedsAttention);
+        assert!(!waiting.close_intent.as_ref().is_some_and(|i| i.denied));
+        assert_eq!(waiting.failures, before.failures);
+        assert_eq!(waiting.next_retry, before.next_retry);
+        assert!(!launch_ready(
+            &waiting,
+            Utc::now() + ChronoDuration::hours(1)
+        ));
+        let mut stale = identity.clone();
+        stale.creation_time = "reused-pid".into();
+        f.engine.owned_exit_observed(&waiting, &stale, false);
+        assert!(f.account().process.is_some());
+        f.engine.owned_exit_observed(&waiting, &identity, false);
+        let exited = f.account();
+        assert_eq!(exited.status, Status::Backoff);
+        assert_eq!(exited.failures, 1);
+        assert!(exited.process.is_none() && exited.tracker.is_none());
+        assert!(launch_ready(&exited, Utc::now() + ChronoDuration::hours(1)));
+    }
+}
+
+#[test]
+fn missing_process_does_not_override_policy_manual_or_shared_ownership_denials() {
+    for scenario in ["policy", "manual", "shared"] {
+        let f = Fixture::new();
+        f.recovery();
+        let now = Instant::now();
+        let mut attempts = CloseAttempts::default();
+        assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
+        match scenario {
+            "policy" => f.engine.set_launch_allowed(false),
+            "manual" => {
+                f.engine.command("1", "restart").unwrap();
+            }
+            _ => {
+                let tracker = f.account().tracker;
+                let other = f.engine.snapshot().accounts[1].clone();
+                f.engine
+                    .update("2", other.generation, |a| a.tracker = tracker)
+                    .unwrap();
+            }
+        }
+        let _ = f.engine.close_owned(
+            &f.account(),
+            now + Duration::from_secs(6),
+            &mut attempts,
+            || Ok(Vec::new()),
+            |_, _| panic!("Missing process cannot override denial"),
+        );
+        assert_eq!(f.account().status, Status::NeedsAttention, "{scenario}");
+        assert!(f.account().close_intent.unwrap().denied);
+    }
 }

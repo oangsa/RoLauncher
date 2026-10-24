@@ -1,5 +1,66 @@
 # Changelog
 
+## [1.8.0] — Unreleased
+
+- Preserve unsaved client work by requiring current, verified close intent before managed session cleanup.
+- Save detailed local launch and recovery logs, including pause reasons, process ownership, retry decisions, and recent events in support exports.
+- Check for a surviving client before rejoining after a process exits, preventing replacement during a verified launch handoff.
+- Retry temporary process-verification failures without permanently pausing automatic recovery.
+- Keep brief redirects from repeating online alerts while an earlier retry is still counted.
+
+## [1.7.8] — 2026-10-24
+
+- Avoid permanently pausing automatic rejoin when a closing client disappears before fresh process verification.
+
+## [1.7.7] — 2026-10-24
+
+- Close disconnected clients gracefully before five-second force escalation; keep reconnect cancellation and verified exit before rejoin.
+- Resume automatic rejoin after a failed client close once the managed process has exited.
+- Recover saved accounts paused by this failure when RoLauncher restarts and no client remains.
+
+## [1.7.6] — 2026-10-23
+
+- Restore 30-second reconnect grace so redirects can finish without closing and reopening the client.
+- Keep brief connection-loss redirects silent in Discord; retain prompt alerts for known errors.
+
+## [1.7.5] — 2026-10-23
+
+- Rejoin after verified disconnected clients exit, including tray clients; retain retry backoff.
+
+## [1.7.4] — 2026-10-23
+
+- Recover confirmed kicks without 267; limit retries, confirm exit before replacement.
+
+## [1.7.3] — 2026-10-21
+
+- Clean tray helpers; tolerate exited processes, keep visible games and verified managed clients.
+- Retry opted-in cleanup when leftover Roblox blocks Start.
+- Move all-client stop to Accounts; drop Dashboard Integration status.
+- Separate Game joining settings from instance controls.
+- Page history/activity: 10 entries, controls below lists.
+
+## [1.7.2] — 2026-10-21
+
+- Add Close all Roblox: stop rejoin, close current-session clients, including external/hidden/tray clients.
+- Rejoin confirmed kicks (267); limit retries, confirm exit before replacement.
+- Block unresolved duplicate launches; require discovery before expiring tracking.
+- Honor Stop for late-discovered verified clients.
+
+## [1.7.1] — 2026-10-20
+
+### Fixed
+
+- Pause recovery for update 280/ban 600; retain duplicate-session details.
+- Reject oversized-output fake connections; detect spaced-HTTP-status join failures.
+- Survive malformed JSON/empty refresh responses.
+- Validate four imports concurrently; preserve order, extend large-batch timeouts.
+- Recover confirmed disconnects immediately (including 273/279); confirm exit before replacement.
+- Ignore RAM-only/unclear-transport/isolated-HTTP hints for healthy clients; pause recovery for bans/access restrictions/updates.
+- Detect disconnects through log backlogs; maintain responsive exit checks during slow discovery.
+- Search beyond 500 servers; check capacity, stop repeated pages.
+- Add background cleanup (default Off); keep visible games and saved managed clients.
+- Allow disabling multiple instances (default On); requires RoLauncher restart.
+
 Newest first; local builds use unique dev suffixes.
 1.0.0 was first public stable; earlier builds were local, and 1.1.0 was a Linux beta.
 [Validation and limits](docs/VALIDATION.md).
@@ -8,14 +69,14 @@ Newest first; local builds use unique dev suffixes.
 
 ### Added
 
-- Choose Smart/Lowest/Highest public-server selection; reported ping cannot guarantee region or local latency.
-- Choose Friend for managed accounts with the same saved game/destination, using the peer’s session for hidden presence, or Random for independent selection.
-- Persist game assignments across edits, presets, backups, and restarts; existing accounts must select their saved game again.
-- Save preferences for future starts/rejoins, with Job IDs/private links taking priority; Roblox enforces access/capacity and unavailable peers use retry/attention.
+- Add Smart/Lowest/Highest public servers; ping guarantees neither region nor local latency.
+- Add Friend joining: managed accounts, same saved game/destination; peer sessions support hidden presence, Random chooses independently.
+- Persist game assignments across edits/presets/backups/restarts; existing accounts must reselect saved game.
+- Save start/rejoin preferences; Job IDs/private links override, Roblox access/capacity apply, unavailable peers retry/need attention.
 
 ### Fixed
 
-- Recover failed HTTP joins, including timeout/Join Error 529 stuck at Unknown; retain reconnect grace, retry limits, and rejoin settings.
+- Recover failed HTTP joins/timeouts/Join Error 529 at Unknown; retain reconnect grace, retry limits/settings.
 
 ## [1.6.0] — 2026-10-09
 

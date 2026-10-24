@@ -1,0 +1,32 @@
+{
+  "schema": 2,
+  "id": "7ca5fbfd-bc27-4eb0-8b98-287ddb16aab4",
+  "version": "1.7.6",
+  "channel": "stable",
+  "source": "hotfix",
+  "baseline_tag": "v1.7.5",
+  "baseline_sha": "7cfc8db8a00b6cb795dc69952d24ce6fe379daa0",
+  "base_sha": "7cfc8db8a00b6cb795dc69952d24ce6fe379daa0",
+  "reviewed_sha": "52721d25b3befd5b5795b93d890ab5cc417c13d6",
+  "commits": [
+    "52721d25b3befd5b5795b93d890ab5cc417c13d6"
+  ],
+  "paths": [
+    "CHANGELOG.md",
+    "Cargo.lock",
+    "Cargo.toml",
+    "README.md",
+    "desktop/CHANGELOG.txt",
+    "desktop/Models.cs",
+    "docs/RELEASE-1.7.6.md",
+    "src/engine.rs",
+    "src/engine/close_tests.rs",
+    "src/ui.rs"
+  ],
+  "patch_sha256": "04240a52c9399d3a6968f7f0df834347f00b7b2cbbb19327eb59e827c6fe0fd4",
+  "review": {
+    "bug": "Immediate recovery can terminate clients during normal redirects. Restore 30-second reconnect grace and suppress brief generic Discord incidents while preserving verified ownership, exit, retry, and explicit Stop gates.",
+    "dependencies": "Based directly on published stable 1.7.5. Exact application patch and regressions reviewed; no dependency changes, experimental identity work, licensing changes, or cherry-pick prerequisites.",
+    "premium_excluded": true
+  }
+}

@@ -214,7 +214,7 @@ impl Engine {
         })
     }
     pub fn retry_now(&self, id: &str) -> Result<Operation, String> {
-        self.transaction(|s| {
+        let result = self.transaction(|s| {
             if s.network_suspended { return Err("Connectivity is suspended; wait for the network to return".into()); }
             let a = account_mut(s, id)?;
             if a.status != Status::Backoff || a.next_retry.is_none() || !a.desired_running || !a.auto_recovery {
@@ -231,7 +231,9 @@ impl Engine {
                 intent.operation_id = Some(op.id);
             }
             s.operations.insert(op.id, op.clone()); Ok(op)
-        })
+        });
+        self.journal_command(id, "retry", "api_or_desktop", &result);
+        result
     }
     /// Validate every expanded patch before committing anything, including missing IDs.
     pub fn bulk_patch(&self, input: BulkPatch) -> Result<Vec<Account>, String> {
@@ -430,7 +432,8 @@ impl Engine {
         serde_json::json!({ "version": env!("CARGO_PKG_VERSION"), "generated_at": Utc::now(), "network_suspended": s.network_suspended,
             "live_validation": "See docs/VALIDATION.md; unperformed checks remain unverified",
             "accounts": s.database.accounts.iter().map(|a| serde_json::json!({"id": a.account.id,"status": a.account.status,"failures": a.account.failures,"next_retry": a.account.next_retry,"verified_pid": a.account.process.as_ref().map(|p|p.pid),"fallback_policy": a.account.fallback_policy,"public_fallback_active": a.account.public_fallback_active})).collect::<Vec<_>>(),
-            "activity": s.database.activity })
+            "activity": s.database.activity, "recovery_log": self.0.journal.health(),
+            "recent_recovery_events": self.0.journal.recent() })
     }
     pub fn backup(&self) -> Result<String, String> {
         let s = self.0.state.lock().unwrap();
@@ -511,12 +514,10 @@ pub(super) fn record_activity(old: &State, next: &mut State) {
             Status::Launching => "Launch issued; waiting for verified ownership",
             Status::Running => "Connection confirmed in a verified client log",
             Status::Reconnecting => match a.recovery_reason.as_str() {
-                "Kick267" => "Kick detected (267); waiting through the reconnect grace period",
-                "ConnectionFailed" => {
-                    "Connection failed (279); waiting through the reconnect grace period"
-                }
-                "SessionLost" => "Session lost; waiting through the reconnect grace period",
-                _ => "Connection lost; waiting through the reconnect grace period",
+                "Kick267" => "Access restriction detected (267); check experience permissions",
+                "ConnectionFailed" => "Connection failed (279); controlled recovery requested",
+                "SessionLost" => "Session lost; controlled recovery requested",
+                _ => "Connection lost; controlled recovery requested",
             },
             Status::Backoff => "Retry scheduled; inspect the next retry time",
             Status::Unknown => "Connection or process ownership is not yet verified",

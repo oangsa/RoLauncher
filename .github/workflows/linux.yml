@@ -2,7 +2,7 @@ name: Linux development port
 
 on:
   push:
-    branches: [main, dev, 'feature/**', 'codex/**']
+    branches: [main, dev, 'feature/**', 'codex/**', 'hotfix/**']
   pull_request:
     branches: [dev, main]
   workflow_dispatch:
@@ -30,10 +30,13 @@ jobs:
         run: |
           if command -v apt-get >/dev/null; then
             apt-get update
-            DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential pkg-config libdbus-1-dev curl git python3 libicu74 libssl3 zlib1g libfontconfig1 libx11-6 libxrandr2 libxi6 libxtst6 libgl1 xvfb xauth fonts-dejavu-core
+            DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential pkg-config libdbus-1-dev dbus curl git openssh-client python3 libicu74 libssl3 zlib1g libfontconfig1 libx11-6 libxrandr2 libxi6 libxtst6 libgl1 xvfb xauth fonts-dejavu-core
           else
-            pacman -Syu --noconfirm --needed base-devel pkgconf dbus curl git python icu openssl zlib fontconfig libx11 libxrandr libxi libxtst mesa xorg-server-xvfb xorg-xauth ttf-dejavu
+            pacman -Syu --noconfirm --needed base-devel pkgconf dbus curl git openssh python icu openssl zlib fontconfig libx11 libxrandr libxi libxtst mesa xorg-server-xvfb xorg-xauth ttf-dejavu
           fi
+          # Minimal containers may ship dbus without its machine ID; Uno's X11
+          # input-method discovery reads it before the UI smoke test can start.
+          dbus-uuidgen --ensure
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -56,6 +59,8 @@ jobs:
           python3 scripts/check-release.py
           python3 scripts/test-linux-update.py
           python3 scripts/test-release-promotion.py
+          python3 scripts/test-hotfix-policy.py
+          python3 scripts/test-owner-evidence.py
           python3 scripts/test-sober-isolation-adapter.py
           dotnet restore desktop.tests/RoLauncher.Desktop.Tests.csproj --locked-mode --configfile desktop/NuGet.Config
           dotnet run --project desktop.tests --no-restore -c Release

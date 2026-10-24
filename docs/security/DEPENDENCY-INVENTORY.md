@@ -7,7 +7,7 @@ Application version and dependency locks are unchanged.
 
 1. Restore with the existing locked Windows/Linux build instructions; do not regenerate locks.
 2. Install scanners with `python scripts/security-tools.py --directory .tools/security`.
-3. Run the commands in [security gates](SECURITY-GATES.md).
+3. Run the scanner commands in [the security workflow](../../.github/workflows/security.yml).
 4. Generate the [machine inventory](dependency-inventory.json):
 
 ```powershell

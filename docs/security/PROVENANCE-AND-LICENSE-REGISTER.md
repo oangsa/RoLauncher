@@ -43,4 +43,4 @@ Git author names and an owner's statement help investigate authorship but do not
 
 Selling GPL-covered software does not grant permission to restrict recipients' GPL rights or relicense covered contributions proprietarily.
 Any proprietary licensing decision needs sufficient rights and qualified review; this PR implements none.
-Open findings are not accepted exceptions; owner decisions and exception requirements are recorded in [security gates](SECURITY-GATES.md).
+Open findings are not accepted exceptions; retain owner decisions and exception approvals in private security records.

@@ -1,4 +1,4 @@
-# RoLauncher 1.7.0
+# RoLauncher 1.8.0
 
 Manage Roblox accounts, save destinations, and rejoin disconnected sessions.
 Windows uses native WinUI; the shared Linux/Sober port remains a beta.
@@ -29,10 +29,14 @@ Keep cookies private; never include them in bug reports.
 - System/light/dark themes, tray controls, and **Download → Relaunch** updates.
 - Optional beta updates under **Settings → Updates**.
 
-1.7.0 adds Smart/Lowest/Highest server selection and Friend/Random joining.
-Smart cannot guarantee region or local latency. See [release notes](docs/RELEASE-1.7.0.md).
+Release 1.7.6 restores 30-second reconnect grace so redirects can finish before recovery closes a client.
+Persistent confirmed disconnects recover after grace; replacements wait for verified exit and retry backoff.
+RAM-only hints cannot close clients. Smart cannot guarantee region or local latency. See [release notes](docs/RELEASE-1.7.6.md).
 
 ## Documentation
+
+Unexpected launches or paused rejoin: **Support → Export report** includes recent decision logs.
+Full rotating logs and troubleshooting steps: [Diagnostic logs](docs/DIAGNOSTICS.md).
 
 [User guide](docs/USAGE.md) · [API](docs/API.md) · [Development](docs/DEVELOPMENT.md) · [Changelog](CHANGELOG.md)
 

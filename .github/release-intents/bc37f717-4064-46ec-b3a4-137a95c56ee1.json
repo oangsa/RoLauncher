@@ -1,0 +1,41 @@
+{
+  "schema": 2,
+  "id": "bc37f717-4064-46ec-b3a4-137a95c56ee1",
+  "version": "1.7.2",
+  "channel": "stable",
+  "source": "hotfix",
+  "baseline_tag": "v1.7.1",
+  "baseline_sha": "6e76c39d3f056d9611b5c31c01ee3f000c65fe37",
+  "base_sha": "6e76c39d3f056d9611b5c31c01ee3f000c65fe37",
+  "reviewed_sha": "cafee42f255728d1a01411d5f72d462dfe6f07d9",
+  "commits": [
+    "cafee42f255728d1a01411d5f72d462dfe6f07d9"
+  ],
+  "paths": [
+    "CHANGELOG.md",
+    "Cargo.lock",
+    "Cargo.toml",
+    "README.md",
+    "desktop/ApiClient.cs",
+    "desktop/CHANGELOG.txt",
+    "desktop/MainWindow.xaml",
+    "desktop/MainWindow.xaml.cs",
+    "docs/RELEASE-1.7.1.md",
+    "docs/RELEASE-1.7.2.md",
+    "src/api.rs",
+    "src/engine.rs",
+    "src/engine/close_safety.rs",
+    "src/engine/close_tests.rs",
+    "src/engine/management.rs",
+    "src/model.rs",
+    "src/platform.rs",
+    "src/platform_startup_tests.rs",
+    "src/store.rs"
+  ],
+  "patch_sha256": "94b5eeaebd821435f7f7df63a3bf03aefbc4ba5e21451fb64a97a89222b3ff34",
+  "review": {
+    "bug": "User-approved hotfix for failed Roblox auto-close/rejoin after game kicks, duplicate unresolved launches, and ghost/tray/external instance cleanup.",
+    "dependencies": "Includes the complete close-intent model, persistence, command cancellation, monitor coordination, and regression tests required by the fixes. No package dependency, experimental identity, licensing, or governance changes; based directly on published v1.7.1.",
+    "premium_excluded": true
+  }
+}

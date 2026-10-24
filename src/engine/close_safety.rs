@@ -78,25 +78,26 @@ fn verified_unique(
     matches.len() == 1
         && matches[0].pid == identity.pid
         && matches[0].creation_time == identity.creation_time
-        && !state.database.accounts.iter().any(|s| {
-            (retired || s.account.id != id)
-                && (s.account.tracker.as_ref() == Some(&identity.tracker)
-                    || s.account
-                        .process
-                        .as_ref()
-                        .is_some_and(|p| p.pid == identity.pid || p.tracker == identity.tracker))
-        })
-        && !state.database.retired_launches.iter().any(|r| {
-            r.tracker != identity.tracker
-                && r.process.as_ref().is_some_and(|p| p.pid == identity.pid)
-        })
-        && state
-            .database
-            .retired_launches
-            .iter()
-            .filter(|r| r.tracker == identity.tracker)
-            .count()
-            == usize::from(retired)
+        && uniquely_claimed(state, id, identity, retired)
+}
+
+fn uniquely_claimed(state: &State, id: &str, identity: &ProcessIdentity, retired: bool) -> bool {
+    !state.database.accounts.iter().any(|s| {
+        (retired || s.account.id != id)
+            && (s.account.tracker.as_ref() == Some(&identity.tracker)
+                || s.account
+                    .process
+                    .as_ref()
+                    .is_some_and(|p| p.pid == identity.pid || p.tracker == identity.tracker))
+    }) && !state.database.retired_launches.iter().any(|r| {
+        r.tracker != identity.tracker && r.process.as_ref().is_some_and(|p| p.pid == identity.pid)
+    }) && state
+        .database
+        .retired_launches
+        .iter()
+        .filter(|r| r.tracker == identity.tracker)
+        .count()
+        == usize::from(retired)
 }
 
 fn eligible(
@@ -133,6 +134,160 @@ fn eligible(
 }
 
 impl Engine {
+    #[cfg(any(windows, test))]
+    pub(super) fn cleanup_launch_conflict(
+        &self,
+        state: &State,
+        cleanup: impl FnOnce(&[ProcessIdentity]) -> Result<(), String>,
+    ) -> Result<(), String> {
+        if self.0.launch_allowed.load(Ordering::Acquire)
+            || !state.database.external_background_cleanup_enabled
+        {
+            return Ok(());
+        }
+        // Unknown late launches must not be mistaken for external tray leftovers.
+        if state
+            .database
+            .accounts
+            .iter()
+            .any(|s| s.account.tracker.is_some() && s.account.process.is_none())
+            || state
+                .database
+                .retired_launches
+                .iter()
+                .any(|r| r.process.is_none())
+        {
+            return Err("A saved launch still needs inspection; use Stop and wait for process discovery before starting again".into());
+        }
+        let protected: Vec<_> = state
+            .database
+            .accounts
+            .iter()
+            .filter_map(|s| s.account.process.clone())
+            .chain(
+                state
+                    .database
+                    .retired_launches
+                    .iter()
+                    .filter_map(|r| r.process.clone()),
+            )
+            .collect();
+        // The command mutex remains held through cleanup, so new launches cannot race the scan.
+        cleanup(&protected)
+    }
+
+    /// Explicit global stop: serialize launch cancellation and process termination.
+    pub fn close_all_instances(&self) -> Result<usize, String> {
+        #[cfg(windows)]
+        {
+            self.close_all_with(platform::all_players, |identity| {
+                platform::close(identity, true)?;
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while platform::alive(identity)? {
+                    if Instant::now() >= deadline {
+                        return Err("Roblox process has not exited".into());
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Ok(())
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            Err("Close all Roblox instances is available on Windows".into())
+        }
+    }
+
+    #[cfg(any(windows, test))]
+    fn close_all_with(
+        &self,
+        discover: impl FnOnce() -> Result<Vec<platform::Player>, String>,
+        mut close: impl FnMut(&ProcessIdentity) -> Result<(), String>,
+    ) -> Result<usize, String> {
+        let mut state = self.0.state.lock().unwrap();
+        let mut next = state.clone();
+        for saved in &mut next.database.accounts {
+            let a = &mut saved.account;
+            a.finish_run(Utc::now());
+            a.desired_running = false;
+            a.status = Status::Stopped;
+            a.next_retry = None;
+            a.recovery_evidence = RecoveryEvidence::Unavailable;
+            a.recovery_process = None;
+            a.generation = Uuid::new_v4();
+            let operation = Uuid::new_v4();
+            if let Some(old) = a.operation_id.and_then(|id| next.operations.get_mut(&id))
+                && old.state == "queued"
+            {
+                old.state = "cancelled".into();
+            }
+            a.operation_id = Some(operation);
+            a.close_intent = Some(CloseIntent {
+                id: Uuid::new_v4(),
+                reason: CloseReason::UserStop,
+                generation: a.generation,
+                operation_id: Some(operation),
+                denied: false,
+            });
+            if a.process.is_none()
+                && let Some(tracker) = a.tracker.take()
+            {
+                next.database.retired_launches.push(RetiredLaunch {
+                    tracker,
+                    generation: a.generation,
+                    account_id: a.id.clone(),
+                    deadline: a
+                        .ownership_deadline
+                        .take()
+                        .unwrap_or_else(|| Utc::now() + ChronoDuration::seconds(90)),
+                    close_intent: a.close_intent.clone(),
+                    process: None,
+                });
+            }
+            next.operations.insert(
+                operation,
+                Operation {
+                    id: operation,
+                    account_id: a.id.clone(),
+                    state: if a.process.is_some() {
+                        "queued"
+                    } else {
+                        "completed"
+                    }
+                    .into(),
+                    error: None,
+                },
+            );
+            for retired in next
+                .database
+                .retired_launches
+                .iter_mut()
+                .filter(|r| r.account_id == a.id)
+            {
+                retired.close_intent = a.close_intent.clone();
+            }
+        }
+        // A failed discovery/close still leaves automatic relaunch durably stopped.
+        self.commit_close_state(&mut state, next)?;
+        let players = discover()?;
+        let mut closed = 0;
+        let mut failed = 0;
+        for player in players {
+            if close(&player.identity(Uuid::nil())).is_ok() {
+                closed += 1;
+            } else {
+                failed += 1;
+            }
+        }
+        if failed > 0 {
+            Err(format!(
+                "Closed {closed} Roblox instances; {failed} could not be closed. Automatic rejoin is stopped; retry Close all Roblox."
+            ))
+        } else {
+            Ok(closed)
+        }
+    }
+
     /// Non-destructive observation: stale exit reports cannot erase current ownership.
     pub(super) fn owned_exit_observed(
         &self,
@@ -140,48 +295,93 @@ impl Engine {
         identity: &ProcessIdentity,
         clean: bool,
     ) {
-        let _ = self.update(&account.id, account.generation, |a| {
-            if a.process.as_ref() != Some(identity) {
-                return;
-            }
-            a.process = None;
-            a.tracker = None;
-            a.ownership_deadline = None;
-            a.connected_since = None;
-            a.disconnected_since = None;
-            resume_after_confirmed_close(a);
-            if a.close_intent
-                .as_ref()
-                .is_none_or(|i| !i.denied && i.reason != CloseReason::UserStop)
-            {
-                a.close_intent = None;
-            }
-            if a.desired_running
-                && a.auto_recovery
-                && !matches!(
-                    a.status,
-                    Status::NeedsAttention | Status::Queued | Status::Backoff
-                )
-            {
-                apply_failure(
-                    a,
-                    &Failure::new(
-                        FailureKind::Other,
-                        "Managed client exited; scheduling recovery",
-                    ),
-                );
-            } else if !a.desired_running || !a.auto_recovery {
-                a.desired_running = false;
-                a.status = Status::Stopped;
-            }
-            if clean && !account.disconnect_notified {
-                a.last_error = Some("Client closed normally".into());
-                a.recovery_reason = "NormalExit".into();
-            }
-        });
+        self.confirmed_exit(&account.id, account.generation, identity, clean);
         if !account.desired_running {
             self.finish_operation(&account.id, account.generation, None);
         }
+    }
+
+    // Exit reconciliation is separate from the exact-process exit transition so
+    // monitor discovery can establish whether the launch has a surviving client.
+    pub(super) fn reconcile_exit(
+        &self,
+        account: &Account,
+        identity: &ProcessIdentity,
+        clean: bool,
+        players: &[platform::Player],
+        settled: bool,
+    ) -> bool {
+        {
+            let mut state = self.0.state.lock().unwrap();
+            let Some(current) = state
+                .database
+                .accounts
+                .iter()
+                .map(|s| &s.account)
+                .find(|a| a.id == account.id)
+            else {
+                return false;
+            };
+            if current.generation != account.generation
+                || current.process.as_ref() != Some(identity)
+            {
+                return false;
+            }
+            let matches: Vec<_> = players
+                .iter()
+                .filter(|p| p.tracker == identity.tracker)
+                .collect();
+            self.0.journal.record("exit_reconciliation_checked", serde_json::json!({
+                "account": crate::diagnostics::account(current), "settled": settled,
+                "uniquely_claimed": uniquely_claimed(&state, &current.id, identity, false),
+                "candidates": matches.iter().map(|p| crate::diagnostics::process(&p.identity(current.generation))).collect::<Vec<_>>(),
+            }));
+            if matches.len() == 1 {
+                let successor = matches[0].identity(current.generation);
+                if successor.pid == identity.pid
+                    && successor.creation_time == identity.creation_time
+                {
+                    return false;
+                }
+                if !verified_unique(&state, &current.id, &successor, players, false) {
+                    return false;
+                }
+                let mut next = state.clone();
+                let a = account_mut(&mut next, &account.id).unwrap();
+                let explicit_replacement = a.close_intent.as_ref().is_some_and(|i| {
+                    matches!(
+                        i.reason,
+                        CloseReason::ManualRestart | CloseReason::ManualStartReplacement
+                    )
+                });
+                // An old client's disconnect/close permission cannot authorize closing its successor.
+                if a.close_intent
+                    .as_ref()
+                    .is_some_and(|i| i.reason.automatic() && !i.denied)
+                {
+                    a.close_intent = None;
+                }
+                a.connected_since = None;
+                a.disconnected_since = None;
+                attach_verified_player(a, successor.clone());
+                if explicit_replacement && a.status != Status::NeedsAttention {
+                    a.status = Status::Queued;
+                }
+                self.0.journal.record("process_handoff_verified", serde_json::json!({
+                    "account_id": a.id.parse::<u64>().ok(), "old_process": crate::diagnostics::process(identity),
+                    "successor": crate::diagnostics::process(&successor), "reason": "same_tracker_unique_successor",
+                }));
+                return self.commit_close_state(&mut state, next).is_ok();
+            }
+            if !matches.is_empty()
+                || !settled
+                || !uniquely_claimed(&state, &current.id, identity, false)
+            {
+                return false;
+            }
+        }
+        self.owned_exit_observed(account, identity, clean);
+        true
     }
 
     // Same durable-before-visible ordering as Engine::transaction; callers already
@@ -189,7 +389,14 @@ impl Engine {
     fn commit_close_state(&self, state: &mut State, mut next: State) -> Result<(), String> {
         normalize_accounts(&mut next);
         management::record_activity(state, &mut next);
-        self.0.store.save(&next.database)?;
+        if let Err(error) = self.0.store.save(&next.database) {
+            self.0.journal.record(
+                "state_save_failed",
+                serde_json::json!({"effect": "close_cancelled"}),
+            );
+            return Err(error);
+        }
+        self.journal_changes(state, &next);
         for saved in &next.database.accounts {
             if let Some(old) = state
                 .database
@@ -239,7 +446,10 @@ impl Engine {
         {
             return Err("Close superseded; observing the current client".into());
         }
-        if a.close_intent.is_none() && recovery_due(a, Utc::now()) {
+        if a.close_intent.is_none()
+            && recovery_due(a, Utc::now())
+            && a.recovery_process.as_ref() == Some(identity)
+        {
             a.close_intent = Some(CloseIntent {
                 id: Uuid::new_v4(),
                 reason: CloseReason::AutomaticRecovery,
@@ -271,12 +481,53 @@ impl Engine {
                 self.0.launch_allowed.load(Ordering::Acquire),
             );
         let verification = if policy {
-            discover()
-                .map(|players| verified_unique(&next, &expected.id, identity, &players, false))
+            discover().map(|players| {
+                self.0.journal.record("close_verification", serde_json::json!({
+                    "account_id": expected.id.parse::<u64>().ok(), "intent": intent,
+                    "expected_process": crate::diagnostics::process(identity),
+                    "uniquely_claimed": uniquely_claimed(&next, &expected.id, identity, false),
+                    "candidates": players.iter().filter(|p| p.pid == identity.pid || p.tracker == identity.tracker)
+                        .map(|p| crate::diagnostics::process(&p.identity(expected.generation))).collect::<Vec<_>>(),
+                }));
+                // The process can exit after the monitor's alive check, including after
+                // graceful closure. Absence is not proof of conflicting ownership.
+                if intent.reason == CloseReason::AutomaticRecovery
+                    && uniquely_claimed(&next, &expected.id, identity, false)
+                    && !players
+                        .iter()
+                        .any(|p| p.pid == identity.pid || p.tracker == identity.tracker)
+                {
+                    return None;
+                }
+                Some(verified_unique(
+                    &next,
+                    &expected.id,
+                    identity,
+                    &players,
+                    false,
+                ))
+            })
         } else {
-            Ok(false)
+            Ok(Some(false))
         };
-        if !policy || !matches!(verification, Ok(true)) {
+        if let Err(error) = &verification {
+            self.0.journal.record("close_deferred", serde_json::json!({
+                "account": crate::diagnostics::account(expected), "reason": "process_discovery_unavailable",
+                "error_code": crate::diagnostics::error_code(error),
+            }));
+            return Ok(false);
+        }
+        if matches!(verification, Ok(None)) {
+            self.0.journal.record("close_deferred", serde_json::json!({"account": crate::diagnostics::account(expected), "reason": "absent_from_discovery_waiting_for_exact_exit"}));
+            // Retain the process and retry reservation until the exact exit watch
+            // confirms exit; do not submit an effect or latch a permanent denial.
+            return Ok(false);
+        }
+        if !policy || !matches!(verification, Ok(Some(true))) {
+            self.0.journal.record("close_denied", serde_json::json!({"account": crate::diagnostics::account(expected),
+                "policy_eligible": policy, "verification": if !policy { "not_checked_policy_denied" } else { match &verification { Ok(Some(true)) => "unique_owner", Ok(_) => "ownership_mismatch", Err(_) => "discovery_failed" } },
+                "verification_error_code": verification.as_ref().err().and_then(|e| crate::diagnostics::error_code(e)),
+                "network_suspended": network_suspended, "launch_allowed": self.0.launch_allowed.load(Ordering::Acquire)}));
             attempts.deny(&expected.id, &intent, identity, now);
             let a = account_mut(&mut next, &expected.id)?;
             a.close_intent.as_mut().unwrap().denied = true;
@@ -286,6 +537,21 @@ impl Engine {
             ));
             self.commit_close_state(&mut state, next)?;
             return Err("Close denied; client preserved, inspect it before retrying".into());
+        }
+        if was_recovery {
+            let a = account_mut(&mut next, &expected.id)?;
+            reserve_recovery(a);
+            a.close_intent = Some(intent.clone());
+            if a.status == Status::NeedsAttention {
+                let operation = a.operation_id;
+                let error = a.last_error.clone();
+                if let Some(op) = operation.and_then(|id| next.operations.get_mut(&id)) {
+                    op.state = "failed".into();
+                    op.error = error;
+                }
+                self.commit_close_state(&mut state, next)?;
+                return Ok(false);
+            }
         }
         // Persist newly classified recovery before any destructive effect.
         self.commit_close_state(&mut state, next)?;
@@ -309,34 +575,24 @@ impl Engine {
             self.commit_close_state(&mut state, next)?;
             return Err("Replacement readiness changed before close; client preserved".into());
         }
+        // Give graceful closure five seconds, including clients that remain in the tray.
+        // Every escalation retains the same current intent and verified process identity.
         let force = attempts.force(&expected.id, &intent, identity, now + started.elapsed());
+        self.0.journal.record("close_submitted", serde_json::json!({"account": crate::diagnostics::account(a), "force": force, "intent": intent}));
         match effect(identity, force) {
             Ok(()) => {
+                self.0.journal.record("close_result", serde_json::json!({"account_id": expected.id.parse::<u64>().ok(), "process": crate::diagnostics::process(identity), "intent": intent, "force": force, "success": true}));
                 attempts.record(&expected.id, &intent, identity, now + started.elapsed());
-                if was_recovery {
-                    let mut next = state.clone();
-                    let a = account_mut(&mut next, &expected.id)?;
-                    apply_failure(
-                        a,
-                        &Failure::new(
-                            FailureKind::Other,
-                            "Disconnected for more than 30 seconds; scheduling recovery",
-                        ),
-                    );
-                    a.close_intent = Some(intent);
-                    self.commit_close_state(&mut state, next)?;
-                }
                 Ok(true)
             }
-            Err(_) => {
+            Err(error) => {
+                self.0.journal.record("close_result", serde_json::json!({"account_id": expected.id.parse::<u64>().ok(), "process": crate::diagnostics::process(identity), "intent": intent, "force": force, "success": false, "error_code": crate::diagnostics::error_code(&error)}));
                 attempts.deny(&expected.id, &intent, identity, now);
                 let mut next = state.clone();
                 let a = account_mut(&mut next, &expected.id)?;
                 a.close_intent.as_mut().unwrap().denied = true;
                 a.status = Status::NeedsAttention;
-                a.last_error = Some(format!(
-                    "{CLOSE_BLOCKED_PREFIX}verified process close failed; inspect the client and use Stop to retry"
-                ));
+                a.last_error = Some(CLOSE_FAILED_ERROR.into());
                 self.commit_close_state(&mut state, next)?;
                 Err("Verified process close failed; force escalation cancelled".into())
             }
@@ -372,11 +628,9 @@ impl Engine {
         if matches.is_empty() && expected.process.is_none() {
             return Ok(false);
         }
-        let mut binding_expired = false;
         if matches.len() == 1 && next.database.retired_launches[index].process.is_none() {
             next.database.retired_launches[index].process =
                 Some(matches[0].identity(expected.generation));
-            binding_expired = Utc::now() > expected.deadline;
         }
         let record = &next.database.retired_launches[index];
         let intent = record.close_intent.clone();
@@ -385,8 +639,7 @@ impl Engine {
             .as_ref()
             .zip(intent.as_ref())
             .is_some_and(|(identity, intent)| {
-                !binding_expired
-                    && !attempts.blocked(&expected.account_id, intent, identity)
+                !attempts.blocked(&expected.account_id, intent, identity)
                     && intent.reason == CloseReason::UserStop
                     && next
                         .database
@@ -434,7 +687,10 @@ impl Engine {
             &identity,
             now + started.elapsed(),
         );
-        if effect(&identity, force).is_err() {
+        self.0.journal.record("close_submitted", serde_json::json!({"account_id": expected.account_id.parse::<u64>().ok(), "process": crate::diagnostics::process(&identity), "intent": intent, "force": force, "retired": true}));
+        let result = effect(&identity, force);
+        self.0.journal.record("close_result", serde_json::json!({"account_id": expected.account_id.parse::<u64>().ok(), "process": crate::diagnostics::process(&identity), "intent": intent, "force": force, "retired": true, "success": result.is_ok(), "error_code": result.as_ref().err().and_then(|e| crate::diagnostics::error_code(e))}));
+        if result.is_err() {
             attempts.deny(&expected.account_id, &intent, &identity, now);
             let mut next = state.clone();
             next.database.retired_launches[index]

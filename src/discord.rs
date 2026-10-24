@@ -165,7 +165,7 @@ impl Notice {
 
 fn rejoin(a: &Account) -> &'static str {
     if a.auto_recovery {
-        "Waiting up to 30 seconds for reconnection, then automatic rejoin will try again."
+        "Controlled recovery begins immediately; replacement waits for client exit and retry backoff."
     } else {
         "Automatic rejoin is off. Use Start or Restart when you are ready."
     }
@@ -300,7 +300,7 @@ pub fn account_notice(old: &Account, new: &Account) -> Option<Notice> {
     if new.status == Status::Running
         && old.status != Status::Running
         && old.recovery_reason != "NormalExit"
-        && (old.disconnect_notified || new.failures > 0)
+        && (old.disconnect_notified || new.failures > 0 && old.status != Status::Reconnecting)
     {
         return Some(Notice::for_account(
             new,
@@ -712,6 +712,32 @@ mod tests {
         assert!(account_notice(&old, &next).is_none());
     }
     #[test]
+    fn brief_redirects_do_not_repeat_online_alerts_when_an_earlier_retry_is_still_counted() {
+        for failures in 1..5 {
+            let mut before = Account::new("1".into(), "fixture".into());
+            before.desired_running = true;
+            before.status = Status::Reconnecting;
+            before.failures = failures;
+            let mut online = before.clone();
+            online.status = Status::Running;
+            assert!(
+                account_notice(&before, &online).is_none(),
+                "A prior retry must not turn a brief redirect into another online alert"
+            );
+            before.disconnect_notified = true;
+            assert_eq!(
+                account_notice(&before, &online).unwrap().title,
+                "Account is back online"
+            );
+            before.disconnect_notified = false;
+            before.status = Status::Unknown;
+            assert_eq!(
+                account_notice(&before, &online).unwrap().title,
+                "Account is back online"
+            );
+        }
+    }
+    #[test]
     fn webhook_destination_validation_and_redaction() {
         assert!(validate_webhook(HOOK).is_ok());
         assert!(validate_webhook("https://discordapp.com/api/v10/webhooks/123/token").is_ok());
@@ -755,7 +781,11 @@ mod tests {
         new.last_error = Some("Session lost (code 267); SECRET_RAW_ERROR".into());
         let kick = account_notice(&old, &new).unwrap();
         assert_eq!(kick.title, "Account kicked");
-        assert!(kick.message.contains("30 seconds"));
+        assert!(
+            kick.message
+                .contains("Controlled recovery begins immediately")
+        );
+        assert!(!kick.message.contains("30 seconds"));
         assert!(account_notice(&new, &new).is_none());
         let mut generic = new.clone();
         generic.last_error = Some("Game connection lost".into());

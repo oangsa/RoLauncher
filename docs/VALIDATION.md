@@ -3,6 +3,44 @@
 Recorded checks below are historical results, not guarantees of live Roblox compatibility.
 Fixtures use isolated data and simulated accounts unless stated otherwise.
 
+## Upcoming 1.8.0 recovery and diagnostic logs — 2026-10-24
+
+- Passed: 177 Windows Rust tests, 49 identity example tests, 98 desktop checks, formatting, and Clippy; six Rust tests remain explicitly ignored.
+- WinUI interaction smoke, authenticated Rust/WinUI bootstrap, release metadata, policy checks, and isolated installer/update checks passed.
+- Journal regressions cover correlation, command reuse, disk/memory/stale evidence, original error codes/timestamps, concurrent ordering, rotation, restart, partial writes, and write-failure recovery.
+- Credential checks exclude aliases, session cookies, tickets, private destinations, raw errors, and the API token from diagnostic events and exports.
+- Compared sources from v1.0.0 through v1.7.0 and v1.7.8; correlated sanitized local log/activity records with the reported incident times.
+- Reproduced permanent discovery-query pauses, premature exit/tracker release, and duplicate online alerts with failing tests before fixing them.
+- Counterexamples retain Stop/Restart, permission pauses, unique ownership, stale-command rejection, retry deadlines, and another account's state.
+- A combined replay covers redirect, handoff, kick, failed/fresh verification, graceful/force closure, final exit, and eligible retry.
+- No live Roblox client was launched or closed; native Linux and real Roblox handoff/rejoin behavior remain unverified locally.
+
+[Historical comparison, incident evidence, and remaining limits](RECOVERY-AUDIT.md)
+
+## Upcoming 1.7.6 redirect recovery — 2026-10-23
+
+- Compared 1.6.0 and 1.7.0: both allowed 30 seconds for reconnection before closing a client.
+- The new log replay failed before the fix: a disconnect poll terminated the client before the later reconnect poll.
+- Existing policy checks ruled out broken reconnect cancellation, ambiguous-event handling, and ownership checks before restoring grace.
+- The replay now passes for generic connection loss and codes 267/273; reconnection retains the process, destination, and retry budget.
+- Boundary checks cover 29/30 seconds, duplicate events, persistent kicks, verified exit, retry backoff, Stop, disabled recovery, and other accounts.
+- Passed: 156 Windows Rust tests, 49 identity example tests, 98 desktop checks, formatting, and Clippy; six Rust tests remain explicitly ignored.
+- Versioning, source packaging, beta publication, release promotion, hotfix policy, and owner-evidence checks passed.
+- Brief generic redirects emit no Discord incident; persistent losses deduplicate, and known errors still notify promptly.
+- WinUI smoke and authenticated Rust/WinUI bootstrap passed with isolated fixtures; desktop checks passed again after restoring the reconnect labels.
+- Initial sandbox checks hit temporary-file restrictions; a later rebuild exhausted disk space. Isolated reruns passed after clearing generated incremental cache.
+- No live Roblox redirect/rejoin cycle or native Linux recovery was tested; replay uses simulated clients and isolated logs.
+
+## Upcoming 1.7.5 process termination before rejoin — 2026-10-23
+
+- After merging upstream through 1.7.4: 155 Windows Rust tests, 49 identity example tests, 98 desktop checks, formatting, and Clippy passed; six Rust tests remain explicitly ignored.
+- Versioning, source packaging, beta publication, release promotion, hotfix policy, and owner-evidence checks passed.
+- Regression failed with upstream window-close behavior, then passed with immediate termination for confirmed disconnects 267/273/279.
+- A disposable Windows process acknowledged window closure and stayed alive; forced closure then confirmed process exit.
+- Recovery checks cover verified exit, retry backoff, other accounts, Stop, disabled rejoin, reconnection, and ownership verification.
+- Earlier native kick and global cleanup changes shipped in 1.7.2–1.7.4; they remain regression coverage.
+- No live Roblox tray/rejoin cycle was tested; native closure uses a disposable process fixture.
+
 ## 1.7.0 HTTP join recovery — 2026-10-15
 
 - Passed on Windows: 75 Rust tests, separate authenticated Rust/WinUI bootstrap, 74 desktop checks, WinUI fixture, formatting, Clippy, and release consistency.

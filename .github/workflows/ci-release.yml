@@ -2,7 +2,7 @@ name: CI and release
 
 on:
   push:
-    branches: [main, dev, 'feature/**', 'codex/**']
+    branches: [main, dev, 'feature/**', 'codex/**', 'hotfix/**']
   pull_request:
     branches: [dev, main]
   workflow_dispatch:
@@ -15,21 +15,13 @@ jobs:
     name: Branch flow
     runs-on: ubuntu-latest
     steps:
-      - name: Require feature or codex PRs into dev and dev PRs into main
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Check development, recovery, governance and isolated hotfix branch flow
         env:
-          EVENT: ${{ github.event_name }}
-          BASE: ${{ github.base_ref }}
-          HEAD: ${{ github.head_ref }}
-          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          REPO: ${{ github.repository }}
-        run: |
-          if [ "$EVENT" = pull_request ]; then
-            if [ "$BASE" = main ]; then
-              test "$HEAD" = dev && test "$HEAD_REPO" = "$REPO"
-            else
-              case "$HEAD" in feature/*|codex/*) ;; *) exit 1 ;; esac
-            fi
-          fi
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/branch-flow.py
 
   windows-checks:
     name: Windows checks
@@ -121,6 +113,8 @@ jobs:
           python3 scripts/test-linux-update.py
           python3 scripts/test-publish-beta.py
           python3 scripts/test-release-promotion.py
+          python3 scripts/test-hotfix-policy.py
+          python3 scripts/test-owner-evidence.py
           python3 scripts/test-sober-isolation-adapter.py
           dotnet restore desktop.tests/RoLauncher.Desktop.Tests.csproj --locked-mode --configfile desktop/NuGet.Config
           dotnet run --project desktop.tests --no-restore -c Release
