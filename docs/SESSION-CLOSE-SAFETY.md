@@ -66,6 +66,7 @@ Each actionable retired close requires one fresh scan under the mutex, including
 - Other close reasons start with graceful submission and an in-memory timer bound to account, full intent and exact process identity.
 - Discovery/disk latency before submission does not count toward the five-second grace interval.
 - Every force attempt repeats current intent, generation, operation, unique ownership and native identity checks.
+- A failed discovery query defers the effect without spending a retry or denying intent; a successful scan with conflicting ownership still latches denial.
 - A new Stop or Restart starts a fresh graceful phase even when it targets the same process.
 - Each recovery episode has a fresh intent UUID and must satisfy current eligibility; reconnection revokes further automatic termination.
 - Changed recovery settings, recovered connection, lost coordination, ambiguous ownership or native errors stop escalation.
@@ -77,6 +78,8 @@ Each actionable retired close requires one fresh scan under the mutex, including
 - A natural exit after a denied close does not silently resume replacement. An explicit valid command is required.
 - Confirmed exit of a current client preserves explicit Stop authority for separate retired clients still awaiting cleanup.
 - Eligible recovery persists its retry reservation before termination; replacement waits for confirmed process exit and the retry deadline.
+- Process exit retains tracking until a fresh post-exit scan finds a unique same-tracker successor or confirms absence after handoff settlement.
+- Settlement requires five seconds and the remaining original launch-discovery deadline; a successor gets fresh connection evidence and no inherited automatic close authority.
 - Activity recording, status notifications, durable-before-visible state changes and snapshot delivery are preserved.
 
 ## Retired ownership and legacy data

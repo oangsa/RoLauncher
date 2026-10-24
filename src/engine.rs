@@ -55,6 +55,19 @@ type MemoryProbe = (
     Option<(chrono::DateTime<Utc>, Signal)>,
 );
 
+struct PendingExit {
+    observed: Instant,
+    clean: bool,
+}
+impl PendingExit {
+    fn settled(&self, account: &Account, now: Instant, utc: chrono::DateTime<Utc>) -> bool {
+        now.saturating_duration_since(self.observed) >= Duration::from_secs(5)
+            && account
+                .ownership_deadline
+                .is_none_or(|deadline| utc >= deadline)
+    }
+}
+
 const OWNERSHIP_TIMEOUT_ERROR: &str = "Launch tracker has no verified instance. Recovery paused; use Stop, then Start after checking the client";
 const CLOSE_BLOCKED_PREFIX: &str = "Managed client close blocked: ";
 const CLOSE_FAILED_ERROR: &str = "Managed client close blocked: verified process close failed; inspect the client and use Stop to retry";
@@ -1346,6 +1359,7 @@ impl Engine {
         let mut last_log_discovery = Instant::now() - Duration::from_secs(30);
         let mut close_attempts = CloseAttempts::default();
         let mut exit_watches: HashMap<(u32, String), platform::ExitWatch> = HashMap::new();
+        let mut pending_exits: HashMap<(u32, String), PendingExit> = HashMap::new();
         let mut discovery = None;
         let mut log_discovery = None;
         #[cfg(windows)]
@@ -1374,7 +1388,8 @@ impl Engine {
                     .accounts
                     .iter()
                     .any(|a| a.process.is_none() && a.tracker.is_some())
-                    || !retired.is_empty())
+                    || !retired.is_empty()
+                    || !pending_exits.is_empty())
             {
                 discovery = Some(tokio::task::spawn_blocking(platform::players));
                 last_discovery = Instant::now();
@@ -1386,6 +1401,29 @@ impl Engine {
                     .record("process_discovery_failed", serde_json::json!({}));
             }
             if let Some(Ok(Ok(players))) = discovered {
+                for account in self.snapshot().accounts {
+                    let Some(identity) = account.process.as_ref() else {
+                        continue;
+                    };
+                    let key = (identity.pid, identity.creation_time.clone());
+                    let Some(pending) = pending_exits.get(&key) else {
+                        continue;
+                    };
+                    // A scan started before the exit cannot establish successor absence.
+                    if last_discovery < pending.observed {
+                        continue;
+                    }
+                    if self.reconcile_exit(
+                        &account,
+                        identity,
+                        pending.clean,
+                        &players,
+                        pending.settled(&account, Instant::now(), Utc::now()),
+                    ) {
+                        pending_exits.remove(&key);
+                        last_log_discovery = Instant::now() - Duration::from_secs(30);
+                    }
+                }
                 for old in &retired {
                     if old.process.is_none()
                         && old.deadline <= Utc::now()
@@ -1504,6 +1542,7 @@ impl Engine {
                 .collect();
             tails.retain(|key, _| active.contains(key));
             exit_watches.retain(|key, _| active.contains(key));
+            pending_exits.retain(|key, _| active.contains(key));
             #[cfg(windows)]
             {
                 memory_readers.retain(|key, _| active.contains(key));
@@ -1515,6 +1554,9 @@ impl Engine {
                     continue;
                 };
                 let key = (identity.pid, identity.creation_time.clone());
+                if pending_exits.contains_key(&key) {
+                    continue;
+                }
                 if !exit_watches.contains_key(&key)
                     && let Some(watch) = platform::ExitWatch::new(&identity)
                 {
@@ -1530,7 +1572,24 @@ impl Engine {
                             exit_watches.remove(&key).and_then(|w| w.clean_exit()) == Some(true);
                         tails.remove(&key);
                         close_attempts.remove(&identity);
-                        self.owned_exit_observed(&account, &identity, clean);
+                        pending_exits.insert(
+                            key,
+                            PendingExit {
+                                observed: Instant::now(),
+                                clean,
+                            },
+                        );
+                        self.0.journal.record("process_exit_pending", serde_json::json!({
+                            "account": crate::diagnostics::account(&account), "clean_exit": clean,
+                            "reason": "checking_for_surviving_client_before_replacement",
+                        }));
+                        let _ = self.update(&account.id, account.generation, |a| {
+                            if matches!(a.status, Status::Running | Status::Launching | Status::Unknown) {
+                                a.status = Status::Unknown;
+                                a.connected_since = None;
+                                a.last_error = Some("Managed process exited; checking for a surviving Roblox client before rejoin".into());
+                            }
+                        });
                         continue;
                     }
                     Err(_) => {

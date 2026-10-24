@@ -249,6 +249,7 @@ pub(crate) fn reason(message: &str) -> &'static str {
             "exit_confirmed_recovery_resumed",
         ),
         ("Managed client exited", "process_exited"),
+        ("Managed process exited; checking", "process_exit_pending"),
         ("Client closed normally", "normal_exit"),
         ("Multiple instances disabled", "single_instance_wait"),
         ("Waiting for a same-preset account", "peer_join_pending"),

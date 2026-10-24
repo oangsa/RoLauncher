@@ -3,14 +3,19 @@
 Recorded checks below are historical results, not guarantees of live Roblox compatibility.
 Fixtures use isolated data and simulated accounts unless stated otherwise.
 
-## Upcoming 1.8.0 diagnostic logs — 2026-10-24
+## Upcoming 1.8.0 recovery and diagnostic logs — 2026-10-24
 
-- Passed: 169 Windows Rust tests, 49 identity example tests, 98 desktop checks, formatting, and Clippy; six Rust tests remain explicitly ignored.
+- Passed: 177 Windows Rust tests, 49 identity example tests, 98 desktop checks, formatting, and Clippy; six Rust tests remain explicitly ignored.
 - WinUI interaction smoke, authenticated Rust/WinUI bootstrap, release metadata, policy checks, and isolated installer/update checks passed.
 - Journal regressions cover correlation, command reuse, disk/memory/stale evidence, original error codes/timestamps, concurrent ordering, rotation, restart, partial writes, and write-failure recovery.
 - Credential checks exclude aliases, session cookies, tickets, private destinations, raw errors, and the API token from diagnostic events and exports.
-- Screenshots establish the reported symptoms; no live duplicate-launch or unexpected-pause reproduction was available, so this change instruments future incidents.
-- Native Linux logging and live Roblox launch/rejoin behavior remain unverified locally.
+- Compared sources from v1.0.0 through v1.7.0 and v1.7.8; correlated sanitized local log/activity records with the reported incident times.
+- Reproduced permanent discovery-query pauses, premature exit/tracker release, and duplicate online alerts with failing tests before fixing them.
+- Counterexamples retain Stop/Restart, permission pauses, unique ownership, stale-command rejection, retry deadlines, and another account's state.
+- A combined replay covers redirect, handoff, kick, failed/fresh verification, graceful/force closure, final exit, and eligible retry.
+- No live Roblox client was launched or closed; native Linux and real Roblox handoff/rejoin behavior remain unverified locally.
+
+[Historical comparison, incident evidence, and remaining limits](RECOVERY-AUDIT.md)
 
 ## Upcoming 1.7.6 redirect recovery — 2026-10-23
 
