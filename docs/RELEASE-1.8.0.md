@@ -12,6 +12,7 @@ Cookies, authentication tickets, private links, launch URLs, and raw Roblox log 
 
 ## Fixed
 
+- Preserve unsaved client work by requiring current, verified close intent before managed session cleanup.
 - Check for a surviving client before rejoining after a process exits, preventing replacement during a verified launch handoff.
 - Retry temporary process-verification failures without permanently pausing automatic recovery.
 - Keep brief redirects from repeating online alerts while an earlier retry is still counted.

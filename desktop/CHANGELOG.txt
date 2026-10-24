@@ -1,5 +1,6 @@
 1.8.0 — Upcoming release
 
+- Preserve unsaved client work by requiring current, verified close intent before managed session cleanup.
 - Save detailed local launch and recovery logs, including pause reasons, process ownership, retry decisions, and recent events in support exports.
 - Check for a surviving client before rejoining after a process exits, preventing replacement during a verified launch handoff.
 - Retry temporary process-verification failures without permanently pausing automatic recovery.
