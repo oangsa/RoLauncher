@@ -3,6 +3,15 @@
 Recorded checks below are historical results, not guarantees of live Roblox compatibility.
 Fixtures use isolated data and simulated accounts unless stated otherwise.
 
+## Upcoming 1.8.0 diagnostic logs — 2026-10-24
+
+- Passed: 169 Windows Rust tests, 49 identity example tests, 98 desktop checks, formatting, and Clippy; six Rust tests remain explicitly ignored.
+- WinUI interaction smoke, authenticated Rust/WinUI bootstrap, release metadata, policy checks, and isolated installer/update checks passed.
+- Journal regressions cover correlation, command reuse, disk/memory/stale evidence, original error codes/timestamps, concurrent ordering, rotation, restart, partial writes, and write-failure recovery.
+- Credential checks exclude aliases, session cookies, tickets, private destinations, raw errors, and the API token from diagnostic events and exports.
+- Screenshots establish the reported symptoms; no live duplicate-launch or unexpected-pause reproduction was available, so this change instruments future incidents.
+- Native Linux logging and live Roblox launch/rejoin behavior remain unverified locally.
+
 ## Upcoming 1.7.6 redirect recovery — 2026-10-23
 
 - Compared 1.6.0 and 1.7.0: both allowed 30 seconds for reconnection before closing a client.

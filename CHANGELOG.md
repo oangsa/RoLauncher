@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.8.0] — Unreleased
+
+- Save detailed local launch and recovery logs, including pause reasons, process ownership, retry decisions, and recent events in support exports.
+
 ## [1.7.8] — 2026-10-24
 
 - Avoid permanently pausing automatic rejoin when a closing client disappears before fresh process verification.

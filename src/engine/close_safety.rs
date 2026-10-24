@@ -306,7 +306,14 @@ impl Engine {
     fn commit_close_state(&self, state: &mut State, mut next: State) -> Result<(), String> {
         normalize_accounts(&mut next);
         management::record_activity(state, &mut next);
-        self.0.store.save(&next.database)?;
+        if let Err(error) = self.0.store.save(&next.database) {
+            self.0.journal.record(
+                "state_save_failed",
+                serde_json::json!({"effect": "close_cancelled"}),
+            );
+            return Err(error);
+        }
+        self.journal_changes(state, &next);
         for saved in &next.database.accounts {
             if let Some(old) = state
                 .database
@@ -392,6 +399,13 @@ impl Engine {
             );
         let verification = if policy {
             discover().map(|players| {
+                self.0.journal.record("close_verification", serde_json::json!({
+                    "account_id": expected.id.parse::<u64>().ok(), "intent": intent,
+                    "expected_process": crate::diagnostics::process(identity),
+                    "uniquely_claimed": uniquely_claimed(&next, &expected.id, identity, false),
+                    "candidates": players.iter().filter(|p| p.pid == identity.pid || p.tracker == identity.tracker)
+                        .map(|p| crate::diagnostics::process(&p.identity(expected.generation))).collect::<Vec<_>>(),
+                }));
                 // The process can exit after the monitor's alive check, including after
                 // graceful closure. Absence is not proof of conflicting ownership.
                 if intent.reason == CloseReason::AutomaticRecovery
@@ -414,11 +428,16 @@ impl Engine {
             Ok(Some(false))
         };
         if matches!(verification, Ok(None)) {
+            self.0.journal.record("close_deferred", serde_json::json!({"account": crate::diagnostics::account(expected), "reason": "absent_from_discovery_waiting_for_exact_exit"}));
             // Retain the process and retry reservation until the exact exit watch
             // confirms exit; do not submit an effect or latch a permanent denial.
             return Ok(false);
         }
         if !policy || !matches!(verification, Ok(Some(true))) {
+            self.0.journal.record("close_denied", serde_json::json!({"account": crate::diagnostics::account(expected),
+                "policy_eligible": policy, "verification": if !policy { "not_checked_policy_denied" } else { match &verification { Ok(Some(true)) => "unique_owner", Ok(_) => "ownership_mismatch", Err(_) => "discovery_failed" } },
+                "verification_error_code": verification.as_ref().err().and_then(|e| crate::diagnostics::error_code(e)),
+                "network_suspended": network_suspended, "launch_allowed": self.0.launch_allowed.load(Ordering::Acquire)}));
             attempts.deny(&expected.id, &intent, identity, now);
             let a = account_mut(&mut next, &expected.id)?;
             a.close_intent.as_mut().unwrap().denied = true;
@@ -469,12 +488,15 @@ impl Engine {
         // Give graceful closure five seconds, including clients that remain in the tray.
         // Every escalation retains the same current intent and verified process identity.
         let force = attempts.force(&expected.id, &intent, identity, now + started.elapsed());
+        self.0.journal.record("close_submitted", serde_json::json!({"account": crate::diagnostics::account(a), "force": force, "intent": intent}));
         match effect(identity, force) {
             Ok(()) => {
+                self.0.journal.record("close_result", serde_json::json!({"account_id": expected.id.parse::<u64>().ok(), "process": crate::diagnostics::process(identity), "intent": intent, "force": force, "success": true}));
                 attempts.record(&expected.id, &intent, identity, now + started.elapsed());
                 Ok(true)
             }
-            Err(_) => {
+            Err(error) => {
+                self.0.journal.record("close_result", serde_json::json!({"account_id": expected.id.parse::<u64>().ok(), "process": crate::diagnostics::process(identity), "intent": intent, "force": force, "success": false, "error_code": crate::diagnostics::error_code(&error)}));
                 attempts.deny(&expected.id, &intent, identity, now);
                 let mut next = state.clone();
                 let a = account_mut(&mut next, &expected.id)?;
@@ -575,7 +597,10 @@ impl Engine {
             &identity,
             now + started.elapsed(),
         );
-        if effect(&identity, force).is_err() {
+        self.0.journal.record("close_submitted", serde_json::json!({"account_id": expected.account_id.parse::<u64>().ok(), "process": crate::diagnostics::process(&identity), "intent": intent, "force": force, "retired": true}));
+        let result = effect(&identity, force);
+        self.0.journal.record("close_result", serde_json::json!({"account_id": expected.account_id.parse::<u64>().ok(), "process": crate::diagnostics::process(&identity), "intent": intent, "force": force, "retired": true, "success": result.is_ok(), "error_code": result.as_ref().err().and_then(|e| crate::diagnostics::error_code(e))}));
+        if result.is_err() {
             attempts.deny(&expected.account_id, &intent, &identity, now);
             let mut next = state.clone();
             next.database.retired_launches[index]

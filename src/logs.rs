@@ -157,6 +157,9 @@ pub fn parse_line(line: &str) -> Option<Signal> {
 pub struct LogEvent {
     pub signal: Signal,
     pub confirmed_terminal: bool,
+    /// Diagnostic metadata only; neither field grants recovery authority.
+    pub code: Option<u32>,
+    pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Disk event semantics; the caller must separately establish process ownership.
@@ -179,6 +182,24 @@ pub fn parse_event(line: &str) -> Option<LogEvent> {
     Some(LogEvent {
         signal,
         confirmed_terminal,
+        code: match signal {
+            Signal::SessionLost(code) => code,
+            Signal::ConnectionFailed => Some(279),
+            Signal::PermissionDenied | Signal::TargetUnavailable | Signal::Disconnected => {
+                ["Sending disconnect with reason:", "errorCode:"]
+                    .iter()
+                    .find_map(|key| {
+                        let (_, rest) = line.split_once(key)?;
+                        rest.trim_start()
+                            .split(|c: char| !c.is_ascii_digit())
+                            .next()?
+                            .parse()
+                            .ok()
+                    })
+            }
+            _ => None,
+        },
+        timestamp: timestamp(line),
     })
 }
 
@@ -286,6 +307,19 @@ pub fn timestamp(line: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn diagnostic_metadata_keeps_original_permission_codes_and_source_time() {
+        for code in [524, 533, 600, 773] {
+            let event = parse_event(&format!("2026-10-24T03:25:00.123Z,0,0 [FLog::Network] Sending disconnect with reason: {code}")).unwrap();
+            assert_eq!(event.signal, Signal::PermissionDenied);
+            assert_eq!(event.code, Some(code));
+            assert_eq!(
+                event.timestamp.unwrap().to_rfc3339(),
+                "2026-10-24T03:25:00.123+00:00"
+            );
+            assert!(event.confirmed_terminal);
+        }
+    }
     #[test]
     fn native_kick_reason_confirms_only_the_authoritative_network_message() {
         for channel in ["FLog::Network", "DFLog::NetworkClient"] {

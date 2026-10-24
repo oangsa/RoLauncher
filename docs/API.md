@@ -44,7 +44,7 @@
 | DELETE | `/v1/profiles/UUID` | Remove saved profile |
 | POST | `/v1/profiles/UUID/apply` or `/start` | Apply profile settings / apply then Start; per-account launch results |
 | GET | `/v1/activity?account_id=USER_ID` | Persistent newest-first history; account filter optional |
-| GET | `/v1/diagnostics` | Sanitized status/history report |
+| GET | `/v1/diagnostics` | Sanitized status/history, `recovery_log` health/path, and bounded `recent_recovery_events`; see [diagnostic logs](DIAGNOSTICS.md) |
 | GET / POST | `/v1/backups` | List encrypted backup filenames / create a backup |
 | POST | `/v1/backups/FILENAME/restore` | Restore validated backup while all accounts are stopped |
 | PATCH | `/v1/updates` | Legacy API discovery repository; blank uses the official repository. Does not change the desktop's official publisher. |

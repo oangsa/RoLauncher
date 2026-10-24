@@ -44,6 +44,7 @@ struct Inner {
     launch_allowed: Arc<AtomicBool>,
     bot_generation: AtomicU64,
     discord: crate::discord::Discord,
+    journal: crate::diagnostics::Journal,
 }
 #[derive(Clone)]
 pub struct Engine(Arc<Inner>);
@@ -379,6 +380,11 @@ impl Engine {
         launch_allowed: Arc<AtomicBool>,
     ) -> Result<Self, String> {
         let mut database = store.load()?;
+        let loaded_accounts: Vec<_> = database
+            .accounts
+            .iter()
+            .map(|s| s.account.clone())
+            .collect();
         let active_multi_instance = database.multi_instance_enabled;
         let token = if database.encrypted_api_token.is_empty() {
             let token = zeroize::Zeroizing::new(format!(
@@ -410,6 +416,25 @@ impl Engine {
         }
         database.version = 2;
         store.save(&database)?;
+        let journal = crate::diagnostics::Journal::new(&store.directory);
+        journal.record(
+            "engine_opened",
+            serde_json::json!({
+                "multi_instance": active_multi_instance,
+                "launch_allowed": launch_allowed.load(Ordering::Acquire),
+                "external_background_cleanup": database.external_background_cleanup_enabled,
+                "retired_launches": database.retired_launches.len(),
+            }),
+        );
+        for (before, saved) in loaded_accounts.iter().zip(&database.accounts) {
+            journal.record(
+                "account_restored",
+                serde_json::json!({
+                    "before": crate::diagnostics::account(before),
+                    "after": crate::diagnostics::account(&saved.account),
+                }),
+            );
+        }
         let (events, _) = broadcast::channel(128);
         let discord = crate::discord::Discord::new(database.discord.clone())?;
         let bot_running = database.discord_bot_running && database.discord.bot.enabled;
@@ -433,6 +458,7 @@ impl Engine {
             bot_generation: AtomicU64::new(u64::from(bot_running)),
             launch_allowed,
             discord,
+            journal,
         })))
     }
     pub fn token(&self) -> &str {
@@ -452,6 +478,9 @@ impl Engine {
         self.0.state.lock().unwrap().operations.get(&id).cloned()
     }
     pub fn shutdown(&self) {
+        self.0
+            .journal
+            .record("shutdown_requested", serde_json::json!({}));
         self.0.shutdown.store(true, Ordering::Release);
         self.0.discord.stop();
         self.0.wake.notify_waiters();
@@ -461,7 +490,12 @@ impl Engine {
     }
     pub fn set_launch_allowed(&self, allowed: bool) {
         let _state = self.0.state.lock().unwrap();
-        self.0.launch_allowed.store(allowed, Ordering::Release);
+        if self.0.launch_allowed.swap(allowed, Ordering::AcqRel) != allowed {
+            self.0.journal.record(
+                "launch_coordination_changed",
+                serde_json::json!({"allowed": allowed}),
+            );
+        }
     }
     pub fn set_multi_instance(&self, enabled: bool) -> Result<(), String> {
         self.transaction(|s| {
@@ -491,7 +525,14 @@ impl Engine {
         let result = edit(&mut next)?;
         normalize_accounts(&mut next);
         management::record_activity(&current, &mut next);
-        self.0.store.save(&next.database)?;
+        if let Err(error) = self.0.store.save(&next.database) {
+            self.0.journal.record(
+                "state_save_failed",
+                serde_json::json!({"effect": "transaction_rolled_back"}),
+            );
+            return Err(error);
+        }
+        self.journal_changes(&current, &next);
         while next.operations.len() > 1000 {
             if let Some(key) = next
                 .operations
@@ -539,6 +580,47 @@ impl Engine {
         let _ = self.0.events.send(event);
         self.0.wake.notify_one();
         Ok(result)
+    }
+    fn journal_changes(&self, old: &State, next: &State) {
+        if old.network_suspended != next.network_suspended {
+            self.0.journal.record(
+                "network_suspension_changed",
+                serde_json::json!({"suspended": next.network_suspended}),
+            );
+        }
+        for saved in &next.database.accounts {
+            let before = old
+                .database
+                .accounts
+                .iter()
+                .find(|s| s.account.id == saved.account.id);
+            let after = crate::diagnostics::account(&saved.account);
+            let before_value = before.map(|s| crate::diagnostics::account(&s.account));
+            if before_value.as_ref() != Some(&after)
+                || before.is_some_and(|s| s.account.last_error != saved.account.last_error)
+            {
+                self.0.journal.record(
+                    "account_state_changed",
+                    serde_json::json!({"before": before_value, "after": after}),
+                );
+            }
+        }
+        // Retired trackers block replacement even when the current account has no PID.
+        let retired = |state: &State| {
+            state.database.retired_launches.iter().map(|r| serde_json::json!({
+            "account_id": r.account_id.parse::<u64>().ok(), "generation": r.generation,
+            "tracker": r.tracker.parse::<u64>().ok(), "deadline": r.deadline,
+            "process": r.process.as_ref().map(crate::diagnostics::process), "close_intent": r.close_intent,
+        })).collect::<Vec<_>>()
+        };
+        let before = retired(old);
+        let after = retired(next);
+        if before != after {
+            self.0.journal.record(
+                "retired_launches_changed",
+                serde_json::json!({"before": before, "after": after}),
+            );
+        }
     }
     pub fn discord_settings(&self) -> crate::discord::DiscordView {
         self.0.discord.view()
@@ -806,6 +888,38 @@ impl Engine {
         if action == "retry" {
             return self.retry_now(id);
         }
+        let result = self.execute_command(id, action, bot);
+        self.journal_command(
+            id,
+            action,
+            if bot.is_some() {
+                "discord"
+            } else {
+                "api_or_desktop"
+            },
+            &result,
+        );
+        result
+    }
+    fn journal_command(
+        &self,
+        id: &str,
+        action: &str,
+        source: &'static str,
+        result: &Result<Operation, String>,
+    ) {
+        self.0.journal.record("command_result", serde_json::json!({
+            "account_id": id.parse::<u64>().ok(), "action": match action { "start" | "stop" | "restart" | "retry" => action, _ => "unknown" },
+            "source": source, "accepted": result.is_ok(), "operation_id": result.as_ref().ok().map(|op| op.id),
+            "reason": result.as_ref().err().map(|e| crate::diagnostics::reason(e)),
+        }));
+    }
+    fn execute_command(
+        &self,
+        id: &str,
+        action: &str,
+        bot: Option<&crate::discord_bot::SavedBot>,
+    ) -> Result<Operation, String> {
         if !matches!(action, "start" | "stop" | "restart") {
             return Err("Unknown command".into());
         }
@@ -904,6 +1018,11 @@ impl Engine {
             {
                 return Ok(());
             }
+            self.0.journal.record("failure_observed", serde_json::json!({
+                "account_id": id.parse::<u64>().ok(), "generation": generation,
+                "kind": format!("{:?}", error.kind), "reason": crate::diagnostics::reason(&error.message),
+                "error_code": crate::diagnostics::error_code(&error.message),
+            }));
             if error.kind == FailureKind::Network {
                 s.network_suspended = true;
             }
@@ -938,7 +1057,16 @@ impl Engine {
     }
     async fn launch_loop(&self) {
         let mut next_launch = Instant::now();
+        let mut previous_gate = None;
         while !self.is_shutdown() {
+            let allowed = self.0.launch_allowed.load(Ordering::Acquire);
+            if previous_gate != Some(allowed) {
+                self.0.journal.record(
+                    "launch_gate_observed",
+                    serde_json::json!({"allowed": allowed}),
+                );
+                previous_gate = Some(allowed);
+            }
             let snapshot = self.snapshot();
             if snapshot.network_suspended {
                 if self.0.roblox.reachable().await {
@@ -1086,6 +1214,10 @@ impl Engine {
         {
             return;
         }
+        self.0.journal.record(
+            "launch_preparing",
+            serde_json::json!({"account": crate::diagnostics::account(&account)}),
+        );
         let target = match tokio::time::timeout(
             Duration::from_secs(120),
             self.select_launch_target(&account, target, &cookie),
@@ -1134,6 +1266,7 @@ impl Engine {
         let launched = {
             let mut state = self.0.state.lock().unwrap();
             if retired_blocks_launch(&state.database, &account.id) {
+                self.0.journal.record("launch_cancelled", serde_json::json!({"account": crate::diagnostics::account(&account), "reason": "retired_launch_pending"}));
                 return;
             }
             let mut next = state.clone();
@@ -1146,6 +1279,7 @@ impl Engine {
                 || a.tracker.is_some()
                 || self.is_shutdown()
             {
+                self.0.journal.record("launch_cancelled", serde_json::json!({"account": crate::diagnostics::account(a), "reason": "superseded_stopped_owned_or_shutdown", "shutdown": self.is_shutdown()}));
                 return;
             }
             if account.status == Status::Backoff && !a.auto_recovery {
@@ -1153,6 +1287,7 @@ impl Engine {
                 a.next_retry = None;
                 a.last_error = Some(REJOIN_DISABLED.into());
                 if self.0.store.save(&next.database).is_ok() {
+                    self.journal_changes(&state, &next);
                     *state = next;
                     let _ = self.0.events.send(snapshot(&state));
                 }
@@ -1161,10 +1296,19 @@ impl Engine {
             a.tracker = Some(tracker.clone());
             a.ownership_deadline = Some(Utc::now() + ChronoDuration::seconds(90));
             if let Err(e) = self.0.store.save(&next.database) {
+                self.0.journal.record("launch_cancelled", serde_json::json!({"account": crate::diagnostics::account(&account), "reason": "tracker_save_failed"}));
                 Err(e)
             } else {
+                self.journal_changes(&state, &next);
                 *state = next;
-                platform::launch_for(&uri, &account.id)
+                let current = &state
+                    .database
+                    .accounts
+                    .iter()
+                    .find(|s| s.account.id == account.id)
+                    .unwrap()
+                    .account;
+                self.submit_launch(current, &target, || platform::launch_for(&uri, &account.id))
             }
         };
         if let Err(message) = launched {
@@ -1176,6 +1320,25 @@ impl Engine {
             );
         }
         // Return immediately: shared discovery binds the PID or expires the 90s deadline.
+    }
+    fn submit_launch(
+        &self,
+        account: &Account,
+        target: &Target,
+        effect: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let context = crate::diagnostics::account(account);
+        // No URI, cookie, ticket, private link or command line reaches the journal.
+        self.0.journal.record("launch_submitted", serde_json::json!({"account": context, "selected_place_id": target.place_id,
+            "specific_server": target.job_id.is_some(), "private_destination": target.private_server_link.is_some()}));
+        let result = effect();
+        self.0.journal.record(
+            "launch_result",
+            serde_json::json!({"account": context, "accepted_by_os": result.is_ok(),
+            "reason": result.as_ref().err().map(|e| crate::diagnostics::reason(e)),
+            "error_code": result.as_ref().err().and_then(|e| crate::diagnostics::error_code(e))}),
+        );
+        result
     }
     async fn monitor_loop(&self) {
         let mut tails: HashMap<(u32, String), crate::logs::Tail> = HashMap::new();
@@ -1216,7 +1379,13 @@ impl Engine {
                 discovery = Some(tokio::task::spawn_blocking(platform::players));
                 last_discovery = Instant::now();
             }
-            if let Some(Ok(Ok(players))) = completed_task(&mut discovery).await {
+            let discovered = completed_task(&mut discovery).await;
+            if matches!(discovered, Some(Err(_)) | Some(Ok(Err(_)))) {
+                self.0
+                    .journal
+                    .record("process_discovery_failed", serde_json::json!({}));
+            }
+            if let Some(Ok(Ok(players))) = discovered {
                 for old in &retired {
                     if old.process.is_none()
                         && old.deadline <= Utc::now()
@@ -1264,6 +1433,8 @@ impl Engine {
                         .iter()
                         .filter(|p| Some(&p.tracker) == account.tracker.as_ref())
                         .collect();
+                    self.0.journal.record("launch_discovery", serde_json::json!({"account": crate::diagnostics::account(&account),
+                        "candidates": matches.iter().map(|p| crate::diagnostics::process(&p.identity(account.generation))).collect::<Vec<_>>()}));
                     if matches.len() == 1 {
                         let identity = matches[0].identity(account.generation);
                         let _ = self.update(&account.id, account.generation, |a| {
@@ -1309,9 +1480,18 @@ impl Engine {
                 }
                 last_log_discovery = Instant::now();
             }
-            if let Some(Ok(Ok(logs))) = completed_task(&mut log_discovery).await {
+            let discovered_logs = completed_task(&mut log_discovery).await;
+            if matches!(discovered_logs, Some(Err(_)) | Some(Ok(Err(_)))) {
+                self.0
+                    .journal
+                    .record("log_discovery_failed", serde_json::json!({}));
+            }
+            if let Some(Ok(Ok(logs))) = discovered_logs {
                 for (key, path) in logs {
                     if let Ok(tail) = crate::logs::Tail::new(path, false) {
+                        self.0
+                            .journal
+                            .record("owned_log_attached", serde_json::json!({"pid": key.0}));
                         tails.insert(key, tail);
                     }
                 }
@@ -1386,7 +1566,8 @@ impl Engine {
                                 );
                             }
                         }
-                        Err(_) => {
+                        Err(error) => {
+                            self.0.journal.record("owned_log_read_failed", serde_json::json!({"account": crate::diagnostics::account(&account), "io_error": format!("{:?}", error.kind())}));
                             tails.remove(&key);
                             let _ = self.update(&account.id, account.generation, log_unavailable);
                         }
@@ -1531,6 +1712,19 @@ impl Engine {
         let accepted = self
             .transaction(|state| {
                 let account = account_mut(state, id)?;
+                let (source, signal, confirmed, code, timestamp) = match observation {
+                    Observation::DiskLog(event) => ("owned_disk_log", event.signal, event.confirmed_terminal, event.code, event.timestamp),
+                    #[cfg(any(windows, test))]
+                    Observation::UnverifiedMemory(signal) => ("unverified_memory", signal, false, match signal { Signal::SessionLost(code) => code, Signal::ConnectionFailed => Some(279), _ => None }, None),
+                };
+                self.0.journal.record("connection_signal", serde_json::json!({
+                    "account_id": id.parse::<u64>().ok(), "generation": generation,
+                    "process": crate::diagnostics::process(identity), "source": source,
+                    "signal": format!("{signal:?}"), "confirmed_terminal": confirmed,
+                    "error_code": code, "source_timestamp": timestamp,
+                    "ownership_matches": account.generation == generation && identity.generation == generation && account.process.as_ref() == Some(identity),
+                    "desired_running": account.desired_running, "status_before": account.status,
+                }));
                 if account.generation != generation
                     || identity.generation != generation
                     || account.process.as_ref() != Some(identity)
@@ -1573,6 +1767,7 @@ impl Engine {
             if account.process.as_ref() != Some(identity) {
                 return;
             }
+            self.0.journal.record("process_exit_confirmed", serde_json::json!({"account": crate::diagnostics::account(account), "clean_exit": clean}));
             let ordinary_exit = account.recovery_evidence != RecoveryEvidence::RecoveryStarted
                 && account.status != Status::NeedsAttention
                 && !account.disconnect_notified;
@@ -1706,6 +1901,8 @@ impl Engine {
                 Observation::DiskLog(crate::logs::LogEvent {
                     signal,
                     confirmed_terminal: signal != Signal::JoinRequestFailed,
+                    code: None,
+                    timestamp: None,
                 }),
             );
             return;
@@ -1717,6 +1914,8 @@ impl Engine {
                 Observation::DiskLog(crate::logs::LogEvent {
                     signal,
                     confirmed_terminal: signal != Signal::JoinRequestFailed,
+                    code: None,
+                    timestamp: None,
                 }),
             )
         });
@@ -1818,6 +2017,118 @@ fn apply_failure(a: &mut Account, error: &Failure) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recovery_journal_correlates_commands_launches_signals_and_pause_without_secrets() {
+        let (engine, path) = fixture(1);
+        let op = engine.command("1", "start").unwrap();
+        assert_eq!(engine.command("1", "start").unwrap().id, op.id);
+        let mut account = engine.snapshot().accounts.remove(0);
+        account.tracker = Some("123456789012".into());
+        let target = Target {
+            place_id: 1,
+            job_id: None,
+            private_server_link: Some("https://roblox.com/?code=SECRET_DESTINATION".into()),
+        };
+        let result = engine.submit_launch(&account, &target, || {
+            let rows = engine.0.journal.recent();
+            assert_eq!(rows.last().unwrap()["event"], "launch_submitted");
+            Err("Unable to launch Roblox (Windows error 5) SECRET_TICKET".into())
+        });
+        assert!(result.is_err());
+        engine.failure(
+            "1",
+            account.generation,
+            Failure::new(FailureKind::Unsupported, "SECRET_FAILURE"),
+        );
+        let report = engine.diagnostics();
+        let rows = report["recent_recovery_events"].as_array().unwrap();
+        let commands: Vec<_> = rows
+            .iter()
+            .filter(|r| r["event"] == "command_result")
+            .collect();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(
+            commands[0]["details"]["operation_id"],
+            commands[1]["details"]["operation_id"]
+        );
+        let launch = rows.iter().find(|r| r["event"] == "launch_result").unwrap();
+        assert_eq!(launch["details"]["account"]["tracker"], 123456789012u64);
+        assert_eq!(
+            launch["details"]["account"]["generation"],
+            account.generation.to_string()
+        );
+        assert_eq!(launch["details"]["accepted_by_os"], false);
+        assert_eq!(launch["details"]["error_code"], 5);
+        assert!(rows.iter().any(|r| r["event"] == "account_state_changed"
+            && r["details"]["after"]["status"] == "needs_attention"));
+        assert!(!report.to_string().contains("SECRET"));
+        assert!(!report.to_string().contains(engine.token()));
+        assert!(engine.command("1", "retry").is_err());
+        assert_eq!(
+            engine
+                .0
+                .journal
+                .recent()
+                .iter()
+                .filter(|r| r["event"] == "command_result" && r["details"]["action"] == "retry")
+                .count(),
+            1
+        );
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+    #[test]
+    fn recovery_journal_keeps_disk_memory_and_stale_process_evidence_distinct() {
+        let (engine, path, identity) = owned_fixture();
+        engine.observe(
+            "1",
+            identity.generation,
+            &identity,
+            Observation::UnverifiedMemory(Signal::SessionLost(Some(273))),
+        );
+        engine.observe(
+            "1",
+            identity.generation,
+            &identity,
+            disk("[FLog::Network] Sending disconnect with reason: 273"),
+        );
+        let mut stale = identity.clone();
+        stale.pid += 1;
+        engine.observe(
+            "1",
+            identity.generation,
+            &stale,
+            disk("[FLog::Network] Connection accepted"),
+        );
+        engine.observe(
+            "1",
+            identity.generation,
+            &identity,
+            disk("[FLog::Network] Sending disconnect with reason: 524"),
+        );
+        let rows = engine.0.journal.recent();
+        let signals: Vec<_> = rows
+            .iter()
+            .filter(|r| r["event"] == "connection_signal")
+            .collect();
+        assert_eq!(signals.len(), 4);
+        assert_eq!(signals[0]["details"]["source"], "unverified_memory");
+        assert_eq!(signals[0]["details"]["confirmed_terminal"], false);
+        assert_eq!(signals[1]["details"]["source"], "owned_disk_log");
+        assert_eq!(signals[1]["details"]["confirmed_terminal"], true);
+        assert_eq!(signals[1]["details"]["signal"], "SessionLost(Some(273))");
+        assert_eq!(signals[2]["details"]["ownership_matches"], false);
+        assert_eq!(signals[3]["details"]["error_code"], 524);
+        assert!(rows.iter().any(|r| r["event"] == "account_state_changed"
+            && r["details"]["after"]["reason"] == "game_access_denied"));
+        let sequences: Vec<_> = rows
+            .iter()
+            .map(|r| r["sequence"].as_u64().unwrap())
+            .collect();
+        assert!(sequences.windows(2).all(|w| w[0] < w[1]));
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+    }
     fn owned_fixture() -> (Engine, std::path::PathBuf, ProcessIdentity) {
         let (engine, path) = fixture(1);
         engine.command("1", "start").unwrap();
