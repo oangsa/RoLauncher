@@ -1,4 +1,4 @@
-# RoLauncher 1.7.6-dev.0796fbdc055c
+# RoLauncher 1.7.8
 
 Manage Roblox accounts, save destinations, and rejoin disconnected sessions.
 Windows uses native WinUI; the shared Linux/Sober port remains a beta.
@@ -29,8 +29,8 @@ Keep cookies private; never include them in bug reports.
 - System/light/dark themes, tray controls, and **Download → Relaunch** updates.
 - Optional beta updates under **Settings → Updates**.
 
-Upcoming 1.7.6 restores 30-second reconnect grace so redirects can complete before recovery closes a client.
-Persistent confirmed disconnects recover after that grace; replacements wait for verified exit and retry backoff.
+Release 1.7.6 restores 30-second reconnect grace so redirects can finish before recovery closes a client.
+Persistent confirmed disconnects recover after grace; replacements wait for verified exit and retry backoff.
 RAM-only hints cannot close clients. Smart cannot guarantee region or local latency. See [release notes](docs/RELEASE-1.7.6.md).
 
 ## Documentation

@@ -336,7 +336,7 @@ fn recovery_termination_remains_available_under_the_same_valid_intent() {
     f.recovery();
     let now = Instant::now();
     let mut attempts = CloseAttempts::default();
-    assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![true]);
+    assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
     assert_eq!(f.account().failures, 1);
     assert!(
         !f.account().disconnect_notified,
@@ -346,11 +346,28 @@ fn recovery_termination_remains_available_under_the_same_valid_intent() {
         f.engine.activity(Some("1")).first().unwrap().status,
         Status::Backoff
     );
+    let submitted = attempts.0[0].started;
+    let retry = f.account().next_retry;
+    let intent = f.account().close_intent;
     assert_eq!(
-        f.tick(&f.account(), now + Duration::from_secs(6), &mut attempts),
+        f.tick(
+            &f.account(),
+            submitted + Duration::from_secs(4),
+            &mut attempts
+        ),
+        vec![false]
+    );
+    assert_eq!(
+        f.tick(
+            &f.account(),
+            submitted + Duration::from_secs(5),
+            &mut attempts
+        ),
         vec![true]
     );
     assert_eq!(f.account().failures, 1);
+    assert_eq!(f.account().next_retry, retry);
+    assert_eq!(f.account().close_intent, intent);
 }
 #[test]
 fn recovery_disabled_after_close_cannot_repeat_termination_or_consume_more_retries() {
@@ -358,7 +375,7 @@ fn recovery_disabled_after_close_cannot_repeat_termination_or_consume_more_retri
     f.recovery();
     let now = Instant::now();
     let mut attempts = CloseAttempts::default();
-    assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![true]);
+    assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
     f.engine
         .patch(
             "1",
@@ -500,7 +517,7 @@ fn connected_signal_revokes_further_recovery_termination() {
     f.recovery();
     let now = Instant::now();
     let mut attempts = CloseAttempts::default();
-    assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![true]);
+    assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
     let a = f.account();
     f.engine.signal("1", a.generation, Signal::Connected);
     assert!(
@@ -752,7 +769,7 @@ fn repeated_owned_denial_has_no_storage_or_broadcast_work_and_accepts_new_comman
         f.recovery();
         let now = Instant::now();
         let mut attempts = CloseAttempts::default();
-        assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![true]);
+        assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
         f.engine.set_launch_allowed(false);
         assert!(
             f.tick(&f.account(), now + Duration::from_secs(6), &mut attempts)
@@ -854,7 +871,7 @@ fn owned_denial_retries_only_unsaved_state_and_never_restores_automatic_force() 
     f.recovery();
     let now = Instant::now();
     let mut attempts = CloseAttempts::default();
-    assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![true]);
+    assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
     let blocked_path = f.path.join("accounts.json.tmp");
     std::fs::create_dir(&blocked_path).unwrap();
     f.engine.set_launch_allowed(false);
@@ -1437,10 +1454,7 @@ fn a_new_recovery_episode_cannot_reuse_the_previous_episodes_force_timer() {
         } else {
             f.recovery();
         }
-        assert_eq!(
-            f.tick(&f.account(), now, &mut attempts),
-            vec![!target_replacement]
-        );
+        assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
         let a = f.account();
         f.engine.signal("1", a.generation, Signal::Connected);
         // Both events occur before another monitor tick can discard the old timer.
@@ -1452,7 +1466,7 @@ fn a_new_recovery_episode_cannot_reuse_the_previous_episodes_force_timer() {
         }
         assert_eq!(
             f.tick(&f.account(), now + Duration::from_secs(40), &mut attempts),
-            vec![!target_replacement]
+            vec![false]
         );
     }
 }
@@ -1719,7 +1733,7 @@ fn native_kick_log_recovers_instead_of_waiting_for_confirmation() {
     let mut attempts = CloseAttempts::default();
     assert_eq!(
         f.tick(&f.account(), Instant::now(), &mut attempts),
-        vec![true]
+        vec![false]
     );
     assert!(!launch_ready(
         &f.account(),
@@ -1754,10 +1768,20 @@ fn terminal_disconnect_terminates_the_client_before_relaunch() {
         );
         f.engine.elapse_reconnect_grace("1", a.generation);
         let mut attempts = CloseAttempts::default();
+        let now = Instant::now();
         assert_eq!(
-            f.tick(&f.account(), Instant::now(), &mut attempts),
+            f.tick(&f.account(), now, &mut attempts),
+            vec![false],
+            "disconnect {code} must begin with a graceful close"
+        );
+        assert!(!launch_ready(
+            &f.account(),
+            Utc::now() + ChronoDuration::hours(1)
+        ));
+        assert_eq!(
+            f.tick(&f.account(), now + Duration::from_secs(6), &mut attempts),
             vec![true],
-            "disconnect {code} must terminate the process, including its tray lifetime"
+            "disconnect {code} must terminate a client that remains in the tray"
         );
         assert!(!launch_ready(
             &f.account(),
@@ -1790,7 +1814,7 @@ fn kicked_267_closes_then_rejoins_only_after_exit() {
     f.engine.elapse_reconnect_grace("1", a.generation);
     let mut attempts = CloseAttempts::default();
     let now = Instant::now();
-    assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![true]);
+    assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
     assert!(!launch_ready(
         &f.account(),
         Utc::now() + ChronoDuration::hours(1)
@@ -1934,4 +1958,271 @@ fn blocked_start_cleanup_requires_consent_and_protects_saved_launches() {
             Ok(())
         })
         .unwrap();
+}
+
+#[test]
+fn automatic_close_failure_resumes_only_after_exact_exit() {
+    let f = Fixture::new();
+    f.recovery();
+    let original = f.account();
+    let identity = original.process.clone().unwrap();
+    let other = f.engine.snapshot().accounts[1].clone();
+    let players = f.players();
+    let mut attempts = CloseAttempts::default();
+    assert!(
+        f.engine
+            .close_owned(
+                &original,
+                Instant::now(),
+                &mut attempts,
+                || Ok(players),
+                |_, _| Err("synthetic native close failure".into()),
+            )
+            .is_err()
+    );
+    let denied = f.account();
+    assert_eq!(denied.status, Status::NeedsAttention);
+    assert!(denied.close_intent.as_ref().unwrap().denied);
+    let retry = denied.next_retry;
+    assert!(
+        f.tick(
+            &denied,
+            Instant::now() + Duration::from_secs(60),
+            &mut attempts
+        )
+        .is_empty()
+    );
+    assert!(!launch_ready(
+        &f.account(),
+        Utc::now() + ChronoDuration::hours(1)
+    ));
+    let mut stale = identity.clone();
+    stale.creation_time = "reused-pid".into();
+    f.engine.owned_exit_observed(&denied, &stale, false);
+    assert_eq!(f.account().status, Status::NeedsAttention);
+    f.engine.owned_exit_observed(&denied, &identity, false);
+    let resumed = f.account();
+    assert_eq!(resumed.status, Status::Backoff);
+    assert_eq!(resumed.failures, 1);
+    assert_eq!(resumed.next_retry, retry);
+    assert!(resumed.close_intent.is_none());
+    assert!(resumed.process.is_none() && resumed.tracker.is_none());
+    assert!(launch_ready(
+        &resumed,
+        Utc::now() + ChronoDuration::hours(1)
+    ));
+    assert_eq!(f.engine.snapshot().accounts[1].process, other.process);
+}
+
+#[test]
+fn saved_automatic_close_failure_resumes_only_without_a_client() {
+    for exited in [false, true] {
+        let f = Fixture::new();
+        f.recovery();
+        let players = f.players();
+        assert!(
+            f.engine
+                .close_owned(
+                    &f.account(),
+                    Instant::now(),
+                    &mut CloseAttempts::default(),
+                    || Ok(players),
+                    |_, _| Err("synthetic native close failure".into()),
+                )
+                .is_err()
+        );
+        let denied = f.account();
+        if exited {
+            // Replay the persisted state from versions that retained the denial after exit.
+            f.engine
+                .update("1", denied.generation, |a| {
+                    a.process = None;
+                    a.tracker = None;
+                    a.recovery_process = None;
+                    a.recovery_evidence = RecoveryEvidence::Unavailable;
+                })
+                .unwrap();
+        }
+        let reopened = Engine::open(Store::new(f.path.clone()).unwrap(), "test".into()).unwrap();
+        let a = reopened.snapshot().accounts.remove(0);
+        assert_eq!(
+            a.status,
+            if exited {
+                Status::Backoff
+            } else {
+                Status::NeedsAttention
+            }
+        );
+        assert_eq!(a.failures, 1);
+        assert_eq!(a.next_retry, denied.next_retry);
+        assert_eq!(a.close_intent.is_none(), exited);
+    }
+}
+
+#[test]
+fn disk_reconnect_during_graceful_close_cancels_force_and_relaunch() {
+    let f = Fixture::new();
+    let original = f.account();
+    let identity = original.process.clone().unwrap();
+    let log = f.path.join("closing-reconnect.log");
+    std::fs::write(&log, "[FLog::Network] Connection lost\n").unwrap();
+    let mut tail = crate::logs::Tail::new(log.clone(), false).unwrap();
+    for event in tail.read_events().unwrap() {
+        f.engine.observe(
+            "1",
+            original.generation,
+            &identity,
+            Observation::DiskLog(event),
+        );
+    }
+    f.engine.elapse_reconnect_grace("1", original.generation);
+    let now = Instant::now();
+    let mut attempts = CloseAttempts::default();
+    assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
+    use std::io::Write;
+    writeln!(
+        std::fs::OpenOptions::new().append(true).open(log).unwrap(),
+        "[FLog::Network] Replicator created"
+    )
+    .unwrap();
+    for event in tail.read_events().unwrap() {
+        f.engine.observe(
+            "1",
+            original.generation,
+            &identity,
+            Observation::DiskLog(event),
+        );
+    }
+    assert!(
+        f.tick(&f.account(), now + Duration::from_secs(6), &mut attempts)
+            .is_empty()
+    );
+    let connected = f.account();
+    assert_eq!(connected.status, Status::Running);
+    assert_eq!(connected.process, original.process);
+    assert!(connected.close_intent.is_none());
+    assert!(connected.next_retry.is_none());
+    assert!(!launch_ready(
+        &connected,
+        Utc::now() + ChronoDuration::hours(1)
+    ));
+}
+
+#[test]
+fn automatic_force_revalidates_ownership_after_graceful_submission() {
+    for scenario in ["ambiguous", "pid", "creation", "error"] {
+        let f = Fixture::new();
+        f.recovery();
+        let now = Instant::now();
+        let mut attempts = CloseAttempts::default();
+        assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
+        let mut players = f.players();
+        match scenario {
+            "ambiguous" => players.push(platform::Player {
+                pid: 9999,
+                creation_time: "other".into(),
+                tracker: players[0].tracker.clone(),
+            }),
+            "pid" => players[0].pid = 9999,
+            "creation" => players[0].creation_time = "reused".into(),
+            _ => {}
+        }
+        let _ = f.engine.close_owned(
+            &f.account(),
+            now + Duration::from_secs(6),
+            &mut attempts,
+            || {
+                if scenario == "error" {
+                    Err("synthetic discovery failure".into())
+                } else {
+                    Ok(players)
+                }
+            },
+            |_, _| panic!("invalid ownership must prevent force"),
+        );
+        assert_eq!(f.account().status, Status::NeedsAttention, "{scenario}");
+        assert!(f.account().process.is_some());
+        assert_eq!(f.account().failures, 1);
+    }
+}
+
+#[test]
+fn automatic_close_waits_for_exit_when_fresh_discovery_loses_the_process() {
+    for graceful_submitted in [false, true] {
+        let f = Fixture::new();
+        f.recovery();
+        let now = Instant::now();
+        let mut attempts = CloseAttempts::default();
+        if graceful_submitted {
+            assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
+        }
+        let before = f.account();
+        let identity = before.process.clone().unwrap();
+        let players = f
+            .players()
+            .into_iter()
+            .filter(|p| p.pid != identity.pid)
+            .collect();
+        f.engine
+            .close_owned(
+                &before,
+                now + Duration::from_secs(6),
+                &mut attempts,
+                || Ok(players),
+                |_, _| panic!("Missing process cannot authorize close"),
+            )
+            .unwrap();
+        let waiting = f.account();
+        assert_ne!(waiting.status, Status::NeedsAttention);
+        assert!(!waiting.close_intent.as_ref().is_some_and(|i| i.denied));
+        assert_eq!(waiting.failures, before.failures);
+        assert_eq!(waiting.next_retry, before.next_retry);
+        assert!(!launch_ready(
+            &waiting,
+            Utc::now() + ChronoDuration::hours(1)
+        ));
+        let mut stale = identity.clone();
+        stale.creation_time = "reused-pid".into();
+        f.engine.owned_exit_observed(&waiting, &stale, false);
+        assert!(f.account().process.is_some());
+        f.engine.owned_exit_observed(&waiting, &identity, false);
+        let exited = f.account();
+        assert_eq!(exited.status, Status::Backoff);
+        assert_eq!(exited.failures, 1);
+        assert!(exited.process.is_none() && exited.tracker.is_none());
+        assert!(launch_ready(&exited, Utc::now() + ChronoDuration::hours(1)));
+    }
+}
+
+#[test]
+fn missing_process_does_not_override_policy_manual_or_shared_ownership_denials() {
+    for scenario in ["policy", "manual", "shared"] {
+        let f = Fixture::new();
+        f.recovery();
+        let now = Instant::now();
+        let mut attempts = CloseAttempts::default();
+        assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
+        match scenario {
+            "policy" => f.engine.set_launch_allowed(false),
+            "manual" => {
+                f.engine.command("1", "restart").unwrap();
+            }
+            _ => {
+                let tracker = f.account().tracker;
+                let other = f.engine.snapshot().accounts[1].clone();
+                f.engine
+                    .update("2", other.generation, |a| a.tracker = tracker)
+                    .unwrap();
+            }
+        }
+        let _ = f.engine.close_owned(
+            &f.account(),
+            now + Duration::from_secs(6),
+            &mut attempts,
+            || Ok(Vec::new()),
+            |_, _| panic!("Missing process cannot override denial"),
+        );
+        assert_eq!(f.account().status, Status::NeedsAttention, "{scenario}");
+        assert!(f.account().close_intent.unwrap().denied);
+    }
 }

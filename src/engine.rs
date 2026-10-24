@@ -56,6 +56,7 @@ type MemoryProbe = (
 
 const OWNERSHIP_TIMEOUT_ERROR: &str = "Launch tracker has no verified instance. Recovery paused; use Stop, then Start after checking the client";
 const CLOSE_BLOCKED_PREFIX: &str = "Managed client close blocked: ";
+const CLOSE_FAILED_ERROR: &str = "Managed client close blocked: verified process close failed; inspect the client and use Stop to retry";
 const REJOIN_DISABLED: &str = "Automatic rejoin disabled; use Start to launch manually";
 #[cfg(windows)]
 const LAUNCH_COORDINATION_ERROR: &str = "Roblox launch coordination is not ready. Enable background cleanup in Game joining and retry Start, or use Accounts → More actions → Stop all Roblox";
@@ -303,12 +304,20 @@ fn retired_blocks_launch(database: &Database, id: &str) -> bool {
 }
 
 fn resume_after_confirmed_close(account: &mut Account) {
+    let failed_automatic_close = account.last_error.as_deref() == Some(CLOSE_FAILED_ERROR)
+        && account
+            .close_intent
+            .as_ref()
+            .is_some_and(|i| i.denied && i.reason == CloseReason::AutomaticRecovery);
     let close_error = account.last_error.as_deref().is_some_and(|error| {
         error.starts_with(CLOSE_BLOCKED_PREFIX)
             || error == "Unable to close managed instance (Windows error 5)"
     });
     if account.status == Status::NeedsAttention
-        && account.close_intent.as_ref().is_none_or(|i| !i.denied)
+        && account
+            .close_intent
+            .as_ref()
+            .is_none_or(|i| !i.denied || failed_automatic_close)
         && close_error
         && account.process.is_none()
         && account.tracker.is_none()
@@ -316,6 +325,10 @@ fn resume_after_confirmed_close(account: &mut Account) {
         && account.auto_recovery
         && account.failures < 5
     {
+        // Exit retires this failed close; it never renews authority over a live client.
+        if failed_automatic_close {
+            account.close_intent = None;
+        }
         account.status = if account.failures == 0 {
             Status::Queued
         } else {

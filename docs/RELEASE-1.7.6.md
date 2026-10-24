@@ -1,6 +1,6 @@
 # RoLauncher 1.7.6
 
-Upcoming bug-fix release based on published stable 1.7.5. Local packages carry a unique development suffix.
+Bug-fix release based on published stable 1.7.5.
 
 ## Changes
 
@@ -16,4 +16,9 @@ Replacement waits for confirmed process exit and retry backoff.
 Stop, disabled rejoin, retry limits, access restrictions, and process ownership checks still apply.
 Ambiguous log events and RAM-only hints never authorize automatic closure.
 
-[Validation](VALIDATION.md)
+## Validation
+
+- Passed 156 Windows Rust tests, formatting, Clippy, 98 desktop checks, WinUI interaction smoke, authenticated Rust/WinUI bootstrap, and isolated installer/update checks.
+- Versioning, beta publication, release promotion, hotfix policy, and owner-evidence regression checks passed.
+- Replay covers reconnect grace, retry preservation, persistent disconnects, verified exit, Stop, disabled recovery, and other accounts; six Rust tests remain explicitly ignored.
+- Live Roblox redirect/rejoin and native Linux recovery remain unverified locally; hosted Windows and Linux checks gate publication.

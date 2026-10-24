@@ -1,6 +1,16 @@
 # Changelog
 
-## [1.7.6] — Unreleased
+## [1.7.8] — 2026-10-24
+
+- Avoid permanently pausing automatic rejoin when a closing client disappears before fresh process verification.
+
+## [1.7.7] — 2026-10-24
+
+- Close disconnected clients gracefully before five-second force escalation; keep reconnect cancellation and verified exit before rejoin.
+- Resume automatic rejoin after a failed client close once the managed process has exited.
+- Recover saved accounts paused by this failure when RoLauncher restarts and no client remains.
+
+## [1.7.6] — 2026-10-23
 
 - Restore 30-second reconnect grace so redirects can finish without closing and reopening the client.
 - Keep brief connection-loss redirects silent in Discord; retain prompt alerts for known errors.

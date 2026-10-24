@@ -78,25 +78,26 @@ fn verified_unique(
     matches.len() == 1
         && matches[0].pid == identity.pid
         && matches[0].creation_time == identity.creation_time
-        && !state.database.accounts.iter().any(|s| {
-            (retired || s.account.id != id)
-                && (s.account.tracker.as_ref() == Some(&identity.tracker)
-                    || s.account
-                        .process
-                        .as_ref()
-                        .is_some_and(|p| p.pid == identity.pid || p.tracker == identity.tracker))
-        })
-        && !state.database.retired_launches.iter().any(|r| {
-            r.tracker != identity.tracker
-                && r.process.as_ref().is_some_and(|p| p.pid == identity.pid)
-        })
-        && state
-            .database
-            .retired_launches
-            .iter()
-            .filter(|r| r.tracker == identity.tracker)
-            .count()
-            == usize::from(retired)
+        && uniquely_claimed(state, id, identity, retired)
+}
+
+fn uniquely_claimed(state: &State, id: &str, identity: &ProcessIdentity, retired: bool) -> bool {
+    !state.database.accounts.iter().any(|s| {
+        (retired || s.account.id != id)
+            && (s.account.tracker.as_ref() == Some(&identity.tracker)
+                || s.account
+                    .process
+                    .as_ref()
+                    .is_some_and(|p| p.pid == identity.pid || p.tracker == identity.tracker))
+    }) && !state.database.retired_launches.iter().any(|r| {
+        r.tracker != identity.tracker && r.process.as_ref().is_some_and(|p| p.pid == identity.pid)
+    }) && state
+        .database
+        .retired_launches
+        .iter()
+        .filter(|r| r.tracker == identity.tracker)
+        .count()
+        == usize::from(retired)
 }
 
 fn eligible(
@@ -390,12 +391,34 @@ impl Engine {
                 self.0.launch_allowed.load(Ordering::Acquire),
             );
         let verification = if policy {
-            discover()
-                .map(|players| verified_unique(&next, &expected.id, identity, &players, false))
+            discover().map(|players| {
+                // The process can exit after the monitor's alive check, including after
+                // graceful closure. Absence is not proof of conflicting ownership.
+                if intent.reason == CloseReason::AutomaticRecovery
+                    && uniquely_claimed(&next, &expected.id, identity, false)
+                    && !players
+                        .iter()
+                        .any(|p| p.pid == identity.pid || p.tracker == identity.tracker)
+                {
+                    return None;
+                }
+                Some(verified_unique(
+                    &next,
+                    &expected.id,
+                    identity,
+                    &players,
+                    false,
+                ))
+            })
         } else {
-            Ok(false)
+            Ok(Some(false))
         };
-        if !policy || !matches!(verification, Ok(true)) {
+        if matches!(verification, Ok(None)) {
+            // Retain the process and retry reservation until the exact exit watch
+            // confirms exit; do not submit an effect or latch a permanent denial.
+            return Ok(false);
+        }
+        if !policy || !matches!(verification, Ok(Some(true))) {
             attempts.deny(&expected.id, &intent, identity, now);
             let a = account_mut(&mut next, &expected.id)?;
             a.close_intent.as_mut().unwrap().denied = true;
@@ -443,10 +466,9 @@ impl Engine {
             self.commit_close_state(&mut state, next)?;
             return Err("Replacement readiness changed before close; client preserved".into());
         }
-        // A disconnected client may keep running in the tray after WM_CLOSE.
-        // End its verified process lifetime before allowing a replacement.
-        let force = intent.reason == CloseReason::AutomaticRecovery
-            || attempts.force(&expected.id, &intent, identity, now + started.elapsed());
+        // Give graceful closure five seconds, including clients that remain in the tray.
+        // Every escalation retains the same current intent and verified process identity.
+        let force = attempts.force(&expected.id, &intent, identity, now + started.elapsed());
         match effect(identity, force) {
             Ok(()) => {
                 attempts.record(&expected.id, &intent, identity, now + started.elapsed());
@@ -458,9 +480,7 @@ impl Engine {
                 let a = account_mut(&mut next, &expected.id)?;
                 a.close_intent.as_mut().unwrap().denied = true;
                 a.status = Status::NeedsAttention;
-                a.last_error = Some(format!(
-                    "{CLOSE_BLOCKED_PREFIX}verified process close failed; inspect the client and use Stop to retry"
-                ));
+                a.last_error = Some(CLOSE_FAILED_ERROR.into());
                 self.commit_close_state(&mut state, next)?;
                 Err("Verified process close failed; force escalation cancelled".into())
             }
