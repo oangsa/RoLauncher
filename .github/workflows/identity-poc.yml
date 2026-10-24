@@ -1,0 +1,37 @@
+name: Windows identity feasibility
+
+on:
+  push:
+    branches: ['codex/pr24-windows-device-identity-poc']
+  pull_request:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  identity-poc:
+    name: Windows device identity feasibility evidence
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal
+          if ($LASTEXITCODE -ne 0) { throw 'Rust installation failed' }
+          rustup default 1.99.0
+      - name: Synthetic contracts and sanitized native measurements
+        shell: pwsh
+        run: ./scripts/test-identity-poc.ps1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: identity-poc-sanitized-evidence
+          path: target/identity-poc-evidence/measurements.json
+          if-no-files-found: error
+          retention-days: 14

@@ -301,12 +301,102 @@ impl Engine {
         }
     }
 
+    // Exit reconciliation is separate from the exact-process exit transition so
+    // monitor discovery can establish whether the launch has a surviving client.
+    pub(super) fn reconcile_exit(
+        &self,
+        account: &Account,
+        identity: &ProcessIdentity,
+        clean: bool,
+        players: &[platform::Player],
+        settled: bool,
+    ) -> bool {
+        {
+            let mut state = self.0.state.lock().unwrap();
+            let Some(current) = state
+                .database
+                .accounts
+                .iter()
+                .map(|s| &s.account)
+                .find(|a| a.id == account.id)
+            else {
+                return false;
+            };
+            if current.generation != account.generation
+                || current.process.as_ref() != Some(identity)
+            {
+                return false;
+            }
+            let matches: Vec<_> = players
+                .iter()
+                .filter(|p| p.tracker == identity.tracker)
+                .collect();
+            self.0.journal.record("exit_reconciliation_checked", serde_json::json!({
+                "account": crate::diagnostics::account(current), "settled": settled,
+                "uniquely_claimed": uniquely_claimed(&state, &current.id, identity, false),
+                "candidates": matches.iter().map(|p| crate::diagnostics::process(&p.identity(current.generation))).collect::<Vec<_>>(),
+            }));
+            if matches.len() == 1 {
+                let successor = matches[0].identity(current.generation);
+                if successor.pid == identity.pid
+                    && successor.creation_time == identity.creation_time
+                {
+                    return false;
+                }
+                if !verified_unique(&state, &current.id, &successor, players, false) {
+                    return false;
+                }
+                let mut next = state.clone();
+                let a = account_mut(&mut next, &account.id).unwrap();
+                let explicit_replacement = a.close_intent.as_ref().is_some_and(|i| {
+                    matches!(
+                        i.reason,
+                        CloseReason::ManualRestart | CloseReason::ManualStartReplacement
+                    )
+                });
+                // An old client's disconnect/close permission cannot authorize closing its successor.
+                if a.close_intent
+                    .as_ref()
+                    .is_some_and(|i| i.reason.automatic() && !i.denied)
+                {
+                    a.close_intent = None;
+                }
+                a.connected_since = None;
+                a.disconnected_since = None;
+                attach_verified_player(a, successor.clone());
+                if explicit_replacement && a.status != Status::NeedsAttention {
+                    a.status = Status::Queued;
+                }
+                self.0.journal.record("process_handoff_verified", serde_json::json!({
+                    "account_id": a.id.parse::<u64>().ok(), "old_process": crate::diagnostics::process(identity),
+                    "successor": crate::diagnostics::process(&successor), "reason": "same_tracker_unique_successor",
+                }));
+                return self.commit_close_state(&mut state, next).is_ok();
+            }
+            if !matches.is_empty()
+                || !settled
+                || !uniquely_claimed(&state, &current.id, identity, false)
+            {
+                return false;
+            }
+        }
+        self.owned_exit_observed(account, identity, clean);
+        true
+    }
+
     // Same durable-before-visible ordering as Engine::transaction; callers already
     // hold the command mutex, including through the subsequent synchronous effect.
     fn commit_close_state(&self, state: &mut State, mut next: State) -> Result<(), String> {
         normalize_accounts(&mut next);
         management::record_activity(state, &mut next);
-        self.0.store.save(&next.database)?;
+        if let Err(error) = self.0.store.save(&next.database) {
+            self.0.journal.record(
+                "state_save_failed",
+                serde_json::json!({"effect": "close_cancelled"}),
+            );
+            return Err(error);
+        }
+        self.journal_changes(state, &next);
         for saved in &next.database.accounts {
             if let Some(old) = state
                 .database
@@ -392,6 +482,13 @@ impl Engine {
             );
         let verification = if policy {
             discover().map(|players| {
+                self.0.journal.record("close_verification", serde_json::json!({
+                    "account_id": expected.id.parse::<u64>().ok(), "intent": intent,
+                    "expected_process": crate::diagnostics::process(identity),
+                    "uniquely_claimed": uniquely_claimed(&next, &expected.id, identity, false),
+                    "candidates": players.iter().filter(|p| p.pid == identity.pid || p.tracker == identity.tracker)
+                        .map(|p| crate::diagnostics::process(&p.identity(expected.generation))).collect::<Vec<_>>(),
+                }));
                 // The process can exit after the monitor's alive check, including after
                 // graceful closure. Absence is not proof of conflicting ownership.
                 if intent.reason == CloseReason::AutomaticRecovery
@@ -413,12 +510,24 @@ impl Engine {
         } else {
             Ok(Some(false))
         };
+        if let Err(error) = &verification {
+            self.0.journal.record("close_deferred", serde_json::json!({
+                "account": crate::diagnostics::account(expected), "reason": "process_discovery_unavailable",
+                "error_code": crate::diagnostics::error_code(error),
+            }));
+            return Ok(false);
+        }
         if matches!(verification, Ok(None)) {
+            self.0.journal.record("close_deferred", serde_json::json!({"account": crate::diagnostics::account(expected), "reason": "absent_from_discovery_waiting_for_exact_exit"}));
             // Retain the process and retry reservation until the exact exit watch
             // confirms exit; do not submit an effect or latch a permanent denial.
             return Ok(false);
         }
         if !policy || !matches!(verification, Ok(Some(true))) {
+            self.0.journal.record("close_denied", serde_json::json!({"account": crate::diagnostics::account(expected),
+                "policy_eligible": policy, "verification": if !policy { "not_checked_policy_denied" } else { match &verification { Ok(Some(true)) => "unique_owner", Ok(_) => "ownership_mismatch", Err(_) => "discovery_failed" } },
+                "verification_error_code": verification.as_ref().err().and_then(|e| crate::diagnostics::error_code(e)),
+                "network_suspended": network_suspended, "launch_allowed": self.0.launch_allowed.load(Ordering::Acquire)}));
             attempts.deny(&expected.id, &intent, identity, now);
             let a = account_mut(&mut next, &expected.id)?;
             a.close_intent.as_mut().unwrap().denied = true;
@@ -469,12 +578,15 @@ impl Engine {
         // Give graceful closure five seconds, including clients that remain in the tray.
         // Every escalation retains the same current intent and verified process identity.
         let force = attempts.force(&expected.id, &intent, identity, now + started.elapsed());
+        self.0.journal.record("close_submitted", serde_json::json!({"account": crate::diagnostics::account(a), "force": force, "intent": intent}));
         match effect(identity, force) {
             Ok(()) => {
+                self.0.journal.record("close_result", serde_json::json!({"account_id": expected.id.parse::<u64>().ok(), "process": crate::diagnostics::process(identity), "intent": intent, "force": force, "success": true}));
                 attempts.record(&expected.id, &intent, identity, now + started.elapsed());
                 Ok(true)
             }
-            Err(_) => {
+            Err(error) => {
+                self.0.journal.record("close_result", serde_json::json!({"account_id": expected.id.parse::<u64>().ok(), "process": crate::diagnostics::process(identity), "intent": intent, "force": force, "success": false, "error_code": crate::diagnostics::error_code(&error)}));
                 attempts.deny(&expected.id, &intent, identity, now);
                 let mut next = state.clone();
                 let a = account_mut(&mut next, &expected.id)?;
@@ -575,7 +687,10 @@ impl Engine {
             &identity,
             now + started.elapsed(),
         );
-        if effect(&identity, force).is_err() {
+        self.0.journal.record("close_submitted", serde_json::json!({"account_id": expected.account_id.parse::<u64>().ok(), "process": crate::diagnostics::process(&identity), "intent": intent, "force": force, "retired": true}));
+        let result = effect(&identity, force);
+        self.0.journal.record("close_result", serde_json::json!({"account_id": expected.account_id.parse::<u64>().ok(), "process": crate::diagnostics::process(&identity), "intent": intent, "force": force, "retired": true, "success": result.is_ok(), "error_code": result.as_ref().err().and_then(|e| crate::diagnostics::error_code(e))}));
+        if result.is_err() {
             attempts.deny(&expected.account_id, &intent, &identity, now);
             let mut next = state.clone();
             next.database.retired_launches[index]

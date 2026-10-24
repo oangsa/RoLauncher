@@ -1,4 +1,4 @@
-# RoLauncher 1.7.8
+# RoLauncher 1.8.0
 
 Manage Roblox accounts, save destinations, and rejoin disconnected sessions.
 Windows uses native WinUI; the shared Linux/Sober port remains a beta.
@@ -34,6 +34,9 @@ Persistent confirmed disconnects recover after grace; replacements wait for veri
 RAM-only hints cannot close clients. Smart cannot guarantee region or local latency. See [release notes](docs/RELEASE-1.7.6.md).
 
 ## Documentation
+
+Unexpected launches or paused rejoin: **Support → Export report** includes recent decision logs.
+Full rotating logs and troubleshooting steps: [Diagnostic logs](docs/DIAGNOSTICS.md).
 
 [User guide](docs/USAGE.md) · [API](docs/API.md) · [Development](docs/DEVELOPMENT.md) · [Changelog](CHANGELOG.md)
 

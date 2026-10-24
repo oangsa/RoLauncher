@@ -300,7 +300,7 @@ pub fn account_notice(old: &Account, new: &Account) -> Option<Notice> {
     if new.status == Status::Running
         && old.status != Status::Running
         && old.recovery_reason != "NormalExit"
-        && (old.disconnect_notified || new.failures > 0)
+        && (old.disconnect_notified || new.failures > 0 && old.status != Status::Reconnecting)
     {
         return Some(Notice::for_account(
             new,
@@ -710,6 +710,32 @@ mod tests {
         next.next_retry = Some(Utc::now());
         next.last_error = Some("Client closed normally".into());
         assert!(account_notice(&old, &next).is_none());
+    }
+    #[test]
+    fn brief_redirects_do_not_repeat_online_alerts_when_an_earlier_retry_is_still_counted() {
+        for failures in 1..5 {
+            let mut before = Account::new("1".into(), "fixture".into());
+            before.desired_running = true;
+            before.status = Status::Reconnecting;
+            before.failures = failures;
+            let mut online = before.clone();
+            online.status = Status::Running;
+            assert!(
+                account_notice(&before, &online).is_none(),
+                "A prior retry must not turn a brief redirect into another online alert"
+            );
+            before.disconnect_notified = true;
+            assert_eq!(
+                account_notice(&before, &online).unwrap().title,
+                "Account is back online"
+            );
+            before.disconnect_notified = false;
+            before.status = Status::Unknown;
+            assert_eq!(
+                account_notice(&before, &online).unwrap().title,
+                "Account is back online"
+            );
+        }
     }
     #[test]
     fn webhook_destination_validation_and_redaction() {

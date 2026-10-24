@@ -1,0 +1,46 @@
+# Provenance and license register
+
+Status: evidence inventory, **not commercial or legal clearance**. Reviewed October 16, 2026.
+Dependency license compliance, authorship/provenance and Roblox platform-policy permission are separate assessments.
+GPL notices, historical releases and source obligations remain intact.
+
+## Classification and evidence
+
+Classes: **1** owner-attributed source with available evidence; **2** dependency with identified license; **3** asset/binary with identified license; **4** reference-inspired implementation needing independent evidence; **5** unresolved provenance or rights.
+Git author names and an owner's statement help investigate authorship but do not conclusively establish independent implementation, assignments or rights to proprietary reuse.
+
+| Path or identity | Class; source/revision | License evidence / obligations | Included evidence; gap and remediation |
+|---|---|---|---|
+| `src/`, `desktop/`, `desktop.linux/`, `scripts/`, `installer/` | 1, with 4/5 exceptions below; repository history since bootstrap `5938d0b` | Project `Cargo.toml` and `LICENSE`: GPL-3.0-only; retain notices and provide corresponding source | Git contains two author identities; identity mapping, employment/contractor assignments and imported-code evidence remain unresolved |
+| RAM-related `src/roblox.rs` (ticket/protocol/private access parsing), `src/logs.rs` (watcher), `src/platform.rs` (singleton/process metadata) | 4; ic3w0lf22/Roblox-Account-Manager `c2b13d146d5db609d499870145e8d2dff2506581` | Existing attribution names GPLv3 upstream; upstream LICENSE fetched at that revision is GPLv3 | `THIRD_PARTY_NOTICES.md` retained; require file/function comparison, design chronology and independent reviewer disposition; do not infer independence from Rust rewrite |
+| Related `src/engine/server_selection.rs`, `src/roblox/servers.rs`, `src/platform_linux.rs` | 5 pending comparison; integrations have evolved since bootstrap | Current project GPL declaration; no per-function origin dossier found | Trace reference influence and imported/adapted expressions, including peer presence and Linux adapters; no claim that every listed file contains copied expression |
+| Prior Phase 0 audit | Evidence, not attestation; commit `8267ae4`, `docs/COMMERCIAL-READINESS-AUDIT-PHASE-0.md` in local history | Identified authorship, RAM, native and platform gaps | Read relevant provenance findings; no signed/file-level owner attestation or independent clearance found; historical commercial proposals are not PR02 authorization |
+| All 312 Cargo package records | 2; exact package/version/upstream in [JSON](dependency-inventory.json) | Declared SPDX expressions; choose valid permissive OR alternatives; preserve all applicable AND obligations | License metadata complete; cargo-deny licenses/sources completed without findings; metadata does not certify embedded/native material or complete corresponding source |
+| `ring` 0.17.14 | 2; crates.io/upstream metadata | Apache-2.0 AND ISC plus component notices | Root notice files collected by packaging; audit nested component notices and source obligations for actual binary |
+| WebView2Loader.dll; webview2-com/sys 0.39.1; Microsoft.Web.WebView2 1.0.3179.45 | 3; crate x64 binary and Microsoft NuGet package | Accompanying Microsoft notice permits redistribution subject to notices/non-endorsement; bindings MIT | `licenses/WebView2-SDK-LICENSE.txt` and desktop package licenses included; retain exact loader hash/version and upstream acquisition record; installed runtime is separate |
+| Windows App SDK 1.8.260921001 family; SDK BuildTools/MSIX/Win32 metadata | 2/3; locked Microsoft packages | Package license files contain Microsoft platform/distributable-code terms, not blanket MIT | Self-contained WinUI output and package notices exist; counsel must resolve distribution conditions and GPL interaction per component; BuildTools legacy URL is not full license evidence |
+| .NET runtime packs | 3; SDK-selected Microsoft.NETCore/WindowsDesktop runtimes | Package/runtime LICENSE and ThirdPartyNotices; component terms vary | Existing desktop collection includes relevant files; pin and match actual published runtime pack versions/hashes, including Linux; normal NuGet vulnerability report is incomplete here |
+| CommonServiceLocator 2.0.5 | 2 with unresolved compatibility; unitycontainer/commonservicelocator | Nuspec legacy license URL identifies Ms-PL; [FSF lists Ms-PL as GPL-incompatible](https://www.gnu.org/licenses/license-list.html#ms-pl) | Runtime asset and DLL found in an existing local Linux payload; release blocker pending rights/disposition, not a development-only dismissal; no automatic replacement here |
+| LibVLCSharp 3.9.7.1 | 2; NuGet/VideoLAN | LGPL-2.1-or-later declaration | Runtime DLL found in existing Linux payload, but no license notice file detected in cached package; verify source access, notices and replacement/relink obligations; actual libVLC runtime is separate |
+| Uno.Sdk 6.7.30 | 2; global.json, package revision `a2a0a4b37b8d3b3defd701eb97d9f8adc9a2b132` | Apache-2.0 in cached nuspec | Build SDK outside project lock; preserve resolved SDK evidence and notices |
+| Uno.Sdk.Extras 6.3.1 | 2 with restrictive terms; cached LICENSE.md | EULA limits use to personal/internal business and prohibits redistribution of software | Build asset rather than demonstrated shipped runtime; verify entitlement/usage and ensure proprietary tool binaries are absent from payloads; copying a notice is not redistribution clearance |
+| Tmds.DBus.Generator 0.92.0; Uno.Diagnostics.Eventing 2.0.1; Uno.Fonts.Roboto 2.2.2; Uno.Settings.DevServer 1.13.4; Uno.UI.App.Mcp 1.3.7; Uno.UI.HotDesign 1.20.485; Uno.Wasm.WebSockets 1.1.0; Uno.icu-macos/win 77.3.2 | 5; exact nuspec/upstream references in JSON | No declared license metadata found for these nine package identities | Some are runtime candidates, others build/foreign-target assets; obtain version-specific license/source evidence and inspect Release output; do not assign Uno's general license to every package |
+| DirectNAot / Extensions 1.6.1, WebView2Aot 1.5.0, remaining Uno/Skia/HarfBuzz packages | 2; locked NuGet packages | File or SPDX evidence and hashes in JSON; preserve component notices | Exact native/foreign-platform asset inclusion and any embedded font/media obligations require payload review |
+| Inno Setup | 3/build tool; local installer download 6.7.3, upstream Jordan Russell/Martijn Laan | `licenses/inno-setup.txt`; [upstream terms](https://jrsoftware.org/files/is/license.txt) require notices and honest origin | Notice included; build allows alternate installed compiler versions, so archive/signature/compiler identity is not fully pinned |
+| GCC, libgcc/libstdc++, MinGW/winpthreads | 3/5; optional local GNU toolchain | GPL/LGPL and applicable exceptions; [GCC runtime exception](https://gcc.gnu.org/onlinedocs/libstdc++/manual/license.html) applies only under its conditions | Exception text included; verify exact static/dynamic components, license texts, source/exception eligibility and payload imports; no blanket exception for unrelated code |
+| `assets/fonts/Inter-*.ttf` | 3; Inter official 4.1, rsms/inter | SIL OFL-1.1; copyright/license retention and font-name restrictions | `licenses/inter-OFL.txt` included; upstream archive/file-hash comparison remains open; unmodified-source assertion currently comes from repository documentation |
+| `assets/RoLauncher.png`, `.ico`, `icon-concepts/*` | 1 with evidence gap; `assets/README.md`, October 10 history | Recorded generated concepts and owner selection; no third-party mark intentionally requested | Preserve generation/source record and evaluate trademark/similarity rights independently; generation does not guarantee rights clearance |
+| Linux OS libraries, Flatpak and Sober | 5 for deployment-specific versions; externally installed | Each upstream/OS package has its own terms; Sober not bundled | Inventory actual distro/native versions before distributing a bundled variant; platform-policy review remains separate |
+| GitHub Actions and security CLIs | 2/build tools; exact new pins in workflow/installer | Upstream Action, MIT and Apache/MIT tool terms | Scanners not bundled in product; archive hashes verified; existing mutable Actions documented separately |
+
+## Readiness blockers and owner actions
+
+1. Resolve CommonServiceLocator/GPL compatibility and Microsoft redistribution/GPL interactions before distribution claims.
+2. Obtain missing NuGet/component license evidence; verify LibVLCSharp obligations and restrictive Uno tool usage/output separation.
+3. Complete file-level authorship/reference comparison, contributor identity/assignments and independent provenance review.
+4. Verify font/binary origins, full actual runtime payload, notices and complete corresponding source per release.
+5. Commission separate Roblox-policy review; this scanner work supplies no platform approval.
+
+Selling GPL-covered software does not grant permission to restrict recipients' GPL rights or relicense covered contributions proprietarily.
+Any proprietary licensing decision needs sufficient rights and qualified review; this PR implements none.
+Open findings are not accepted exceptions; retain owner decisions and exception approvals in private security records.

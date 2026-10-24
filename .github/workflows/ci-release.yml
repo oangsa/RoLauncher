@@ -149,4 +149,3 @@ jobs:
           path: |
             target/linux-ui-preview/*.png
             target/linux-ui-preview/*.txt
-

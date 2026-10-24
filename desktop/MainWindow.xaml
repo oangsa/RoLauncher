@@ -366,6 +366,7 @@
           <TextBlock Text="Support" FontSize="24" FontWeight="SemiBold" Margin="0,0,0,4"/>
           <Border Style="{StaticResource Card}"><StackPanel Spacing="16">
             <TextBlock Text="Support report" Style="{StaticResource SectionTitle}"/>
+            <TextBlock Text="Includes recent launch and auto-rejoin decisions. Export soon after an unexpected launch or pause." Style="{StaticResource Caption}" TextWrapping="Wrap"/>
             <Button Content="Export report" Click="ExportDiagnostics_Click" HorizontalAlignment="Left"/>
           </StackPanel></Border>
           <Border Style="{StaticResource Card}"><StackPanel Spacing="16">

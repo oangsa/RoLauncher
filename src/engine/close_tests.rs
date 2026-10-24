@@ -4,6 +4,310 @@ struct Fixture {
     engine: Engine,
     path: std::path::PathBuf,
 }
+
+#[test]
+fn transient_discovery_failure_defers_recovery_without_latching_a_pause() {
+    for submitted in [false, true] {
+        let f = Fixture::new();
+        f.recovery();
+        let now = Instant::now();
+        let mut attempts = CloseAttempts::default();
+        if submitted {
+            assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
+        }
+        let before = f.account();
+        let _ = f.engine.close_owned(
+            &before,
+            now + Duration::from_secs(6),
+            &mut attempts,
+            || Err("Windows process query failed".into()),
+            |_, _| panic!("No close without verification"),
+        );
+        let waiting = f.account();
+        assert_ne!(
+            waiting.status,
+            Status::NeedsAttention,
+            "Temporary discovery failure must not permanently pause recovery"
+        );
+        assert_eq!(waiting.failures, before.failures);
+        assert_eq!(waiting.next_retry, before.next_retry);
+        assert!(!waiting.close_intent.as_ref().is_some_and(|i| i.denied));
+        assert!(!launch_ready(
+            &waiting,
+            Utc::now() + ChronoDuration::hours(1)
+        ));
+        assert_eq!(
+            f.tick(&waiting, now + Duration::from_secs(12), &mut attempts),
+            vec![submitted]
+        );
+    }
+}
+
+#[test]
+fn exited_bootstrap_adopts_a_unique_surviving_client_without_a_second_launch() {
+    let f = Fixture::new();
+    let original = f.account();
+    let identity = original.process.clone().unwrap();
+    let mut players = f.players();
+    players[0].pid += 100;
+    players[0].creation_time = "successor-start".into();
+    let successor = players[0].identity(original.generation);
+    assert!(
+        f.engine
+            .reconcile_exit(&original, &identity, true, &players, false)
+    );
+    let current = f.account();
+    assert_eq!(current.process, Some(successor));
+    assert_eq!(current.status, Status::Unknown);
+    assert_eq!(current.failures, original.failures);
+    assert_eq!(current.tracker, original.tracker);
+    assert!(!launch_ready(
+        &current,
+        Utc::now() + ChronoDuration::hours(1)
+    ));
+}
+
+#[test]
+fn exited_client_waits_for_fresh_discovery_and_the_launch_handoff_window() {
+    let f = Fixture::new();
+    let original = f.account();
+    let identity = original.process.clone().unwrap();
+    assert!(
+        !f.engine
+            .reconcile_exit(&original, &identity, true, &[], false)
+    );
+    let waiting = f.account();
+    assert_eq!(waiting.process, original.process);
+    assert_eq!(waiting.failures, original.failures);
+    assert!(!launch_ready(
+        &waiting,
+        Utc::now() + ChronoDuration::hours(1)
+    ));
+    assert!(
+        f.engine
+            .reconcile_exit(&waiting, &identity, true, &[], true)
+    );
+    let exited = f.account();
+    assert!(exited.process.is_none() && exited.tracker.is_none());
+    assert_eq!(exited.failures, original.failures + 1);
+    assert!(launch_ready(&exited, Utc::now() + ChronoDuration::hours(1)));
+}
+
+#[test]
+fn exit_reconciliation_rejects_ambiguity_shared_ownership_and_stale_commands() {
+    for scenario in [
+        "ambiguous",
+        "shared",
+        "stale",
+        "old-process",
+        "different-tracker",
+    ] {
+        let f = Fixture::new();
+        let original = f.account();
+        let identity = original.process.clone().unwrap();
+        let mut players = f.players();
+        if scenario != "old-process" {
+            players[0].pid += 100;
+        }
+        match scenario {
+            "ambiguous" => players.push(players[0].clone()),
+            "shared" => {
+                let other = f.engine.snapshot().accounts[1].clone();
+                f.engine
+                    .update("2", other.generation, |a| {
+                        a.tracker = original.tracker.clone()
+                    })
+                    .unwrap();
+            }
+            "stale" => {
+                f.engine.command("1", "stop").unwrap();
+            }
+            "different-tracker" => players[0].tracker = "unrelated".into(),
+            _ => {}
+        }
+        assert!(
+            !f.engine
+                .reconcile_exit(&original, &identity, true, &players, false),
+            "{scenario}"
+        );
+        assert_eq!(f.account().process, original.process, "{scenario}");
+        assert!(!launch_ready(
+            &f.account(),
+            Utc::now() + ChronoDuration::hours(1)
+        ));
+    }
+}
+
+#[test]
+fn handoff_discards_old_automatic_authority_but_retains_explicit_commands_and_pauses() {
+    for action in ["recover", "stop", "restart", "permission"] {
+        let f = Fixture::new();
+        let now = Instant::now();
+        let mut attempts = CloseAttempts::default();
+        match action {
+            "recover" => {
+                f.recovery();
+                assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
+            }
+            "permission" => {
+                let a = f.account();
+                f.engine.signal("1", a.generation, Signal::PermissionDenied);
+            }
+            _ => {
+                f.engine.command("1", action).unwrap();
+            }
+        }
+        let original = f.account();
+        let identity = original.process.clone().unwrap();
+        let mut players = f.players();
+        players[0].pid += 100;
+        players[0].creation_time = "successor".into();
+        assert!(
+            f.engine
+                .reconcile_exit(&original, &identity, true, &players, false)
+        );
+        let successor = f.account();
+        assert_eq!(successor.failures, original.failures);
+        match action {
+            "recover" => {
+                assert!(successor.close_intent.is_none());
+                assert_eq!(successor.recovery_evidence, RecoveryEvidence::Unavailable);
+                assert!(
+                    f.tick(&successor, now + Duration::from_secs(6), &mut attempts)
+                        .is_empty()
+                );
+                f.engine.observe(
+                    "1",
+                    successor.generation,
+                    successor.process.as_ref().unwrap(),
+                    Observation::DiskLog(
+                        crate::logs::parse_event("[FLog::Network] Connection accepted").unwrap(),
+                    ),
+                );
+                assert_eq!(f.account().status, Status::Running);
+            }
+            "permission" => {
+                assert_eq!(successor.status, Status::NeedsAttention);
+                assert_eq!(successor.recovery_reason, "Permission");
+            }
+            _ => {
+                assert_eq!(successor.close_intent, original.close_intent);
+                assert_eq!(
+                    f.tick(&successor, now + Duration::from_secs(6), &mut attempts),
+                    vec![false]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn exit_settlement_requires_both_a_five_second_grace_and_the_existing_launch_deadline() {
+    let now = Instant::now();
+    let utc = Utc::now();
+    let pending = PendingExit {
+        observed: now,
+        clean: true,
+    };
+    let mut a = Account::new("1".into(), "fixture".into());
+    assert!(!pending.settled(&a, now + Duration::from_secs(4), utc));
+    assert!(pending.settled(&a, now + Duration::from_secs(5), utc));
+    a.ownership_deadline = Some(utc + ChronoDuration::seconds(90));
+    assert!(!pending.settled(
+        &a,
+        now + Duration::from_secs(89),
+        utc + ChronoDuration::seconds(89)
+    ));
+    assert!(pending.settled(
+        &a,
+        now + Duration::from_secs(90),
+        utc + ChronoDuration::seconds(90)
+    ));
+}
+
+#[test]
+fn recovery_flow_replays_redirect_handoff_kick_verification_retry_and_other_account() {
+    let f = Fixture::new();
+    let other = f.engine.snapshot().accounts[1].clone();
+    let original = f.account();
+    let identity = original.process.clone().unwrap();
+    let mut attempts = CloseAttempts::default();
+    let now = Instant::now();
+    for line in [
+        "[FLog::Network] Connection lost",
+        "[FLog::Network] Connection accepted",
+    ] {
+        f.engine.observe(
+            "1",
+            original.generation,
+            &identity,
+            Observation::DiskLog(crate::logs::parse_event(line).unwrap()),
+        );
+    }
+    assert!(f.tick(&f.account(), now, &mut attempts).is_empty());
+    assert_eq!(f.account().failures, 0);
+    let mut players = f.players();
+    players[0].pid += 100;
+    players[0].creation_time = "handoff".into();
+    assert!(
+        f.engine
+            .reconcile_exit(&original, &identity, true, &players, false)
+    );
+    let successor = f.account();
+    let identity = successor.process.clone().unwrap();
+    f.engine.observe(
+        "1",
+        successor.generation,
+        &identity,
+        Observation::DiskLog(
+            crate::logs::parse_event("[FLog::Network] Connection accepted").unwrap(),
+        ),
+    );
+    f.engine.observe(
+        "1",
+        successor.generation,
+        &identity,
+        Observation::DiskLog(
+            crate::logs::parse_event("[FLog::Network] Sending disconnect with reason: 267")
+                .unwrap(),
+        ),
+    );
+    f.engine.elapse_reconnect_grace("1", successor.generation);
+    f.engine
+        .close_owned(
+            &f.account(),
+            now,
+            &mut attempts,
+            || Err("query unavailable".into()),
+            |_, _| panic!("Unverified close"),
+        )
+        .unwrap();
+    assert_eq!(f.account().failures, 0);
+    assert_eq!(f.tick(&f.account(), now, &mut attempts), vec![false]);
+    assert_eq!(
+        f.tick(&f.account(), now + Duration::from_secs(6), &mut attempts),
+        vec![true]
+    );
+    let closing = f.account();
+    assert_eq!(closing.failures, 1);
+    assert!(!launch_ready(
+        &closing,
+        Utc::now() + ChronoDuration::hours(1)
+    ));
+    assert!(
+        f.engine
+            .reconcile_exit(&closing, &identity, false, &[], true)
+    );
+    let retry = f.account();
+    assert_eq!(retry.failures, 1);
+    assert!(!launch_ready(&retry, Utc::now()));
+    assert!(launch_ready(&retry, retry.next_retry.unwrap()));
+    let unchanged = f.engine.snapshot().accounts[1].clone();
+    assert_eq!(unchanged.process, other.process);
+    assert_eq!(unchanged.generation, other.generation);
+    assert_eq!(unchanged.failures, other.failures);
+    assert_eq!(unchanged.status, other.status);
+}
 impl Fixture {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!("pr07-effects-{}", Uuid::new_v4()));
@@ -949,13 +1253,15 @@ fn unsaved_first_recovery_denial_cannot_regain_authority_with_a_new_automatic_in
         let blocked_path = f.path.join("accounts.json.tmp");
         std::fs::create_dir(&blocked_path).unwrap();
         let a = f.account();
+        let mut ambiguous = f.players();
+        ambiguous.push(ambiguous[0].clone());
         assert!(
             f.engine
                 .close_owned(
                     &a,
                     now,
                     &mut attempts,
-                    || Err("synthetic discovery failure".into()),
+                    || Ok(ambiguous),
                     |_, _| panic!("unverified recovery cannot close"),
                 )
                 .is_err()
@@ -2110,7 +2416,7 @@ fn disk_reconnect_during_graceful_close_cancels_force_and_relaunch() {
 
 #[test]
 fn automatic_force_revalidates_ownership_after_graceful_submission() {
-    for scenario in ["ambiguous", "pid", "creation", "error"] {
+    for scenario in ["ambiguous", "pid", "creation"] {
         let f = Fixture::new();
         f.recovery();
         let now = Instant::now();
@@ -2131,13 +2437,7 @@ fn automatic_force_revalidates_ownership_after_graceful_submission() {
             &f.account(),
             now + Duration::from_secs(6),
             &mut attempts,
-            || {
-                if scenario == "error" {
-                    Err("synthetic discovery failure".into())
-                } else {
-                    Ok(players)
-                }
-            },
+            || Ok(players),
             |_, _| panic!("invalid ownership must prevent force"),
         );
         assert_eq!(f.account().status, Status::NeedsAttention, "{scenario}");

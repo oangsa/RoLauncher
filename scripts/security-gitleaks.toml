@@ -1,0 +1,20 @@
+title = "RoLauncher: default Gitleaks rules plus Roblox credentials"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "roblox-cookie"
+description = "Roblox warning-bearing session cookie"
+regex = '''_\|WARNING:[^\r\n"'\s]{20,}'''
+
+[[rules]]
+id = "roblox-authenticated-launch"
+description = "Authenticated Roblox launch ticket or URL"
+regex = '''(?i)(?:authenticationTicket[:=]|[?&](?:authenticationTicket|ticket)=)[A-Za-z0-9_+/%=.-]{16,}'''
+
+[[rules]]
+id = "roblox-assigned-cookie"
+description = "Assigned Roblox session cookie"
+regex = '''(?i)(?:\.ROBLOSECURITY|roblox_cookie)\s*[=:]\s*["']?([A-Za-z0-9_|.-]{32,})'''
+secretGroup = 1

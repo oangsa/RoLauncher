@@ -18,11 +18,11 @@ Output: `dist\rolauncher`; UI previews: `target\ui-preview`. Tests use isolated 
 
 Remote: `git@github.com:oangsa/RoLauncher.git`.
 
-1. Branch from `dev` as `feature/description`.
+1. Branch from `dev` as `feature/description` or `codex/description`.
 2. Open a PR into `dev`; pass CI.
 3. Promote `dev` into `main` through a PR with a merge commit.
 
-Recommended protection: require PRs, **Branch flow**, and **Windows checks** on dev/main; disable force pushes and deletion.
+Required publication controls and all required Windows/Linux checks: [release governance](RELEASE-GOVERNANCE.md).
 
 ## Releases
 
@@ -48,8 +48,9 @@ For an intentional stable release:
 3. Run `python scripts/check-release.py`.
 4. Package with `scripts/package.ps1 -UseCurrentVersion`.
 
-Publishing rejects dev identities. Main CI tests and publishes installer, portable/source ZIPs, and SHA256 checksums.
-Published artifacts stay unchanged; interrupted drafts resume only at the same commit.
+Main CI checks and packages every merge; stable publication requires a fresh, owner-merged [Release Intent](RELEASE-GOVERNANCE.md#release-intent-contract).
+Publication stays disabled until separately approved controls and activation are complete.
+Published artifacts stay unchanged; matching interrupted drafts can resume without replacing assets.
 
 ## Local packaging
 

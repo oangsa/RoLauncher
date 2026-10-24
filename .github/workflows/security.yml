@@ -1,0 +1,85 @@
+{
+  "name": "Security inventory",
+  "on": {
+    "pull_request": { "branches": ["dev", "main"] },
+    "workflow_dispatch": {}
+  },
+  "permissions": { "contents": "read" },
+  "jobs": {
+    "source": {
+      "name": "Security source and dependency evidence",
+      "runs-on": "ubuntu-24.04",
+      "timeout-minutes": 20,
+      "steps": [
+        {
+          "uses": "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+          "with": { "fetch-depth": 0, "persist-credentials": false }
+        },
+        {
+          "name": "Install pinned Rust without changing application version",
+          "run": "rustup toolchain install 1.99.0 --profile minimal\nrustup default 1.99.0"
+        },
+        {
+          "name": "Install checksum-pinned free scanners",
+          "run": "python3 scripts/security-tools.py --directory .tools/security"
+        },
+        {
+          "name": "Test security decisions with synthetic fixtures",
+          "env": { "GITLEAKS": "${{ github.workspace }}/.tools/security/gitleaks", "CARGO_DENY": "${{ github.workspace }}/.tools/security/cargo-deny", "CARGO_AUDIT": "${{ github.workspace }}/.tools/security/cargo-audit" },
+          "run": "python3 scripts/test-security.py"
+        },
+        {
+          "name": "Scan tracked content and new Git history; locations only",
+          "env": { "BASE_SHA": "${{ github.event.pull_request.base.sha }}", "HEAD_SHA": "${{ github.event.pull_request.head.sha }}" },
+          "run": "python3 scripts/security.py secrets --gitleaks .tools/security/gitleaks\nif [ -n \"$BASE_SHA\" ]; then\n  python3 scripts/security.py secrets --gitleaks .tools/security/gitleaks --base \"$BASE_SHA\" --head \"$HEAD_SHA\"\nelse\n  python3 scripts/security.py secrets --gitleaks .tools/security/gitleaks --history\nfi"
+        },
+        {
+          "name": "RustSec baseline; unavailable data fails as unverified",
+          "run": "python3 scripts/security.py audit --kind rust --tool .tools/security/cargo-audit --database .tools/security/advisory-db"
+        },
+        {
+          "name": "Locked license and source evidence; baseline findings remain visible",
+          "run": "cargo fetch --locked\npython3 scripts/security.py audit --kind licenses --tool .tools/security/cargo-deny"
+        }
+      ]
+    },
+    "nuget": {
+      "name": "Security NuGet evidence (${{ matrix.os }})",
+      "runs-on": "${{ matrix.os }}",
+      "timeout-minutes": 20,
+      "strategy": {
+        "fail-fast": false,
+        "matrix": {
+          "include": [
+            { "os": "windows-2025", "project": "desktop/RoLauncher.Desktop.csproj", "directory": "desktop" },
+            { "os": "ubuntu-24.04", "project": "desktop.linux/RoLauncher.Linux.csproj", "directory": "desktop.linux" }
+          ]
+        }
+      },
+      "steps": [
+        {
+          "uses": "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+          "with": { "persist-credentials": false }
+        },
+        {
+          "uses": "actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9",
+          "with": { "dotnet-version": "8.0.x\n10.0.x" }
+        },
+        {
+          "name": "Restore exact locks without application build or publication",
+          "working-directory": "${{ matrix.directory }}",
+          "run": "dotnet restore --locked-mode -p:Configuration=Release -p:Platform=x64 --configfile NuGet.Config"
+        },
+        {
+          "name": "Audit direct and transitive packages; preserve source failures",
+          "working-directory": "${{ matrix.directory }}",
+          "run": "python ../scripts/security.py audit --kind nuget --project ${{ matrix.project }}"
+        },
+        {
+          "name": "Account for empty test package lock separately from runtime audit",
+          "run": "python scripts/security.py audit --kind nuget --project desktop.tests/RoLauncher.Desktop.Tests.csproj"
+        }
+      ]
+    }
+  }
+}

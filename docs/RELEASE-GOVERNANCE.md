@@ -168,4 +168,3 @@ Historical beta tags retain legacy workflows; restrict new beta tag creation and
 
 The legacy beta library seam remains solely for compatibility tests; its CLI delegates to the protected boundary.
 No workflow calls that library directly or gives it candidate build credentials with write access.
-

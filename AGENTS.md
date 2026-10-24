@@ -1,5 +1,13 @@
 # Repository instructions
 
+## Before starting a new feature
+
+1. Inspect `git status --short`, `git diff`, and `git diff --cached` to understand existing changes before editing.
+2. Require a clean worktree, including the index and untracked files. Preserve existing work with a commit, a recoverable stash, or a clean worktree; never discard user changes to satisfy this rule.
+3. Run `git fetch origin` and inspect `git branch -vv`. Compare the working branch with its upstream and the intended base, normally `origin/main`; local tracking refs alone do not prove freshness.
+4. Update the local working and base branches against their corresponding origin branches before implementation. Fast-forward where possible; preserve local commits when resolving divergence, finish conflicts, and run relevant checks.
+5. Recheck the diff against the updated base for fixes or features already shipped, then confirm a clean worktree before adding the feature. If fetching fails, report that freshness remains unverified before proceeding.
+
 ## Versioning and releases
 
 Use MAJOR.MINOR.PATCH for published stable releases. Apply these rules to all future releases:

@@ -33,17 +33,8 @@ try {
         & git archive --format=zip "--output=$taskSourceZip" HEAD
         if ($LASTEXITCODE -ne 0) { throw 'Exact-commit source archive failed' }
     } else {
-        $taskSource = Join-Path $taskRoot ('target\source-package-' + [guid]::NewGuid().ToString())
-        New-Item -ItemType Directory -Path $taskSource | Out-Null
-        foreach ($taskItem in @('Cargo.toml','Cargo.lock','build.rs','README.md','CHANGELOG.md','AGENTS.md','LICENSE','THIRD_PARTY_NOTICES.md','.gitignore','.gitattributes','.github','assets','installer','src','examples','scripts','docs','licenses')) {
-            Copy-Item -LiteralPath $taskItem -Destination $taskSource -Recurse
-        }
-        foreach ($taskProject in @('desktop','desktop.tests','desktop.linux')) {
-            $taskProjectSource = Join-Path $taskSource $taskProject
-            New-Item -ItemType Directory -Path $taskProjectSource | Out-Null
-            Get-ChildItem -LiteralPath $taskProject -File | Copy-Item -Destination $taskProjectSource
-        }
-        Get-ChildItem -LiteralPath $taskSource | Compress-Archive -DestinationPath $taskSourceZip
+        & python "$PSScriptRoot\package-development-source.py" $taskSourceZip
+        if ($LASTEXITCODE -ne 0) { throw 'Development source archive failed' }
     }
     & "$PSScriptRoot\build-installer.ps1" -DistributionDirectory $taskDistribution -OutputDirectory $taskOutput
     $taskLines = foreach ($taskArtifact in @($taskBinaryZip, $taskSourceZip, $taskInstaller)) {

@@ -1,6 +1,6 @@
 [package]
 name = "rolauncher"
-version = "1.7.8"
+version = "1.8.0"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "Roblox account launcher and recovery supervisor for Windows and Linux"
@@ -8,6 +8,10 @@ description = "Roblox account launcher and recovery supervisor for Windows and L
 [[bin]]
 name = "RoLauncher"
 path = "src/main.rs"
+
+[[example]]
+name = "windows-device-identity"
+test = true
 
 [dependencies]
 axum = "0.8"
@@ -44,6 +48,9 @@ strip = true
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Security_Authorization", "Win32_System_Registry"] }
 
 [build-dependencies]
 winresource = "0.1.31"
