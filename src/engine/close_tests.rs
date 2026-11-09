@@ -6,16 +6,103 @@ struct Fixture {
 }
 
 #[test]
+fn native_stop_failure_completes_the_operation_as_failed_and_preserves_the_process() {
+    let f = Fixture::new();
+    let op = f.engine.command("1", "stop").unwrap();
+    let a = f.account();
+    let players = f.players();
+    assert!(
+        f.engine
+            .close_owned(
+                &a,
+                Instant::now(),
+                &mut CloseAttempts::default(),
+                || Ok(players),
+                |_, _| Err("Windows error 5".into())
+            )
+            .is_err()
+    );
+    assert_eq!(f.engine.operation(op.id).unwrap().state, "failed");
+    assert_eq!(f.account().process, a.process);
+    assert_eq!(f.account().status, Status::NeedsAttention);
+}
+
+#[test]
+fn repeated_stop_after_reopen_remains_pending_and_rebinds_the_operation() {
+    let f = Fixture::new();
+    f.engine.command("1", "stop").unwrap();
+    let reopened = Engine::open(Store::new(f.path.clone()).unwrap(), "fixture".into()).unwrap();
+    let op = reopened.command("1", "stop").unwrap();
+    let a = reopened.snapshot().accounts.remove(0);
+    assert_eq!(a.status, Status::Stopping);
+    assert_eq!(op.state, "queued");
+    assert_eq!(a.operation_id, Some(op.id));
+    assert_eq!(a.close_intent.unwrap().operation_id, Some(op.id));
+}
+
+#[test]
+fn stop_all_inspection_failure_does_not_skip_verified_candidates_or_report_success() {
+    let f = Fixture::new();
+    let players = f.players();
+    let mut seen = Vec::new();
+    let error = f
+        .engine
+        .close_all_observed_with(
+            || Ok((players, 1)),
+            |id| {
+                seen.push(id.pid);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+    assert_eq!(seen.len(), 2);
+    assert!(error.contains("2 Roblox") && error.contains("1 could not be inspected"));
+    let saved = Store::new(f.path.clone()).unwrap().load().unwrap();
+    assert!(saved.accounts.iter().all(|s| !s.account.desired_running));
+}
+
+#[test]
+fn initial_attachment_rejects_a_tracker_claimed_by_another_account() {
+    let f = Fixture::new();
+    let first = f.account();
+    let identity = first.process.clone().unwrap();
+    f.engine
+        .transaction(|s| {
+            s.database.accounts[0].account.process = None;
+            s.database.accounts[1].account.tracker = first.tracker.clone();
+            Ok(())
+        })
+        .unwrap();
+    let players = vec![platform::Player {
+        pid: identity.pid,
+        creation_time: identity.creation_time.clone(),
+        tracker: identity.tracker.clone(),
+    }];
+    f.engine
+        .attach_player(&f.account(), identity, &players)
+        .unwrap();
+    assert!(f.account().process.is_none());
+    assert_eq!(f.account().status, Status::NeedsAttention);
+}
+
+#[test]
 fn stop_reports_pending_until_the_owned_process_exit_is_confirmed() {
     let f = Fixture::new();
     let op = f.engine.command("1", "stop").unwrap();
-    assert_eq!(serde_json::to_value(&f.account().status).unwrap(), "stopping");
+    assert_eq!(
+        serde_json::to_value(&f.account().status).unwrap(),
+        "stopping"
+    );
     assert_eq!(op.state, "queued");
     let mut attempts = CloseAttempts::default();
-    assert_eq!(f.tick(&f.account(), Instant::now(), &mut attempts), vec![false]);
+    assert_eq!(
+        f.tick(&f.account(), Instant::now(), &mut attempts),
+        vec![false]
+    );
     assert_eq!(f.engine.operation(op.id).unwrap().state, "queued");
     let a = f.account();
-    f.engine.owned_exit_observed(&a, a.process.as_ref().unwrap(), true);
+    f.engine
+        .owned_exit_observed(&a, a.process.as_ref().unwrap(), true);
     assert_eq!(f.account().status, Status::Stopped);
     assert_eq!(f.engine.operation(op.id).unwrap().state, "completed");
 }
@@ -25,13 +112,36 @@ fn retired_stop_discovery_outage_defers_without_revoking_explicit_intent() {
     let f = Fixture::new();
     let (old, players) = pending_stop(&f);
     let mut attempts = CloseAttempts::default();
-    assert!(!f.engine.close_retired(&old, &players, Instant::now(), &mut attempts,
-        || Err("Windows process query failed".into()), |_, _| panic!("outage cannot authorize a close")).unwrap());
+    assert!(
+        !f.engine
+            .close_retired(
+                &old,
+                &players,
+                Instant::now(),
+                &mut attempts,
+                || Err("Windows process query failed".into()),
+                |_, _| panic!("outage cannot authorize a close")
+            )
+            .unwrap()
+    );
     let current = f.engine.0.state.lock().unwrap().database.retired_launches[0].clone();
     assert!(!current.close_intent.as_ref().unwrap().denied);
     assert_ne!(f.account().status, Status::NeedsAttention);
-    assert!(f.engine.close_retired(&current, &players, Instant::now(), &mut attempts,
-        || Ok(players.clone()), |_, force| { assert!(!force); Ok(()) }).unwrap());
+    assert!(
+        f.engine
+            .close_retired(
+                &current,
+                &players,
+                Instant::now(),
+                &mut attempts,
+                || Ok(players.clone()),
+                |_, force| {
+                    assert!(!force);
+                    Ok(())
+                }
+            )
+            .unwrap()
+    );
 }
 
 #[test]
@@ -639,7 +749,7 @@ fn shared_observation_never_replaces_fresh_verification_for_graceful_or_force() 
             assert_eq!(discoveries, 1, "{failure}, force={force}");
             let record = f.engine.0.state.lock().unwrap().database.retired_launches[0].clone();
             assert_eq!(record.process.unwrap().creation_time, "synthetic-1");
-            assert!(record.close_intent.unwrap().denied);
+            assert_eq!(record.close_intent.unwrap().denied, failure != "error");
         }
     }
 }
@@ -1353,7 +1463,7 @@ fn retired_denial_retries_only_unsaved_state_and_keeps_the_original_identity() {
                     &players,
                     now + Duration::from_secs(offset),
                     &mut attempts,
-                    || Err("synthetic discovery failure".into()),
+                    || Ok(Vec::new()),
                     |_, _| panic!("unsaved denial cannot force"),
                 )
                 .is_err()
@@ -1542,7 +1652,7 @@ fn retired_stop_accepts_late_discovery_but_rejects_ambiguous_obsolete_and_reused
         assert_eq!(
             f.account().status,
             if scenario == "expired" {
-                Status::Stopped
+                Status::Stopping
             } else {
                 Status::NeedsAttention
             }
