@@ -184,6 +184,7 @@ pub struct ProcessIdentity {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CloseReason {
     UserStop,
+    SessionEnded,
     ManualRestart,
     ManualStartReplacement,
     AutomaticRecovery,
