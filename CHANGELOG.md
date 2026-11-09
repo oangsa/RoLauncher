@@ -1,6 +1,15 @@
 # Changelog
 
-## [1.8.0] — Unreleased
+## [1.9.0] — Unreleased
+
+- Observe Windows clients independently of WMI and retain verified tracker evidence on exact process handles.
+- Prepare up to four unrelated launches concurrently while preserving five-second protocol spacing.
+- Show Stopping until owned clients and cancelled launches are resolved.
+- Reject trackers hidden inside quoted payloads and client images outside the verified installation root.
+- Keep explicit Stop pending through temporary verification outages and report partial Stop All failures.
+- Rediscover Windows log ownership after file replacement.
+
+## [1.8.0] — 2026-10-24
 
 - Preserve unsaved client work by requiring current, verified close intent before managed session cleanup.
 - Save detailed local launch and recovery logs, including pause reasons, process ownership, retry decisions, and recent events in support exports.

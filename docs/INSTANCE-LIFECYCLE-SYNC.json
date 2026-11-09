@@ -1,0 +1,217 @@
+{
+  "schema": 1,
+  "repository": "https://github.com/oangsa/RoLauncher",
+  "scope": "Free only",
+  "base_sha": "12c64ed36f9c1265f1de9af24db379abd3a03039",
+  "development_base_sha": "bf24ff0ff59e8cc86801e430a7c0552d7a85a8b2",
+  "implementation_sha": "18666bfbbe7e0e067fc712743f7e942479373379",
+  "branch": "codex/free-instance-lifecycle",
+  "pull_request": "https://github.com/oangsa/RoLauncher/pull/55",
+  "status": "BLOCKED",
+  "reason": "Inherited RustSec findings require remediation or independent disposition; independent security/code review and live Roblox acceptance are pending.",
+  "independent_approval": false,
+  "premium_modified": false,
+  "version": "1.9.0-dev.376e7eb20a57",
+  "synchronization_policy": "Review and port these exact Free changes in a separately authorized Premium task; preserve Premium-specific policies. Do not replace entire Premium files without reviewing their differences.",
+  "shared_files": [
+    {
+      "path": "desktop.tests/Program.cs",
+      "git_blob_sha1": "bd73360136e3aed7c6285bc22568b44a5dc17260",
+      "mode": "review_and_port_delta"
+    },
+    {
+      "path": "desktop/CHANGELOG.txt",
+      "git_blob_sha1": "b1a0fde3f8cc03e7d8a0bc81d4494a90c2a6a521",
+      "mode": "review_and_port_delta"
+    },
+    {
+      "path": "desktop/MainWindow.Workspace.cs",
+      "git_blob_sha1": "0fb577a31a4b6dbd12da0eb7e335b7ef85a60884",
+      "mode": "review_and_port_delta"
+    },
+    {
+      "path": "desktop/MainWindow.xaml",
+      "git_blob_sha1": "577f50e262bf4916cf63111da20531250d8cec64",
+      "mode": "review_and_port_delta"
+    },
+    {
+      "path": "desktop/Models.cs",
+      "git_blob_sha1": "55120f8206586c11b4f28a7b792bdbec220489e2",
+      "mode": "review_and_port_delta"
+    },
+    {
+      "path": "src/api/compat_tests.rs",
+      "git_blob_sha1": "078a4c1658a869edfa06afb7caec240d3dd507cf",
+      "mode": "review_and_port_delta"
+    },
+    {
+      "path": "src/discord_bot.rs",
+      "git_blob_sha1": "3cf076851141ed1185968b92f538cb7b5ddd0db8",
+      "mode": "review_and_port_delta"
+    },
+    {
+      "path": "src/engine.rs",
+      "git_blob_sha1": "f1e6e24b6ec1e072392b29af42a61d001e36baa6",
+      "mode": "review_and_port_delta"
+    },
+    {
+      "path": "src/engine/close_safety.rs",
+      "git_blob_sha1": "f06d9d6a8d2fbaac349b06420fcbb574ce335795",
+      "mode": "review_and_port_delta"
+    },
+    {
+      "path": "src/engine/close_tests.rs",
+      "git_blob_sha1": "4f23784c0121622ad83d42f0f27a9c8e25b5b6d5",
+      "mode": "review_and_port_delta"
+    },
+    {
+      "path": "src/engine/lifecycle_tests.rs",
+      "git_blob_sha1": "01f8725ec9e8958a6002c7083c5450ac98e87315",
+      "mode": "review_and_port_delta"
+    },
+    {
+      "path": "src/engine/management.rs",
+      "git_blob_sha1": "ab7a87a9480fd652017e4f52ac4d45b92c4bbcad",
+      "mode": "review_and_port_delta"
+    },
+    {
+      "path": "src/engine/server_selection.rs",
+      "git_blob_sha1": "a5de0fc6fae711122f17789868b564e2780758a4",
+      "mode": "review_and_port_delta"
+    },
+    {
+      "path": "src/logs.rs",
+      "git_blob_sha1": "c5cd069cfb0116d2e042cc90c89283c6ea034487",
+      "mode": "review_and_port_delta"
+    },
+    {
+      "path": "src/model.rs",
+      "git_blob_sha1": "7cd366139865f09978f84e463e6a07e2357e950f",
+      "mode": "review_and_port_delta"
+    },
+    {
+      "path": "src/platform.rs",
+      "git_blob_sha1": "3e3bc6332ba02c06b028cbbcbffcd8eef8d51a70",
+      "mode": "review_and_port_delta"
+    },
+    {
+      "path": "src/platform_discovery.rs",
+      "git_blob_sha1": "9f0a9113a70fb0bb05fa7717dbca16975ea6c2b8",
+      "mode": "review_and_port_delta"
+    },
+    {
+      "path": "src/platform_discovery_tests.rs",
+      "git_blob_sha1": "97e617a5bf8494edb7d8302c2e52b222d58f7051",
+      "mode": "review_and_port_delta"
+    },
+    {
+      "path": "src/platform_image.rs",
+      "git_blob_sha1": "0ebadb5ea18979dde41da825e7c24bce5b3029dc",
+      "mode": "review_and_port_delta"
+    },
+    {
+      "path": "src/platform_startup_tests.rs",
+      "git_blob_sha1": "85b9c7b0d143d6422e721c676c7d74e211d048c1",
+      "mode": "review_and_port_delta"
+    },
+    {
+      "path": "src/roblox.rs",
+      "git_blob_sha1": "771696a6a7a6a355e7c09a849bd468e8972f9886",
+      "mode": "review_and_port_delta"
+    }
+  ],
+  "excluded_files": [
+    {
+      "path": "CHANGELOG.md",
+      "reason": "Free release/version/documentation metadata; do not overwrite Premium metadata."
+    },
+    {
+      "path": "Cargo.lock",
+      "reason": "Free release/version/documentation metadata; do not overwrite Premium metadata."
+    },
+    {
+      "path": "Cargo.toml",
+      "reason": "Free release/version/documentation metadata; do not overwrite Premium metadata."
+    },
+    {
+      "path": "README.md",
+      "reason": "Free release/version/documentation metadata; do not overwrite Premium metadata."
+    },
+    {
+      "path": "docs/API.md",
+      "reason": "Free release/version/documentation metadata; do not overwrite Premium metadata."
+    },
+    {
+      "path": "docs/DIAGNOSTICS.md",
+      "reason": "Free release/version/documentation metadata; do not overwrite Premium metadata."
+    },
+    {
+      "path": "docs/RELEASE-1.9.0.md",
+      "reason": "Free release/version/documentation metadata; do not overwrite Premium metadata."
+    },
+    {
+      "path": "docs/SESSION-CLOSE-SAFETY.md",
+      "reason": "Free release/version/documentation metadata; do not overwrite Premium metadata."
+    },
+    {
+      "path": "docs/VALIDATION.md",
+      "reason": "Supplemental Free validation/handoff documentation; reference only, not a Premium implementation replacement."
+    },
+    {
+      "path": "docs/INSTANCE-LIFECYCLE-AUDIT.md",
+      "reason": "Supplemental Free validation/handoff documentation; reference only, not a Premium implementation replacement."
+    },
+    {
+      "path": "docs/INSTANCE-LIFECYCLE-SYNC.json",
+      "reason": "Supplemental Free validation/handoff documentation; reference only, not a Premium implementation replacement."
+    }
+  ],
+  "reference_contracts": [
+    {
+      "path": "src/diagnostics.rs",
+      "git_blob_sha1": "799de21b2fae6ea7096fd43f75357ad3286359d2",
+      "mode": "reference_only"
+    },
+    {
+      "path": "src/platform_memory.rs",
+      "git_blob_sha1": "eeb9acbda3f6d300dffc68a4d1d242d6fcbce7ba",
+      "mode": "reference_only"
+    },
+    {
+      "path": "src/platform_linux.rs",
+      "git_blob_sha1": "f33841857e7a5a8c7e8075559794eabfe37564d8",
+      "mode": "reference_only"
+    },
+    {
+      "path": "src/api.rs",
+      "git_blob_sha1": "bd3f59b5454b61b9c9a22f55875da4d0606718df",
+      "mode": "reference_only"
+    },
+    {
+      "path": "src/engine/import_tests.rs",
+      "git_blob_sha1": "e9405178a75560bff72ea82e0b7ad59bc9140a50",
+      "mode": "reference_only"
+    }
+  ],
+  "required_gates": [
+    "Resolve or independently accept the baseline RustSec findings.",
+    "Independent code and security review of the handle cache, ownership fencing, close boundaries and log identity.",
+    "Real Roblox acceptance for launch/reuse/handoff, supported installation and multi-client recovery.",
+    "Review hosted Windows/Linux CI before merge or synchronization."
+  ],
+  "artifacts": [
+    {
+      "file": "rolauncher-v1.9.0-dev.376e7eb20a57-source.zip",
+      "sha256": "39a268e14f4f1224afd45a0d6d54015b25ebce1122f7ac133df6ccc1d6b3fd3d"
+    },
+    {
+      "file": "rolauncher-v1.9.0-dev.376e7eb20a57-windows-x64.zip",
+      "sha256": "2d7c165aaadba8adf4ab46e818727394067941c4d5551dc8d15b6f16485963b6"
+    },
+    {
+      "file": "rolauncher-v1.9.0-dev.376e7eb20a57-setup-x64.exe",
+      "sha256": "47120dfa3a8d0fd90bee1fb14dc7c71ae0276bbca1a03ea10359a5bd608ea1d5"
+    }
+  ],
+  "artifact_policy": "Local development review artifacts only; later supplemental documentation does not replace existing archives."
+}

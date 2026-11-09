@@ -20,6 +20,8 @@ use uuid::Uuid;
 mod close_safety;
 #[cfg(test)]
 mod import_tests;
+#[cfg(test)]
+mod lifecycle_tests;
 mod management;
 use close_safety::CloseAttempts;
 mod server_selection;
@@ -45,6 +47,9 @@ struct Inner {
     bot_generation: AtomicU64,
     discord: crate::discord::Discord,
     journal: crate::diagnostics::Journal,
+    launch_slot: tokio::sync::Mutex<Instant>,
+    #[cfg(test)]
+    launch_result: Option<Result<(), String>>,
 }
 #[derive(Clone)]
 pub struct Engine(Arc<Inner>);
@@ -296,6 +301,32 @@ fn normalize_accounts(next: &mut State) {
     let now = Utc::now();
     for saved in &mut next.database.accounts {
         let a = &mut saved.account;
+        if a.status == Status::NeedsAttention
+            && (a.close_intent.as_ref().is_some_and(|i| i.denied)
+                || next.database.retired_launches.iter().any(|r| {
+                    r.account_id == a.id && r.close_intent.as_ref().is_some_and(|i| i.denied)
+                }))
+            && let Some(op) = a.operation_id.and_then(|id| next.operations.get_mut(&id))
+        {
+            op.state = "failed".into();
+            op.error = a.last_error.clone();
+        }
+        if !a.desired_running && matches!(a.status, Status::Stopped | Status::Stopping) {
+            let pending = a.process.is_some()
+                || next
+                    .database
+                    .retired_launches
+                    .iter()
+                    .any(|r| r.account_id == a.id);
+            a.status = if pending {
+                Status::Stopping
+            } else {
+                Status::Stopped
+            };
+            if let Some(op) = a.operation_id.and_then(|id| next.operations.get_mut(&id)) {
+                op.state = if pending { "queued" } else { "completed" }.into();
+            }
+        }
         a.track_run(now);
         if a.status == Status::Reconnecting && a.desired_running {
             let known_error = a.last_error.as_deref().is_some_and(|error| {
@@ -423,8 +454,17 @@ impl Engine {
                 } else {
                     Status::Queued
                 };
-            } else if !a.desired_running {
-                a.status = Status::Stopped;
+            } else if !a.desired_running && a.status != Status::NeedsAttention {
+                a.status = if a.process.is_some()
+                    || database
+                        .retired_launches
+                        .iter()
+                        .any(|r| r.account_id == a.id)
+                {
+                    Status::Stopping
+                } else {
+                    Status::Stopped
+                };
             }
         }
         database.version = 2;
@@ -455,6 +495,9 @@ impl Engine {
             discord.bot_status("starting", "Connecting to Discord…");
         }
         Ok(Self(Arc::new(Inner {
+            launch_slot: tokio::sync::Mutex::new(Instant::now()),
+            #[cfg(test)]
+            launch_result: None,
             state: Mutex::new(State {
                 active_multi_instance,
                 database,
@@ -941,7 +984,14 @@ impl Engine {
             let existing = account_mut(s,id)?.clone();
             if (action == "start" && existing.desired_running && existing.status != Status::NeedsAttention) || (action == "stop" && !existing.desired_running && existing.close_intent.as_ref().is_some_and(|i| i.reason == CloseReason::UserStop && !i.denied && !i.id.is_nil()) && !s.database.retired_launches.iter().any(|r| r.account_id == id && r.process.is_some() && r.close_intent != existing.close_intent)) {
                 if let Some(op) = existing.operation_id.and_then(|id|s.operations.get(&id)).cloned() { return Ok(op); }
-                let op = Operation { id:Uuid::new_v4(), account_id:id.into(), state:"completed".into(), error:None }; s.operations.insert(op.id,op.clone()); return Ok(op);
+                let pending = if action == "stop" { existing.process.is_some() || existing.tracker.is_some() || retired_blocks_launch(&s.database, id) } else { existing.status != Status::Running };
+                let op = Operation { id:Uuid::new_v4(), account_id:id.into(), state:if pending { "queued" } else { "completed" }.into(), error:None };
+                let a = account_mut(s, id)?;
+                a.operation_id = Some(op.id);
+                if let Some(intent) = &mut a.close_intent { intent.operation_id = Some(op.id); }
+                let intent = a.close_intent.clone();
+                for old in s.database.retired_launches.iter_mut().filter(|r| r.account_id == id && r.close_intent == existing.close_intent) { old.close_intent = intent.clone(); }
+                s.operations.insert(op.id,op.clone()); return Ok(op);
             }
             if action != "stop" { existing.target.as_ref().ok_or("Set a launch target first")?.validate()?; }
             if action != "stop" && existing.process.is_none() && existing.tracker.is_some() { return Err("Previous launch is unresolved; use Stop and wait for process discovery before starting again".into()); }
@@ -960,7 +1010,7 @@ impl Engine {
             }
             if action!="stop" && !self.0.launch_allowed.load(Ordering::Acquire){return Err(LAUNCH_COORDINATION_ERROR.into());}
             if let Some(previous) = existing.operation_id.and_then(|id|s.operations.get_mut(&id)) && previous.state == "queued" { previous.state = "cancelled".into(); }
-            let op = Operation { id:Uuid::new_v4(),account_id:id.into(),state:if action=="stop" && existing.process.is_none(){"completed"}else{"queued"}.into(),error:None };
+            let op = Operation { id:Uuid::new_v4(),account_id:id.into(),state:if action=="stop" && existing.process.is_none() && existing.tracker.is_none() && !retired_blocks_launch(&s.database, id){"completed"}else{"queued"}.into(),error:None };
             let generation = Uuid::new_v4();
             let close_intent = CloseIntent { id: Uuid::new_v4(), reason: match action {
                 "stop" => CloseReason::UserStop,
@@ -1069,7 +1119,8 @@ impl Engine {
         });
     }
     async fn launch_loop(&self) {
-        let mut next_launch = Instant::now();
+        let mut pending: HashMap<String, (Uuid, tokio::task::JoinHandle<()>)> = HashMap::new();
+        let mut network_probe_at = Instant::now();
         let mut previous_gate = None;
         while !self.is_shutdown() {
             let allowed = self.0.launch_allowed.load(Ordering::Acquire);
@@ -1081,54 +1132,83 @@ impl Engine {
                 previous_gate = Some(allowed);
             }
             let snapshot = self.snapshot();
-            if snapshot.network_suspended {
-                if self.0.roblox.reachable().await {
-                    let _ = self.transaction(|s| {
-                        s.network_suspended = false;
-                        Ok(())
-                    });
-                } else {
-                    tokio::select! { _=tokio::time::sleep(Duration::from_secs(30))=>{}, _=self.0.wake.notified()=>{} }
-                    continue;
+            let finished: Vec<_> = pending
+                .iter()
+                .filter(|(_, (_, task))| task.is_finished())
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in finished {
+                let (generation, task) = pending.remove(&id).unwrap();
+                if let Err(error) = task.await
+                    && !error.is_cancelled()
+                {
+                    self.failure(
+                        &id,
+                        generation,
+                        Failure::new(FailureKind::Other, "Launch preparation worker failed"),
+                    );
                 }
             }
-            if !self.0.launch_allowed.load(Ordering::Acquire) {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                continue;
-            }
-            let next = {
-                let state = self.0.state.lock().unwrap();
-                state
-                    .database
+            for (id, (generation, task)) in &pending {
+                if !snapshot
                     .accounts
                     .iter()
-                    .map(|s| &s.account)
-                    .find(|a| {
-                        launch_ready(a, Utc::now())
-                            && !retired_blocks_launch(&state.database, &a.id)
-                    })
-                    .cloned()
-            };
-            if let Some(account) = next {
-                tokio::time::sleep_until(next_launch.into()).await;
-                if self.is_shutdown() {
-                    break;
+                    .any(|a| a.id == *id && a.generation == *generation && a.desired_running)
+                {
+                    task.abort();
                 }
-                let current = self
-                    .snapshot()
-                    .accounts
-                    .into_iter()
-                    .find(|a| a.id == account.id);
-                let current = current
-                    .filter(|a| a.generation == account.generation && launch_ready(a, Utc::now()));
-                let Some(current) = current else {
-                    continue;
-                };
-                self.launch_one(current).await;
-                next_launch = Instant::now() + Duration::from_secs(5);
-            } else {
-                tokio::select! { _=tokio::time::sleep(Duration::from_secs(1))=>{}, _=self.0.wake.notified()=>{} }
             }
+            if snapshot.network_suspended {
+                if pending.is_empty() && Instant::now() >= network_probe_at {
+                    network_probe_at = Instant::now() + Duration::from_secs(30);
+                    let reachable = tokio::select! { ready = self.0.roblox.reachable() => ready, _=self.0.wake.notified() => false };
+                    if reachable {
+                        let _ = self.transaction(|s| {
+                            s.network_suspended = false;
+                            Ok(())
+                        });
+                    }
+                }
+            } else if allowed {
+                for account in &snapshot.accounts {
+                    if pending.len() >= 4 {
+                        break;
+                    }
+                    if pending.contains_key(&account.id) || !launch_ready(account, Utc::now()) {
+                        continue;
+                    }
+                    let blocked = {
+                        let state = self.0.state.lock().unwrap();
+                        retired_blocks_launch(&state.database, &account.id)
+                            || state.database.join_type == JoinType::Friend
+                                && snapshot.accounts.iter().any(|peer| {
+                                    pending.contains_key(&peer.id)
+                                        && server_selection::same_preset(account, peer)
+                                })
+                    };
+                    if blocked {
+                        continue;
+                    }
+                    let engine = self.clone();
+                    let account = account.clone();
+                    let id = account.id.clone();
+                    let generation = account.generation;
+                    pending.insert(
+                        id,
+                        (
+                            generation,
+                            tokio::spawn(async move {
+                                engine.launch_one(account).await;
+                            }),
+                        ),
+                    );
+                }
+            }
+            tokio::select! { _=tokio::time::sleep(Duration::from_millis(100))=>{}, _=self.0.wake.notified()=>{} }
+        }
+        for (_, (_, task)) in pending {
+            task.abort();
+            let _ = task.await;
         }
     }
     async fn launch_one(&self, account: Account) {
@@ -1274,6 +1354,9 @@ impl Engine {
                 return;
             }
         };
+        // Preparation overlaps; handoffs remain serialized and five seconds apart.
+        let mut launch_slot = self.0.launch_slot.lock().await;
+        tokio::time::sleep_until((*launch_slot).into()).await;
         // Persist the tracker BEFORE launching. Holding the command mutex through ShellExecute
         // makes Stop linearize either before launch or after durable ownership was recorded.
         let launched = {
@@ -1295,6 +1378,12 @@ impl Engine {
                 self.0.journal.record("launch_cancelled", serde_json::json!({"account": crate::diagnostics::account(a), "reason": "superseded_stopped_owned_or_shutdown", "shutdown": self.is_shutdown()}));
                 return;
             }
+            if !self.0.launch_allowed.load(Ordering::Acquire) || state.network_suspended {
+                a.status = account.status.clone();
+                a.next_retry = Some(Utc::now() + ChronoDuration::seconds(5));
+                let _ = self.commit_close_state(&mut state, next);
+                return;
+            }
             if account.status == Status::Backoff && !a.auto_recovery {
                 a.status = Status::NeedsAttention;
                 a.next_retry = None;
@@ -1304,6 +1393,17 @@ impl Engine {
                     *state = next;
                     let _ = self.0.events.send(snapshot(&state));
                 }
+                return;
+            }
+            if !state.active_multi_instance
+                && state.database.accounts.iter().any(|s| {
+                    s.account.id != account.id
+                        && (s.account.process.is_some() || s.account.tracker.is_some())
+                })
+            {
+                a.status = account.status.clone();
+                a.next_retry = Some(Utc::now() + ChronoDuration::seconds(5));
+                let _ = self.commit_close_state(&mut state, next);
                 return;
             }
             a.tracker = Some(tracker.clone());
@@ -1321,7 +1421,15 @@ impl Engine {
                     .find(|s| s.account.id == account.id)
                     .unwrap()
                     .account;
-                self.submit_launch(current, &target, || platform::launch_for(&uri, &account.id))
+                let result = self.submit_launch(current, &target, || {
+                    #[cfg(test)]
+                    if let Some(result) = &self.0.launch_result {
+                        return result.clone();
+                    }
+                    platform::launch_for(&uri, &account.id)
+                });
+                *launch_slot = Instant::now() + Duration::from_secs(5);
+                result
             }
         };
         if let Err(message) = launched {
@@ -1340,6 +1448,9 @@ impl Engine {
         target: &Target,
         effect: impl FnOnce() -> Result<(), String>,
     ) -> Result<(), String> {
+        if self.is_shutdown() || !self.0.launch_allowed.load(Ordering::Acquire) {
+            return Err(LAUNCH_COORDINATION_ERROR.into());
+        }
         let context = crate::diagnostics::account(account);
         // No URI, cookie, ticket, private link or command line reaches the journal.
         self.0.journal.record("launch_submitted", serde_json::json!({"account": context, "selected_place_id": target.place_id,
@@ -1352,6 +1463,45 @@ impl Engine {
             "error_code": result.as_ref().err().and_then(|e| crate::diagnostics::error_code(e))}),
         );
         result
+    }
+    fn expire_unowned_launches(&self, now: chrono::DateTime<Utc>) {
+        for a in self.snapshot().accounts.into_iter().filter(|a| {
+            a.desired_running
+                && a.process.is_none()
+                && a.tracker.is_some()
+                && a.status != Status::NeedsAttention
+                && a.ownership_deadline.is_some_and(|deadline| deadline <= now)
+        }) {
+            let _ = self.transaction(|state| {
+                let current = account_mut(state, &a.id)?;
+                if current.generation != a.generation || current.process.is_some() || current.tracker != a.tracker || current.status == Status::NeedsAttention { return Ok(()); }
+                current.status = Status::NeedsAttention;
+                current.last_error = Some(OWNERSHIP_TIMEOUT_ERROR.into());
+                let operation = current.operation_id;
+                if let Some(op) = operation.and_then(|id| state.operations.get_mut(&id)) {
+                    op.state = "failed".into();
+                    op.error = Some("Launch ownership could not be verified".into());
+                }
+                self.0.journal.record("launch_timeout", serde_json::json!({"account_id": a.id.parse::<u64>().ok(), "generation": a.generation, "operation_id": operation, "reason": "no_verified_process_before_deadline"}));
+                Ok(())
+            });
+        }
+    }
+    fn discover_players(&self) -> Result<Vec<platform::Player>, String> {
+        #[cfg(windows)]
+        {
+            let started = Instant::now();
+            let scan = platform::observe_players()?;
+            self.0.journal.record("process_observation", serde_json::json!({
+                "observed": scan.players.len(), "inaccessible": scan.inaccessible,
+                "rejected_image": scan.rejected, "unowned": scan.unowned,
+                "metadata_pending": scan.metadata_pending, "duration_ms": started.elapsed().as_millis(),
+                "processes": scan.players.iter().take(50).map(|p| crate::diagnostics::process(&p.identity(Uuid::nil()))).collect::<Vec<_>>()
+            }));
+            scan.verified()
+        }
+        #[cfg(not(windows))]
+        platform::players()
     }
     async fn monitor_loop(&self) {
         let mut tails: HashMap<(u32, String), crate::logs::Tail> = HashMap::new();
@@ -1391,7 +1541,10 @@ impl Engine {
                     || !retired.is_empty()
                     || !pending_exits.is_empty())
             {
-                discovery = Some(tokio::task::spawn_blocking(platform::players));
+                let engine = self.clone();
+                discovery = Some(tokio::task::spawn_blocking(move || {
+                    engine.discover_players()
+                }));
                 last_discovery = Instant::now();
             }
             let discovered = completed_task(&mut discovery).await;
@@ -1459,7 +1612,7 @@ impl Engine {
                         &players,
                         Instant::now(),
                         &mut close_attempts,
-                        platform::players,
+                        || self.discover_players(),
                         platform::close,
                     );
                 }
@@ -1475,9 +1628,7 @@ impl Engine {
                         "candidates": matches.iter().map(|p| crate::diagnostics::process(&p.identity(account.generation))).collect::<Vec<_>>()}));
                     if matches.len() == 1 {
                         let identity = matches[0].identity(account.generation);
-                        let _ = self.update(&account.id, account.generation, |a| {
-                            attach_verified_player(a, identity)
-                        });
+                        let _ = self.attach_player(&account, identity, &players);
                         // Discover its log now; an empty scan during startup
                         // must not leave a newly verified player waiting 30s.
                         last_log_discovery = Instant::now() - Duration::from_secs(30);
@@ -1503,6 +1654,9 @@ impl Engine {
                 }
                 last_discovery = Instant::now();
             }
+            // Even an unavailable metadata provider must finish the operation's
+            // timeout. Retain its tracker so timeout never authorizes a duplicate.
+            self.expire_unowned_launches(Utc::now());
             if log_discovery.is_none() && last_log_discovery.elapsed() >= Duration::from_secs(30) {
                 let identities: Vec<_> = self
                     .snapshot()
@@ -1513,7 +1667,22 @@ impl Engine {
                     .collect();
                 if !identities.is_empty() {
                     log_discovery = Some(tokio::task::spawn_blocking(move || {
-                        platform::owned_logs(&identities)
+                        #[cfg(windows)]
+                        {
+                            platform::owned_log_tails(&identities)
+                        }
+                        #[cfg(not(windows))]
+                        {
+                            platform::owned_logs(&identities).map(|logs| {
+                                logs.into_iter()
+                                    .filter_map(|(key, path)| {
+                                        crate::logs::Tail::new(path, false)
+                                            .ok()
+                                            .map(|tail| (key, tail))
+                                    })
+                                    .collect::<HashMap<_, _>>()
+                            })
+                        }
                     }));
                 }
                 last_log_discovery = Instant::now();
@@ -1525,13 +1694,11 @@ impl Engine {
                     .record("log_discovery_failed", serde_json::json!({}));
             }
             if let Some(Ok(Ok(logs))) = discovered_logs {
-                for (key, path) in logs {
-                    if let Ok(tail) = crate::logs::Tail::new(path, false) {
-                        self.0
-                            .journal
-                            .record("owned_log_attached", serde_json::json!({"pid": key.0}));
-                        tails.insert(key, tail);
-                    }
+                for (key, tail) in logs {
+                    self.0
+                        .journal
+                        .record("owned_log_attached", serde_json::json!({"pid": key.0}));
+                    tails.insert(key, tail);
                 }
             }
             let accounts = self.snapshot().accounts;
@@ -1661,7 +1828,7 @@ impl Engine {
                         &account,
                         Instant::now(),
                         &mut close_attempts,
-                        platform::players,
+                        || self.discover_players(),
                         platform::close,
                     )
                     .unwrap_or(false)
@@ -2310,6 +2477,8 @@ mod tests {
             "[DFLog::NetworkClient] ID_CONNECTION_LOST",
             "[FLog::GameJoinUtil] GameJoinFailed errorCode: 279",
             "[FLog::Network] Sending disconnect with reason: 273",
+            "[FLog::Network] Sending disconnect with reason: 264",
+            "[FLog::Network] Sending disconnect with reason: 267",
             "[FLog::GameJoinUtil] GameJoinFailed errorCode: 529",
         ] {
             let (engine, path, identity) = owned_fixture();
@@ -3321,7 +3490,7 @@ mod tests {
             ));
             engine.command("1", "stop").unwrap();
             engine.observe("1", generation, &identity, Observation::DiskLog(events[0]));
-            assert_eq!(engine.snapshot().accounts[0].status, Status::Stopped);
+            assert_eq!(engine.snapshot().accounts[0].status, Status::Stopping);
             drop(engine);
             std::fs::remove_dir_all(path).unwrap();
         }
@@ -3804,7 +3973,7 @@ mod tests {
         drop(reopened);
         std::fs::remove_dir_all(path).unwrap();
     }
-    fn fixture(count: usize) -> (Engine, std::path::PathBuf) {
+    pub(super) fn fixture(count: usize) -> (Engine, std::path::PathBuf) {
         let path = std::env::temp_dir().join(format!("rbx-engine-test-{}", Uuid::new_v4()));
         let store = Store::new(path.clone()).unwrap();
         let engine = Engine::open(store, "simulated".into()).unwrap();

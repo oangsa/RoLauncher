@@ -29,9 +29,12 @@ A disk failure does not stop launching or recovery; later events retry logging a
 - `launch_preparing`, `launch_submitted`, `launch_result`: preparation and each OS handoff, linked by account, generation, operation, and tracker.
 - `launch_result.accepted_by_os` confirms protocol handoff; a verified connection requires a later disk-log signal.
 - `launch_discovery`: matching process candidates; PID and creation fingerprint distinguish reused PIDs and ambiguous ownership.
+- `process_observation`: native candidates, unavailable trackers, inaccessible/rejected images, pending metadata, safe process fingerprints, and scan duration.
+- `launch_timeout`: the ownership deadline expired, including during metadata outages; the tracker remains reserved against duplicate launch.
 - `connection_signal`: parsed signal/code, source log timestamp, disk or unverified-memory source, terminal confirmation, ownership match, and prior status.
 - `close_verification`, `close_denied`, `close_deferred`, `close_submitted`, `close_result`: ownership checks, rejected/deferred closes, graceful/force attempts, and OS results.
 - `process_exit_confirmed`: verified exit; replacement can follow only when existing retry and ownership rules allow it.
+- `stop_all_process_result`, `stop_all_result`: per-process confirmed closure and aggregate close/inspection failures after durable relaunch cancellation.
 - `process_exit_pending`, `exit_reconciliation_checked`, `process_handoff_verified`: retain tracking, record fresh candidates and settlement, and identify a unique surviving client before replacement.
 - `account_state_changed`: before/after status, safe reason, retry count/deadline, recovery evidence, close intent, and recovery settings.
 - Network suspension, launch coordination, retired launches, save failures, restoration, and shutdown have separate events.
@@ -39,6 +42,10 @@ A disk failure does not stop launching or recovery; later events retry logging a
 For a pause, find `account_state_changed` with `after.status` equal to `needs_attention` and inspect its reason and preceding events.
 For error 264 or 273, compare preceding `launch_submitted` trackers and process identities to see whether this launcher handed off another launch.
 An error code alone cannot prove another physical device launched the account.
+
+`stopping` and queued Stop operations mean exit is still pending; `close_result.success` only records native request acceptance.
+Exports also include desired state, generation, operation ID, and whether shutdown is pending.
+Unknown native candidates block ownership decisions; a WMI outage can retain only tracker evidence pinned to the same live process object.
 
 Recovery now defers failed discovery queries and checks for a surviving client before releasing an exited process's launch tracking.
 See [recovery comparison and replay evidence](RECOVERY-AUDIT.md) for the historical behavior and confirmed fixes.

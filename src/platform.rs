@@ -27,18 +27,17 @@ pub fn launch_for(uri: &str, _account_id: &str) -> Result<(), String> {
 }
 
 pub fn tracker_from_command_line(cmd: &str) -> Option<String> {
-    let args: Vec<_> = cmd.split_whitespace().collect();
+    let args = command_arguments(cmd)?;
     let mut trackers = Vec::new();
-    for pair in args.windows(2) {
-        if pair[0].trim_matches('"') == "-b" {
-            trackers.push(pair[1].trim_matches('"'));
+    for pair in args[1..].windows(2) {
+        if pair[0] == "-b" {
+            trackers.push(pair[1].as_str());
         }
     }
     // Current clients retain the protocol URI as one argument instead of using -b.
     // Only examine that argument's outer fields, never a nested URL or arbitrary text.
-    for arg in &args {
-        let arg = arg.trim_matches('"');
-        if let Some(protocol) = arg.strip_prefix("roblox-player:") {
+    for arg in &args[1..] {
+        if let Some(protocol) = arg.strip_prefix("roblox-player:1+") {
             for field in protocol.split('+') {
                 if let Some((key, value)) = field.split_once(':')
                     && key.eq_ignore_ascii_case("browsertrackerid")
@@ -54,6 +53,58 @@ pub fn tracker_from_command_line(cmd: &str) -> Option<String> {
     let tracker = trackers[0];
     (tracker.len() >= 6 && tracker.len() <= 20 && tracker.bytes().all(|c| c.is_ascii_digit()))
         .then(|| tracker.to_owned())
+}
+
+// Preserve argument boundaries, including Windows backslash/quote escaping. Reject
+// malformed quoting rather than extracting authority from a partial argument.
+fn command_arguments(cmd: &str) -> Option<Vec<String>> {
+    if cmd.contains('\0') {
+        return None;
+    }
+    let mut input = cmd.chars().peekable();
+    let mut args = Vec::new();
+    while input.peek().is_some() {
+        while input.peek().is_some_and(|c| c.is_ascii_whitespace()) {
+            input.next();
+        }
+        if input.peek().is_none() {
+            break;
+        }
+        let mut arg = String::new();
+        let mut quoted = false;
+        while let Some(&c) = input.peek() {
+            if !quoted && c.is_ascii_whitespace() {
+                break;
+            }
+            let mut slashes = 0;
+            while input.peek() == Some(&'\\') {
+                input.next();
+                slashes += 1;
+            }
+            if input.peek() == Some(&'"') {
+                arg.extend(std::iter::repeat_n('\\', slashes / 2));
+                input.next();
+                if slashes % 2 == 1 {
+                    arg.push('"');
+                } else {
+                    quoted = !quoted;
+                }
+            } else {
+                arg.extend(std::iter::repeat_n('\\', slashes));
+                if !quoted && input.peek().is_some_and(|c| c.is_ascii_whitespace()) {
+                    break;
+                }
+                if let Some(c) = input.next() {
+                    arg.push(c);
+                }
+            }
+        }
+        if quoted {
+            return None;
+        }
+        args.push(arg);
+    }
+    (!args.is_empty()).then_some(args)
 }
 
 #[cfg(windows)]
@@ -107,80 +158,19 @@ mod imp {
         }
         Ok((((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64).to_string())
     }
-    fn valid_player_image(handle: HANDLE) -> bool {
-        let mut path = vec![0u16; 32768];
-        let mut len = path.len() as u32;
-        if unsafe { QueryFullProcessImageNameW(handle, 0, path.as_mut_ptr(), &mut len) } == 0 {
-            return false;
-        }
-        let s = String::from_utf16_lossy(&path[..len as usize]).to_lowercase();
-        s.ends_with("\\robloxplayerbeta.exe") && s.contains("\\roblox\\versions\\")
-    }
-    pub fn players() -> Result<Vec<Player>, String> {
-        discover_players(false)
-    }
-    pub fn all_players() -> Result<Vec<Player>, String> {
-        discover_players(true)
-    }
-    fn discover_players(include_untracked: bool) -> Result<Vec<Player>, String> {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "PascalCase")]
-        struct Row {
-            process_id: u32,
-            command_line: Option<String>,
-        }
-        let connection =
-            wmi::WMIConnection::new().map_err(|_| "Windows process metadata unavailable")?;
-        let rows: Vec<Row> = connection.raw_query("SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name = 'RobloxPlayerBeta.exe'").map_err(|_| "Windows process query failed")?;
-        let mut out = Vec::new();
-        for row in rows {
-            let tracker = row
-                .command_line
-                .as_deref()
-                .and_then(tracker_from_command_line);
-            if tracker.is_none() && !include_untracked {
-                continue;
-            }
-            if include_untracked {
-                let mut current_session = 0;
-                let mut player_session = 0;
-                if unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut current_session) } == 0
-                    || unsafe { ProcessIdToSessionId(row.process_id, &mut player_session) } == 0
-                {
-                    return Err("Unable to verify Roblox process session".into());
-                }
-                if current_session != player_session {
-                    continue;
-                }
-            }
-            let tracker = tracker.unwrap_or_default();
-            let h = match process_handle(
-                row.process_id,
-                PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
-            ) {
-                Ok(h) => h,
-                Err(error)
-                    if include_untracked
-                        && unsafe { GetLastError() } != ERROR_INVALID_PARAMETER =>
-                {
-                    return Err(error);
-                }
-                Err(_) => continue,
-            };
-            if !valid_player_image(h.0) {
-                continue;
-            }
-            if let Ok(creation_time) = process_time(h.0) {
-                out.push(Player {
-                    pid: row.process_id,
-                    creation_time,
-                    tracker,
-                });
-            }
-        }
-        Ok(out)
+    include!("platform_image.rs");
+    include!("platform_discovery.rs");
+    #[cfg(test)]
+    mod discovery_tests {
+        include!("platform_discovery_tests.rs");
     }
     pub fn alive(identity: &ProcessIdentity) -> Result<bool, String> {
+        alive_with(identity, valid_player_image)
+    }
+    fn alive_with(
+        identity: &ProcessIdentity,
+        verify: impl Fn(HANDLE) -> bool,
+    ) -> Result<bool, String> {
         let h = match process_handle(
             identity.pid,
             PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
@@ -193,8 +183,17 @@ mod imp {
                 return Err(e);
             }
         };
-        if process_time(h.0)? != identity.creation_time || !valid_player_image(h.0) {
+        if process_time(h.0)? != identity.creation_time {
             return Ok(false);
+        }
+        if unsafe { WaitForSingleObject(h.0, 0) } == WAIT_OBJECT_0 {
+            return Ok(false);
+        }
+        if !same_session(identity.pid) || !verify(h.0) {
+            if unsafe { WaitForSingleObject(h.0, 0) } == WAIT_OBJECT_0 {
+                return Ok(false);
+            }
+            return Err("Managed process image or session could not be verified".into());
         }
         match unsafe { WaitForSingleObject(h.0, 0) } {
             WAIT_TIMEOUT => Ok(true),
@@ -202,7 +201,7 @@ mod imp {
             _ => Err(last_error("Process exit wait failed")),
         }
     }
-    pub struct ExitWatch(Handle);
+    pub struct ExitWatch(Handle, ProcessIdentity);
     // A Windows process handle may be waited/query-checked from any thread.
     unsafe impl Send for ExitWatch {}
     impl ExitWatch {
@@ -212,8 +211,10 @@ mod imp {
                 PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
             )
             .ok()?;
-            (process_time(handle.0).ok()? == identity.creation_time && valid_player_image(handle.0))
-                .then_some(Self(handle))
+            (process_time(handle.0).ok()? == identity.creation_time
+                && same_session(identity.pid)
+                && valid_player_image(handle.0))
+            .then_some(Self(handle, identity.clone()))
         }
         pub fn clean_exit(&self) -> Option<bool> {
             let mut code = 0;
@@ -221,7 +222,10 @@ mod imp {
                 && unsafe { GetExitCodeProcess(self.0.0, &mut code) } != 0)
                 .then_some(code == 0)
         }
-        pub fn alive(&self, _identity: &ProcessIdentity) -> Result<bool, String> {
+        pub fn alive(&self, identity: &ProcessIdentity) -> Result<bool, String> {
+            if identity != &self.1 {
+                return Err("Stale process watch; identity changed".into());
+            }
             match unsafe { WaitForSingleObject(self.0.0, 0) } {
                 WAIT_TIMEOUT => Ok(true),
                 WAIT_OBJECT_0 => Ok(false),
@@ -230,6 +234,13 @@ mod imp {
         }
     }
     pub fn close(identity: &ProcessIdentity, force: bool) -> Result<(), String> {
+        close_with(identity, force, valid_player_image)
+    }
+    fn close_with(
+        identity: &ProcessIdentity,
+        force: bool,
+        verify: impl Fn(HANDLE) -> bool,
+    ) -> Result<(), String> {
         let h = match process_handle(
             identity.pid,
             PROCESS_QUERY_LIMITED_INFORMATION
@@ -240,26 +251,37 @@ mod imp {
             Err(_) if unsafe { GetLastError() } == ERROR_INVALID_PARAMETER => return Ok(()),
             Err(error) => return Err(error),
         };
-        if process_time(h.0)? != identity.creation_time || !valid_player_image(h.0) {
+        if unsafe { WaitForSingleObject(h.0, 0) } == WAIT_OBJECT_0 {
+            return Ok(());
+        }
+        if process_time(h.0)? != identity.creation_time
+            || !same_session(identity.pid)
+            || !verify(h.0)
+        {
             return Err("Instance identity changed; refusing to close it".into());
         }
         if force {
             terminate_verified_handle(h.0)?;
         } else {
-            unsafe extern "system" fn callback(hwnd: HWND, pid: LPARAM) -> i32 {
+            unsafe extern "system" fn callback(hwnd: HWND, context: LPARAM) -> i32 {
+                let (pid, handle, failed) = unsafe { &mut *(context as *mut (u32, HANDLE, bool)) };
                 let mut owner = 0;
                 unsafe {
                     GetWindowThreadProcessId(hwnd, &mut owner);
                 }
-                if owner == pid as u32 {
-                    unsafe {
-                        PostMessageW(hwnd, WM_CLOSE, 0, 0);
-                    }
+                if owner == *pid
+                    && unsafe { WaitForSingleObject(*handle, 0) } == WAIT_TIMEOUT
+                    && unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) } == 0
+                {
+                    *failed = true;
                 }
                 1
             }
-            unsafe {
-                EnumWindows(Some(callback), identity.pid as isize);
+            let mut context = (identity.pid, h.0, false);
+            if unsafe { EnumWindows(Some(callback), &mut context as *mut _ as isize) } == 0
+                || context.2
+            {
+                return Err(last_error("Managed window close unavailable"));
             }
         }
         Ok(())
@@ -374,7 +396,8 @@ mod imp {
             || !String::from_utf16_lossy(&path[..length as usize])
                 .to_lowercase()
                 .starts_with(root)
-            || !valid_player_image(handle.0)
+            || !image_path(handle.0)
+                .is_some_and(|path| image_under_root(&path, std::path::Path::new(root)))
         {
             return Err(
                 "Background client identity changed or cannot be verified; left open".into(),
@@ -490,7 +513,8 @@ mod imp {
                         }
                         return Err(last_error("Background client image unavailable"));
                     }
-                    if !valid_player_image(handle.0)
+                    if !image_path(handle.0)
+                        .is_some_and(|path| image_under_root(&path, std::path::Path::new(&root)))
                         || !String::from_utf16_lossy(&path[..length as usize])
                             .to_lowercase()
                             .starts_with(&root)
@@ -522,13 +546,23 @@ mod imp {
         }
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while std::time::Instant::now() < deadline
-            && closing.iter().any(|id| alive(id).unwrap_or(true))
+            && closing.iter().any(|id| {
+                alive_with(id, |h| {
+                    image_path(h)
+                        .is_some_and(|path| image_under_root(&path, std::path::Path::new(&root)))
+                })
+                .unwrap_or(true)
+            })
         {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         let mut closed = 0;
         for identity in closing {
-            if !alive(identity)? || close_startup_candidate(identity, &root, session, true)? {
+            if !alive_with(identity, |h| {
+                image_path(h)
+                    .is_some_and(|path| image_under_root(&path, std::path::Path::new(&root)))
+            })? || close_startup_candidate(identity, &root, session, true)?
+            {
                 closed += 1;
             }
         }
@@ -638,6 +672,27 @@ mod imp {
     pub fn owned_logs(
         identities: &[ProcessIdentity],
     ) -> Result<std::collections::HashMap<(u32, String), PathBuf>, String> {
+        discover_owned_logs(identities).map(|logs| {
+            logs.into_iter()
+                .map(|(key, (path, _))| (key, path))
+                .collect()
+        })
+    }
+    pub fn owned_log_tails(
+        identities: &[ProcessIdentity],
+    ) -> Result<std::collections::HashMap<(u32, String), crate::logs::Tail>, String> {
+        discover_owned_logs(identities).map(|logs| {
+            logs.into_iter()
+                .filter_map(|(key, (path, file_id))| {
+                    let tail = crate::logs::Tail::new(path, false).ok()?;
+                    tail.matches_file(file_id).then_some((key, tail))
+                })
+                .collect()
+        })
+    }
+    type LogFile = (PathBuf, (u32, u64));
+    type OwnedLogPaths = std::collections::HashMap<(u32, String), LogFile>;
+    fn discover_owned_logs(identities: &[ProcessIdentity]) -> Result<OwnedLogPaths, String> {
         if identities.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
@@ -645,9 +700,17 @@ mod imp {
             return Err("LOCALAPPDATA unavailable".into());
         };
         let root = PathBuf::from(local).join("Roblox").join("logs");
+        discover_owned_logs_at(identities, &root)
+    }
+    fn discover_owned_logs_at(
+        identities: &[ProcessIdentity],
+        root: &std::path::Path,
+    ) -> Result<OwnedLogPaths, String> {
         let mut candidates: Vec<_> = std::fs::read_dir(root)
             .map_err(|_| "Roblox logs are unavailable")?
-            .filter_map(Result::ok)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "Roblox log scan incomplete")?
+            .into_iter()
             .filter(|x| {
                 x.file_name().to_string_lossy().contains("_Player_")
                     && x.path().extension().is_some_and(|e| e == "log")
@@ -672,9 +735,17 @@ mod imp {
         candidates.sort_by_cached_key(|x| {
             std::cmp::Reverse(x.metadata().and_then(|m| m.modified()).ok())
         });
-        let mut matched: std::collections::HashMap<(u32, String), Vec<PathBuf>> =
+        let mut matched: std::collections::HashMap<(u32, String), Vec<LogFile>> =
             std::collections::HashMap::new();
+        // Never authorize from a truncated candidate set: multiple owned files
+        // would otherwise appear unique. One scan is bounded across all clients.
+        if candidates.len() > 512 {
+            return Err("Log discovery candidate budget exceeded".into());
+        }
         for candidate in candidates {
+            let file_id = std::fs::File::open(candidate.path())
+                .and_then(|file| crate::logs::windows_file_id(&file))
+                .map_err(|_| "Roblox log identity unavailable")?;
             let mut session = 0;
             let mut key = [0u16; 33];
             if unsafe { RmStartSession(&mut session, 0, key.as_mut_ptr()) } != 0 {
@@ -703,7 +774,7 @@ mod imp {
                 )
             } != 0
             {
-                continue;
+                return Err("Windows log resource query unavailable".into());
             }
             let mut needed = 0;
             let mut count = 0;
@@ -717,8 +788,11 @@ mod imp {
                     &mut reason,
                 )
             };
-            if rc != ERROR_MORE_DATA || needed == 0 || needed > 1024 {
+            if rc == ERROR_SUCCESS && needed == 0 {
                 continue;
+            }
+            if rc != ERROR_MORE_DATA || needed == 0 || needed > 1024 {
+                return Err("Windows log owner list unavailable".into());
             }
             let mut list: Vec<RM_PROCESS_INFO> =
                 vec![unsafe { std::mem::zeroed() }; needed as usize];
@@ -733,7 +807,7 @@ mod imp {
                 )
             } != 0
             {
-                continue;
+                return Err("Windows log owner list changed; retrying discovery".into());
             }
             let owners = &list[..count as usize];
             if owners.len() == 1 {
@@ -748,7 +822,7 @@ mod imp {
                     matched
                         .entry((owner.dwProcessId, creation_time))
                         .or_default()
-                        .push(candidate.path());
+                        .push((candidate.path(), file_id));
                 }
             }
         }
@@ -927,6 +1001,7 @@ mod imp {
                 let watch = ExitWatch(
                     process_handle(child.id(), PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE)
                         .unwrap(),
+                    identity.clone(),
                 );
                 assert!(watch.alive(&identity).unwrap());
                 watches.push((watch, identity));
@@ -1005,6 +1080,7 @@ mod imp {
                     ExitWatch(
                         process_handle(pid, PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE)
                             .unwrap(),
+                        identity.clone(),
                     )
                 })
                 .collect();
@@ -1171,6 +1247,21 @@ pub use imp::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn quoted_payload_cannot_supply_a_tracker_argument() {
+        for cmd in [
+            r#"player.exe --payload "ignored -b 123456789 ignored""#,
+            r#"player.exe --payload "ignored roblox-player:1+browsertrackerid:123456789 ignored""#,
+            r#"player.exe -b "123456789"junk"#,
+            "player.exe -b 123456789\0 -b 987654321",
+        ] {
+            assert_eq!(tracker_from_command_line(cmd), None, "{cmd:?}");
+        }
+        assert_eq!(
+            tracker_from_command_line("\"C:\\With Spaces\\player.exe\"\t-b\t\"123456789\""),
+            Some("123456789".into())
+        );
+    }
     #[test]
     fn match_tracker_argument_only() {
         assert_eq!(

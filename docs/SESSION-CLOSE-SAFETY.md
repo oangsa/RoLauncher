@@ -52,6 +52,9 @@ PID, creation time, tracker and original launch generation remain in `ProcessIde
 6. Native Windows handle/creation-time/image checks and Linux pidfd/creation-time/tracker checks remain intact for every graceful or force call.
 
 No authorization token or permit escapes these functions.
+On Windows, fresh discovery merges native same-session/image observations with tracker evidence retained on exact live process handles.
+One asynchronous metadata query refreshes trackers; changed trackers revoke old attribution, while unknown or inaccessible candidates defer decisions.
+Only the canonical current-user Roblox installation root is trusted; no alternate layout is inferred from a process name, window, or registry string.
 Commands linearize before or after each synchronous close effect under the existing mutex.
 OS coordination remains a separate input; no license policy or licensing network request is introduced.
 

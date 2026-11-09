@@ -6,6 +6,7 @@ use uuid::Uuid;
 #[serde(rename_all = "snake_case")]
 pub enum Status {
     Stopped,
+    Stopping,
     Queued,
     Launching,
     Running,

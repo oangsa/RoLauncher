@@ -60,6 +60,8 @@
 - Account IDs and Windows creation ticks are strings; PIDs are integers.
 - Process records include PID, creation time, tracker, and generation.
 - Operations are session-local, capped at 1,000 completed entries; desired account state persists.
+- `status: "stopping"` means Stop was accepted while an owned process or cancelled launch remains unresolved; the operation stays queued.
+- `stopped` requires confirmed exit and resolved cancelled launches; denied or failed closes report a failed operation and preserve client evidence.
 - Target edits apply at the next launch. Start/Stop are idempotent; conflicting pending Restart is rejected.
 
 ```powershell
