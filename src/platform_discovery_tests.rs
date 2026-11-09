@@ -12,6 +12,7 @@ fn tracked(player: &Player) -> TrackedProcess {
         handle: process_handle(player.pid, PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE)
             .unwrap(),
         player: player.clone(),
+        parent: None,
     }
 }
 
@@ -137,6 +138,133 @@ fn native_observation_of_the_fixture_never_confers_tracker_ownership() {
         ..Default::default()
     };
     assert!(unknown.verified().is_err());
+}
+
+#[test]
+#[ignore = "child process of the Windows direct-handoff fixture"]
+fn handoff_fixture_process() {
+    let Some(dir) = std::env::var_os("ROLAUNCHER_HANDOFF_FIXTURE") else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    if std::env::var_os("ROLAUNCHER_HANDOFF_CHILD").is_none() {
+        #[expect(
+            clippy::zombie_processes,
+            reason = "the fixture requires the parent to exit first; the outer test waits on the child's Windows handle"
+        )]
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "handoff_fixture_process"])
+            .env("ROLAUNCHER_HANDOFF_CHILD", "1")
+            .spawn()
+            .unwrap();
+        std::fs::write(dir.join("child"), child.id().to_string()).unwrap();
+        for _ in 0..600 {
+            if dir.join("exit-parent").exists() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    } else {
+        for _ in 0..600 {
+            if dir.join("exit-child").exists() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+}
+
+#[test]
+#[ignore = "explicit native Windows WMI handoff fixture"]
+fn windows_pins_exited_parent_and_verifies_trackerless_direct_child() {
+    let dir = std::env::temp_dir()
+        .join(Uuid::new_v4().to_string())
+        .join("Roblox")
+        .join("Versions");
+    std::fs::create_dir_all(&dir).unwrap();
+    let exe = dir.join("RobloxPlayerBeta.exe");
+    std::fs::copy(std::env::current_exe().unwrap(), &exe).unwrap();
+    let mut parent = std::process::Command::new(&exe)
+        .args(["--ignored", "handoff_fixture_process"])
+        .env("ROLAUNCHER_HANDOFF_FIXTURE", &dir)
+        .spawn()
+        .unwrap();
+    let mut discovery = Discovery::default();
+    let mut parent_player = native_players(fixture_image)
+        .unwrap()
+        .players
+        .into_iter()
+        .find(|p| p.pid == parent.id())
+        .unwrap();
+    parent_player.tracker = "123456789012".into();
+    discovery.tracked.push(tracked(&parent_player));
+    for _ in 0..200 {
+        if dir.join("child").exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    std::fs::write(dir.join("exit-parent"), []).unwrap();
+    assert!(parent.wait().unwrap().success());
+    let child: u32 = std::fs::read_to_string(dir.join("child"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let child_handle =
+        process_handle(child, PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE).unwrap();
+    let scan = native_players(fixture_image).unwrap();
+    let mut reused = scan
+        .players
+        .iter()
+        .find(|p| p.pid == child)
+        .unwrap()
+        .clone();
+    reused.creation_time = u64::MAX.to_string();
+    assert!(!child_born_before_exit(&discovery.tracked[0], &reused));
+    discovery.observe(scan).unwrap();
+    let mut verified = None;
+    for _ in 0..200 {
+        let scan = discovery
+            .observe(native_players(fixture_image).unwrap())
+            .unwrap();
+        if !scan.metadata_pending {
+            verified = discovery
+                .tracked
+                .iter()
+                .find(|p| {
+                    p.player.pid == child
+                        && p.player.tracker == parent_player.tracker
+                        && p.parent.as_ref().is_some_and(|old| {
+                            old.pid == parent.id()
+                                && old.creation_time == parent_player.creation_time
+                        })
+                })
+                .map(|p| p.player.identity(Uuid::nil()));
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    if let Some(identity) = &verified {
+        close_with(identity, false, fixture_image).unwrap();
+        if unsafe { WaitForSingleObject(child_handle.0, 100) } == WAIT_TIMEOUT {
+            close_with(identity, true, fixture_image).unwrap();
+        }
+    } else {
+        std::fs::write(dir.join("exit-child"), []).unwrap();
+    }
+    assert_eq!(
+        unsafe { WaitForSingleObject(child_handle.0, 5000) },
+        WAIT_OBJECT_0
+    );
+    drop(discovery);
+    drop(parent);
+    std::fs::remove_dir_all(dir.parent().unwrap().parent().unwrap()).unwrap();
+    assert!(
+        verified.is_some(),
+        "WMI and the pinned parent must agree on the direct child"
+    );
 }
 
 #[test]

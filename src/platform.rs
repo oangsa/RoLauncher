@@ -147,6 +147,9 @@ mod imp {
         }
     }
     fn process_time(handle: HANDLE) -> Result<String, String> {
+        Ok(process_times(handle)?.0.to_string())
+    }
+    fn process_times(handle: HANDLE) -> Result<(u64, u64), String> {
         let mut created: FILETIME = unsafe { std::mem::zeroed() };
         let mut exited = created;
         let mut kernel = created;
@@ -156,7 +159,8 @@ mod imp {
         {
             return Err(last_error("Process creation time unavailable"));
         }
-        Ok((((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64).to_string())
+        let ticks = |t: FILETIME| (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime);
+        Ok((ticks(created), ticks(exited)))
     }
     include!("platform_image.rs");
     include!("platform_discovery.rs");

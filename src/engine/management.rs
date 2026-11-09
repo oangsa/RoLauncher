@@ -88,7 +88,14 @@ pub(super) fn apply_patch(a: &mut Account, p: AccountPatch) {
     }
     if let Some(enabled) = p.auto_recovery {
         a.auto_recovery = enabled;
-        if !enabled && a.status == Status::Backoff {
+        if enabled
+            && a.status == Status::Stopping
+            && a.desired_running
+            && a.recovery_evidence == RecoveryEvidence::ConfirmedTerminalDisconnect
+        {
+            a.status = Status::Reconnecting;
+            a.last_error = Some("Game disconnected; waiting to rejoin".into());
+        } else if !enabled && a.status == Status::Backoff {
             a.status = Status::NeedsAttention;
             a.next_retry = None;
             a.last_error = Some(REJOIN_DISABLED.into());

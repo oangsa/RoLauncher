@@ -1,5 +1,5 @@
 // Included in the Windows implementation. Native snapshots observe processes;
-// only a tracker read while holding the exact live process handle can bind one.
+// Metadata is bound to pinned process objects, including direct-child handoffs.
 #[derive(Default)]
 pub struct ProcessScan {
     pub players: Vec<Player>,
@@ -7,6 +7,7 @@ pub struct ProcessScan {
     pub rejected: usize,
     pub unowned: usize,
     pub metadata_pending: bool,
+    parents: std::collections::HashMap<u32, u32>,
 }
 impl ProcessScan {
     pub fn verified(self) -> Result<Vec<Player>, String> {
@@ -22,6 +23,7 @@ impl ProcessScan {
 struct TrackedProcess {
     handle: Handle,
     player: Player,
+    parent: Option<Player>,
 }
 // Windows process handles support query/wait from another thread. Ownership is
 // transferred, never duplicated without the kernel, and Drop closes each once.
@@ -77,6 +79,8 @@ fn native_players(verify: impl Fn(HANDLE) -> bool) -> Result<ProcessScan, String
                             }
                             match process_time(handle.0) {
                                 Ok(creation_time) if verify(handle.0) => {
+                                    scan.parents
+                                        .insert(row.th32ProcessID, row.th32ParentProcessID);
                                     scan.players.push(Player {
                                         pid: row.th32ProcessID,
                                         creation_time,
@@ -106,13 +110,14 @@ fn query_trackers(mut candidates: Vec<TrackedProcess>) -> MetadataResult {
     #[serde(rename_all = "PascalCase")]
     struct Row {
         process_id: u32,
+        parent_process_id: u32,
         command_line: Option<String>,
     }
     let connection =
         wmi::WMIConnection::new().map_err(|_| "Windows process metadata unavailable")?;
     let rows: Vec<Row> = connection
         .raw_query(
-            "SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name = 'RobloxPlayerBeta.exe'",
+            "SELECT ProcessId, ParentProcessId, CommandLine FROM Win32_Process WHERE Name = 'RobloxPlayerBeta.exe'",
         )
         .map_err(|_| "Windows process query failed")?;
     for row in rows {
@@ -120,12 +125,22 @@ fn query_trackers(mut candidates: Vec<TrackedProcess>) -> MetadataResult {
             .iter_mut()
             .find(|c| c.player.pid == row.process_id)
             && unsafe { WaitForSingleObject(candidate.handle.0, 0) } == WAIT_TIMEOUT
-            && let Some(tracker) = row
-                .command_line
-                .as_deref()
-                .and_then(tracker_from_command_line)
+            && let Some(cmd) = row.command_line.as_deref()
         {
-            candidate.player.tracker = tracker;
+            if let Some(tracker) = tracker_from_command_line(cmd) {
+                candidate.player.tracker = tracker;
+                candidate.parent = None;
+            } else if let Some(parent) = &candidate.parent
+                && parent.pid == row.parent_process_id
+                && command_arguments(cmd).is_some_and(|args| {
+                    args.iter().skip(1).all(|arg| {
+                        !arg.eq_ignore_ascii_case("-b")
+                            && !arg.to_ascii_lowercase().starts_with("roblox-player:")
+                    })
+                })
+            {
+                candidate.player.tracker.clone_from(&parent.tracker);
+            }
         }
     }
     candidates.retain(|c| {
@@ -156,10 +171,23 @@ impl Discovery {
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
         }
-        self.tracked.retain(|c| unsafe { WaitForSingleObject(c.handle.0, 0) } == WAIT_TIMEOUT && scan.players.iter().any(|p| p.pid == c.player.pid && p.creation_time == c.player.creation_time));
+        // Keep the exited parent's original handle while a potential direct child exists.
+        self.tracked
+            .retain(|c| match unsafe { WaitForSingleObject(c.handle.0, 0) } {
+                WAIT_TIMEOUT => scan
+                    .players
+                    .iter()
+                    .any(|p| p.pid == c.player.pid && p.creation_time == c.player.creation_time),
+                WAIT_OBJECT_0 => {
+                    c.parent.is_none() && scan.parents.values().any(|pid| *pid == c.player.pid)
+                }
+                _ => false,
+            });
         for player in &mut scan.players {
             if let Some(cached) = self.tracked.iter().find(|c| {
-                c.player.pid == player.pid && c.player.creation_time == player.creation_time
+                c.player.pid == player.pid
+                    && c.player.creation_time == player.creation_time
+                    && unsafe { WaitForSingleObject(c.handle.0, 0) } == WAIT_TIMEOUT
             }) {
                 player.tracker.clone_from(&cached.player.tracker);
             }
@@ -167,9 +195,10 @@ impl Discovery {
         scan.unowned = scan.players.iter().filter(|p| p.tracker.is_empty()).count();
         if self.pending.is_none()
             && !scan.players.is_empty()
-            && self
-                .last_query
-                .is_none_or(|last| last.elapsed() >= std::time::Duration::from_secs(5))
+            && self.last_query.is_none_or(|last| {
+                last.elapsed()
+                    >= std::time::Duration::from_secs(if scan.unowned > 0 { 1 } else { 5 })
+            })
         {
             if scan.players.len() > 512 {
                 return Err("Process observation budget exceeded".into());
@@ -185,6 +214,15 @@ impl Discovery {
                         && unsafe { WaitForSingleObject(handle.0, 0) } == WAIT_TIMEOUT)
                         .then(|| TrackedProcess {
                             handle,
+                            parent: self
+                                .tracked
+                                .iter()
+                                .find(|c| {
+                                    c.parent.is_none()
+                                        && scan.parents.get(&p.pid) == Some(&c.player.pid)
+                                        && child_born_before_exit(c, p)
+                                })
+                                .map(|c| c.player.clone()),
                             player: Player {
                                 tracker: String::new(),
                                 ..p.clone()
@@ -205,6 +243,48 @@ impl Discovery {
         scan.metadata_pending = self.pending.is_some();
         Ok(scan)
     }
+}
+
+fn child_born_before_exit(parent: &TrackedProcess, child: &Player) -> bool {
+    if unsafe { WaitForSingleObject(parent.handle.0, 0) } != WAIT_OBJECT_0 {
+        return false;
+    }
+    let Ok((start, exit)) = process_times(parent.handle.0) else {
+        return false;
+    };
+    child
+        .creation_time
+        .parse::<u64>()
+        .is_ok_and(|birth| start < birth && birth <= exit)
+}
+
+pub fn direct_successor(parent: &ProcessIdentity, child: &ProcessIdentity) -> bool {
+    DISCOVERY.lock().is_ok_and(|d| {
+        d.tracked.iter().any(|c| {
+            c.player.pid == child.pid
+                && c.player.creation_time == child.creation_time
+                && c.player.tracker == child.tracker
+                && unsafe { WaitForSingleObject(c.handle.0, 0) } == WAIT_TIMEOUT
+                && c.parent.as_ref().is_some_and(|p| {
+                    p.pid == parent.pid
+                        && p.creation_time == parent.creation_time
+                        && p.tracker == parent.tracker
+                })
+        })
+    })
+}
+
+pub fn successor_close_grace(identity: &ProcessIdentity) -> std::time::Duration {
+    let verified_child = DISCOVERY.lock().is_ok_and(|d| {
+        d.tracked.iter().any(|c| {
+            c.player.pid == identity.pid
+                && c.player.creation_time == identity.creation_time
+                && c.player.tracker == identity.tracker
+                && c.parent.is_some()
+                && unsafe { WaitForSingleObject(c.handle.0, 0) } == WAIT_TIMEOUT
+        })
+    });
+    std::time::Duration::from_secs(if verified_child { 1 } else { 5 })
 }
 
 pub fn observe_players() -> Result<ProcessScan, String> {
