@@ -1,4 +1,10 @@
-1.9.0 — Upcoming release
+1.9.1 — 2026-11-10
+
+- Close a verified Windows Home or tray client after a game ends, respecting the account’s Auto Rejoin setting.
+- Show Needs attention when the launcher cannot verify which account owns a surviving client.
+- Speed up verified Home cleanup and rejoining by retiring completed launch deadlines and reducing handoff waits.
+
+1.9.0 — 2026-11-09
 
 - Observe Windows clients independently of WMI and retain verified tracker evidence on exact process handles.
 - Prepare up to four unrelated launches concurrently while preserving five-second protocol spacing.

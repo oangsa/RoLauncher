@@ -19,13 +19,14 @@ impl CloseAttempts {
         intent: &CloseIntent,
         identity: &ProcessIdentity,
         now: Instant,
+        grace: Duration,
     ) -> bool {
         self.0.iter().any(|a| {
             !a.denied
                 && a.account_id == id
                 && a.intent == *intent
                 && a.identity == *identity
-                && now.saturating_duration_since(a.started) >= Duration::from_secs(5)
+                && now.saturating_duration_since(a.started) >= grace
         })
     }
     fn record(&mut self, id: &str, intent: &CloseIntent, identity: &ProcessIdentity, now: Instant) {
@@ -115,7 +116,7 @@ fn eligible(
         return false;
     }
     match intent.reason {
-        CloseReason::UserStop => !a.desired_running,
+        CloseReason::UserStop | CloseReason::SessionEnded => !a.desired_running,
         CloseReason::ManualRestart | CloseReason::ManualStartReplacement => {
             a.desired_running && a.status == Status::Queued && a.target.is_some() && launch_allowed
         }
@@ -133,7 +134,123 @@ fn eligible(
     }
 }
 
+pub(super) fn stop_ended_session(a: &mut Account) {
+    a.desired_running = false;
+    a.status = Status::Stopping;
+    a.next_retry = None;
+    a.last_error = None;
+    a.close_intent = Some(CloseIntent {
+        id: Uuid::new_v4(),
+        generation: a.generation,
+        operation_id: a.operation_id,
+        reason: CloseReason::SessionEnded,
+        denied: false,
+    });
+}
+
+pub(super) fn resume_verified_handoff(a: &mut Account) {
+    if a.status == Status::NeedsAttention && a.last_error.as_deref() == Some(HANDOFF_UNRESOLVED) {
+        a.last_error = None;
+        a.status = if !a.desired_running {
+            Status::Stopping
+        } else if a.close_intent.as_ref().is_some_and(|i| {
+            matches!(
+                i.reason,
+                CloseReason::ManualRestart | CloseReason::ManualStartReplacement
+            )
+        }) {
+            Status::Queued
+        } else if a.next_retry.is_some() {
+            Status::Backoff
+        } else {
+            Status::Unknown
+        };
+    }
+}
+
+fn attach_surviving_player(
+    a: &mut Account,
+    successor: &ProcessIdentity,
+    clean: bool,
+    direct_child: bool,
+) {
+    let ended_session = direct_child
+        && a.desired_running
+        && a.status != Status::NeedsAttention
+        && a.close_intent
+            .as_ref()
+            .is_none_or(|i| i.reason.automatic() && !i.denied)
+        && (matches!(
+            a.recovery_evidence,
+            RecoveryEvidence::ConfirmedTerminalDisconnect | RecoveryEvidence::RecoveryStarted
+        ) || clean && a.connected_since.is_some());
+    let retry_reserved = a.next_retry.is_some() && a.status == Status::Backoff;
+    let first_clean_handoff = ended_session
+        && clean
+        && a.failures == 0
+        && a.recovery_reason != "RateLimit"
+        && a.next_retry.is_none();
+    let explicit_replacement = a.close_intent.as_ref().is_some_and(|i| {
+        matches!(
+            i.reason,
+            CloseReason::ManualRestart | CloseReason::ManualStartReplacement
+        )
+    });
+    // An old client's disconnect/close permission cannot authorize closing its successor.
+    if a.close_intent
+        .as_ref()
+        .is_some_and(|i| i.reason.automatic() && !i.denied)
+    {
+        a.close_intent = None;
+    }
+    a.connected_since = None;
+    a.disconnected_since = None;
+    attach_verified_player(a, successor.clone());
+    if direct_child {
+        a.ownership_deadline = None;
+    }
+    if ended_session {
+        if a.auto_recovery {
+            if !retry_reserved {
+                reserve_recovery(a);
+            } else {
+                a.status = Status::Backoff;
+            }
+            if a.status == Status::Backoff {
+                if first_clean_handoff {
+                    a.next_retry = Some(Utc::now());
+                }
+                a.recovery_process = Some(successor.clone());
+                a.recovery_evidence = RecoveryEvidence::RecoveryStarted;
+                a.close_intent = Some(CloseIntent {
+                    id: Uuid::new_v4(),
+                    reason: CloseReason::AutomaticRecovery,
+                    generation: a.generation,
+                    operation_id: a.operation_id,
+                    denied: false,
+                });
+            }
+        } else {
+            stop_ended_session(a);
+        }
+    }
+    if explicit_replacement && a.status != Status::NeedsAttention {
+        a.status = Status::Queued;
+    }
+}
+
 impl Engine {
+    pub(super) fn pause_unresolved_exit(&self, a: &Account, p: &ProcessIdentity) {
+        if a.status == Status::NeedsAttention {
+            return;
+        }
+        let _ = self.update(&a.id, a.generation, |current| {
+            if current.process.as_ref() == Some(p) && current.status != Status::NeedsAttention {
+                current.status = Status::NeedsAttention;
+                current.last_error = Some(HANDOFF_UNRESOLVED.into());
+            }
+        });
+    }
     pub(super) fn attach_player(
         &self,
         expected: &Account,
@@ -387,32 +504,23 @@ impl Engine {
                     return false;
                 }
                 if !verified_unique(&state, &current.id, &successor, players, false) {
+                    drop(state);
+                    if settled {
+                        self.pause_unresolved_exit(account, identity);
+                    }
                     return false;
                 }
                 let mut next = state.clone();
                 let a = account_mut(&mut next, &account.id).unwrap();
-                let explicit_replacement = a.close_intent.as_ref().is_some_and(|i| {
-                    matches!(
-                        i.reason,
-                        CloseReason::ManualRestart | CloseReason::ManualStartReplacement
-                    )
-                });
-                // An old client's disconnect/close permission cannot authorize closing its successor.
-                if a.close_intent
-                    .as_ref()
-                    .is_some_and(|i| i.reason.automatic() && !i.denied)
-                {
-                    a.close_intent = None;
-                }
-                a.connected_since = None;
-                a.disconnected_since = None;
-                attach_verified_player(a, successor.clone());
-                if explicit_replacement && a.status != Status::NeedsAttention {
-                    a.status = Status::Queued;
-                }
+                resume_verified_handoff(a);
+                #[cfg(windows)]
+                let direct_child = platform::direct_successor(identity, &successor);
+                #[cfg(not(windows))]
+                let direct_child = false;
+                attach_surviving_player(a, &successor, clean, direct_child);
                 self.0.journal.record("process_handoff_verified", serde_json::json!({
                     "account_id": a.id.parse::<u64>().ok(), "old_process": crate::diagnostics::process(identity),
-                    "successor": crate::diagnostics::process(&successor), "reason": "same_tracker_unique_successor",
+                    "successor": crate::diagnostics::process(&successor), "reason": if direct_child { "verified_direct_child" } else { "same_tracker_unique_successor" },
                 }));
                 return self.commit_close_state(&mut state, next).is_ok();
             }
@@ -420,6 +528,10 @@ impl Engine {
                 || !settled
                 || !uniquely_claimed(&state, &current.id, identity, false)
             {
+                drop(state);
+                if settled {
+                    self.pause_unresolved_exit(account, identity);
+                }
                 return false;
             }
         }
@@ -492,6 +604,17 @@ impl Engine {
             || a.close_intent != expected.close_intent
         {
             return Err("Close superseded; observing the current client".into());
+        }
+        if a.close_intent.is_none()
+            && !a.auto_recovery
+            && a.desired_running
+            && a.status == Status::Stopping
+            && a.recovery_evidence == RecoveryEvidence::ConfirmedTerminalDisconnect
+            && a.recovery_process.as_ref() == Some(identity)
+            && a.disconnected_since
+                .is_some_and(|t| Utc::now() - t >= ChronoDuration::seconds(30))
+        {
+            stop_ended_session(a);
         }
         if a.close_intent.is_none()
             && recovery_due(a, Utc::now())
@@ -622,9 +745,17 @@ impl Engine {
             self.commit_close_state(&mut state, next)?;
             return Err("Replacement readiness changed before close; client preserved".into());
         }
-        // Give graceful closure five seconds, including clients that remain in the tray.
-        // Every escalation retains the same current intent and verified process identity.
-        let force = attempts.force(&expected.id, &intent, identity, now + started.elapsed());
+        #[cfg(windows)]
+        let grace = platform::successor_close_grace(identity);
+        #[cfg(not(windows))]
+        let grace = Duration::from_secs(5);
+        let force = attempts.force(
+            &expected.id,
+            &intent,
+            identity,
+            now + started.elapsed(),
+            grace,
+        );
         self.0.journal.record("close_submitted", serde_json::json!({"account": crate::diagnostics::account(a), "force": force, "intent": intent}));
         match effect(identity, force) {
             Ok(()) => {
@@ -752,6 +883,7 @@ impl Engine {
             &intent,
             &identity,
             now + started.elapsed(),
+            Duration::from_secs(5),
         );
         self.0.journal.record("close_submitted", serde_json::json!({"account_id": expected.account_id.parse::<u64>().ok(), "process": crate::diagnostics::process(&identity), "intent": intent, "force": force, "retired": true}));
         let result = effect(&identity, force);

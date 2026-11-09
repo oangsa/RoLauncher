@@ -32,6 +32,7 @@ UI/login `WM_CLOSE` handlers close RoLauncher windows, not managed Roblox client
 | Reason | Source | Current close eligibility |
 |---|---|---|
 | `UserStop` | Explicit API/UI/Discord Stop, including cancellation of an issued launch. | Same account generation and operation; desired state is stopped; verified unique process. No launch coordination, target, network or commercial prerequisite. |
+| `SessionEnded` | The managed game ended with Auto Rejoin off. | Stopped desired state, current operation and unique verified owner. A persistent terminal disconnect in a live client allows 30 seconds for reconnection before cleanup. |
 | `ManualRestart` | Explicit Restart of an existing client. | Same intent/generation/operation, desired running, Queued replacement, destination and OS coordination ready. |
 | `ManualStartReplacement` | Explicit Start from an attention state that still owns a client. | Same checks as manual Restart. A fresh Start without a client grants no close intent to the new client. |
 | `AutomaticRecovery` | Owned disk log confirms a terminal disconnect that persists for 30 seconds. | Recovery enabled, current destination, retry budget, connectivity and OS coordination; still Reconnecting or its scheduled Backoff. |
@@ -53,6 +54,8 @@ PID, creation time, tracker and original launch generation remain in `ProcessIde
 
 No authorization token or permit escapes these functions.
 On Windows, fresh discovery merges native same-session/image observations with tracker evidence retained on exact live process handles.
+For a trackerless direct child, the native snapshot and WMI must agree on the parent PID. The pinned parent's creation and exit times must bracket the child's creation, and the child must pass the installed-image, session and command-line checks.
+An owned connection retires the bootstrap deadline. Verified direct children receive a one-second graceful close, and resolved cleanup waits one second for a fresh absence scan. First clean handoffs can rejoin after confirmed exit, while repeated failures retain backoff.
 One asynchronous metadata query refreshes trackers; changed trackers revoke old attribution, while unknown or inaccessible candidates defer decisions.
 Only the canonical current-user Roblox installation root is trusted; no alternate layout is inferred from a process name, window, or registry string.
 Commands linearize before or after each synchronous close effect under the existing mutex.

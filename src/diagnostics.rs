@@ -227,6 +227,10 @@ pub(crate) fn reason(message: &str) -> &'static str {
         ("Multiple primary instances", "ambiguous_launch_ownership"),
         ("Automatic rejoin disabled", "rejoin_disabled"),
         (
+            "Unable to verify the surviving Roblox client",
+            "handoff_ownership_unresolved",
+        ),
+        (
             "Destination unavailable; fallback policy",
             "fallback_requires_attention",
         ),

@@ -208,6 +208,158 @@ fn transient_discovery_failure_defers_recovery_without_latching_a_pause() {
 }
 
 #[test]
+fn direct_child_cleanup_reserves_only_one_rejoin_after_exit() {
+    let f = Fixture::new();
+    f.recovery();
+    let old = f.account();
+    let mut child = old.process.clone().unwrap();
+    child.pid += 100;
+    child.creation_time = "new-child".into();
+    f.engine
+        .update("1", old.generation, |a| {
+            attach_surviving_player(a, &child, true, true)
+        })
+        .unwrap();
+    let account = f.account();
+    assert_eq!(account.failures, 1);
+    assert_eq!(account.status, Status::Backoff);
+    let mut attempts = CloseAttempts::default();
+    let now = Instant::now();
+    assert_eq!(f.tick(&account, now, &mut attempts), vec![false]);
+    assert_eq!(
+        f.tick(&f.account(), now + Duration::from_secs(6), &mut attempts),
+        vec![true]
+    );
+    assert!(!launch_ready(
+        &f.account(),
+        Utc::now() + ChronoDuration::hours(1)
+    ));
+    assert!(
+        f.engine
+            .reconcile_exit(&f.account(), &child, true, &[], true)
+    );
+    assert_eq!(f.account().failures, 1);
+    assert!(launch_ready(&f.account(), account.next_retry.unwrap()));
+}
+
+#[test]
+fn exited_game_waits_for_trackerless_client_and_closes_only_a_verified_handoff() {
+    let f = Fixture::new();
+    let original = f.account();
+    let identity = original.process.clone().unwrap();
+    let other = f.engine.snapshot().accounts[1].clone();
+    f.engine
+        .update("1", original.generation, |a| {
+            a.auto_recovery = false;
+            a.connected_since = Some(Utc::now());
+            note_process_exit(a, &identity, true);
+        })
+        .unwrap();
+    assert_eq!(f.account().status, Status::Stopping);
+    assert!(!f.account().desired_running);
+    let first = f.engine.command("1", "stop").unwrap();
+    let second = f.engine.command("1", "stop").unwrap();
+    assert_eq!(first.id, second.id);
+    f.engine.pause_unresolved_exit(&f.account(), &identity);
+    assert_eq!(f.account().process.as_ref(), Some(&identity));
+    assert_eq!(f.account().status, Status::NeedsAttention);
+    assert!(!launch_ready(&f.account(), Utc::now()));
+    let mut players = f.players();
+    players[0].pid += 100;
+    players[0].creation_time = "verified-child".into();
+    let expected_child = players[0].identity(f.account().generation);
+    assert!(
+        f.engine
+            .reconcile_exit(&f.account(), &identity, true, &players, true)
+    );
+    assert_eq!(f.account().status, Status::Stopping);
+    assert_eq!(f.account().process.as_ref(), Some(&expected_child));
+    let mut attempts = CloseAttempts::default();
+    let now = Instant::now();
+    for (offset, force) in [(0, false), (6, true)] {
+        assert!(
+            f.engine
+                .close_owned(
+                    &f.account(),
+                    now + Duration::from_secs(offset),
+                    &mut attempts,
+                    || Ok(players.clone()),
+                    |p, escalated| {
+                        assert_eq!(p, &expected_child);
+                        assert_eq!(escalated, force);
+                        Ok(())
+                    }
+                )
+                .unwrap()
+        );
+    }
+    assert!(
+        f.engine
+            .reconcile_exit(&f.account(), &expected_child, true, &players[1..], true)
+    );
+    assert_eq!(f.account().status, Status::Stopped);
+    assert!(!launch_ready(
+        &f.account(),
+        Utc::now() + ChronoDuration::days(1)
+    ));
+    assert_eq!(f.engine.snapshot().accounts[1].process, other.process);
+}
+
+#[test]
+fn ended_session_without_rejoin_closes_the_verified_client_and_reuses_stop() {
+    let f = Fixture::new();
+    let original = f.account();
+    let identity = original.process.clone().unwrap();
+    let other = f.engine.snapshot().accounts[1].process.clone();
+    f.engine
+        .update("1", original.generation, |a| a.auto_recovery = false)
+        .unwrap();
+    f.engine.observe(
+        "1",
+        original.generation,
+        &identity,
+        Observation::DiskLog(
+            crate::logs::parse_event("[FLog::Network] Sending disconnect with reason: 285")
+                .unwrap(),
+        ),
+    );
+    assert_eq!(f.account().status, Status::Running);
+    f.engine.observe(
+        "1",
+        original.generation,
+        &identity,
+        Observation::DiskLog(crate::logs::parse_event("[FLog::Network] Connection lost").unwrap()),
+    );
+    assert_eq!(f.account().status, Status::Stopping);
+    f.engine
+        .update("1", original.generation, |a| {
+            a.disconnected_since = Some(Utc::now() - ChronoDuration::seconds(31))
+        })
+        .unwrap();
+    let mut attempts = CloseAttempts::default();
+    assert_eq!(
+        f.tick(&f.account(), Instant::now(), &mut attempts),
+        vec![false]
+    );
+    assert!(!f.account().desired_running);
+    let first = f.engine.command("1", "stop").unwrap();
+    f.engine.pause_unresolved_exit(&f.account(), &identity);
+    assert_eq!(f.account().status, Status::NeedsAttention);
+    assert_eq!(f.engine.command("1", "stop").unwrap().id, first.id);
+    assert!(!launch_ready(&f.account(), Utc::now()));
+    assert!(
+        f.engine
+            .reconcile_exit(&f.account(), &identity, true, &[], true)
+    );
+    assert_eq!(f.account().status, Status::Stopped);
+    assert!(!launch_ready(
+        &f.account(),
+        Utc::now() + ChronoDuration::hours(1)
+    ));
+    assert_eq!(f.engine.snapshot().accounts[1].process, other);
+}
+
+#[test]
 fn exited_bootstrap_adopts_a_unique_surviving_client_without_a_second_launch() {
     let f = Fixture::new();
     let original = f.account();
@@ -387,6 +539,35 @@ fn exit_settlement_requires_both_a_five_second_grace_and_the_existing_launch_dea
         now + Duration::from_secs(90),
         utc + ChronoDuration::seconds(90)
     ));
+}
+
+#[test]
+fn connected_game_retires_bootstrap_deadline_and_cleanup_settles_in_one_second() {
+    let f = Fixture::new();
+    let old = f.account();
+    let identity = old.process.as_ref().unwrap();
+    f.engine
+        .update("1", old.generation, |a| {
+            a.ownership_deadline = Some(Utc::now() + ChronoDuration::seconds(90))
+        })
+        .unwrap();
+    f.engine.observe(
+        "1",
+        old.generation,
+        identity,
+        Observation::DiskLog(
+            crate::logs::parse_event("[FLog::Network] Connection accepted").unwrap(),
+        ),
+    );
+    assert!(f.account().ownership_deadline.is_none());
+    f.engine.command("1", "stop").unwrap();
+    let now = Instant::now();
+    let pending = PendingExit {
+        observed: now,
+        clean: true,
+    };
+    assert!(!pending.settled(&f.account(), now + Duration::from_millis(999), Utc::now()));
+    assert!(pending.settled(&f.account(), now + Duration::from_secs(1), Utc::now()));
 }
 
 #[test]
