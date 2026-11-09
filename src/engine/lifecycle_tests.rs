@@ -200,3 +200,38 @@ async fn accepted_protocol_without_a_process_retains_tracking_and_blocks_duplica
     drop(engine);
     std::fs::remove_dir_all(path).unwrap();
 }
+
+#[tokio::test]
+async fn concurrent_preparation_preserves_five_second_protocol_handoff_spacing() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (engine, path) = engine_fixture(2, &url, true);
+    let mut tasks = Vec::new();
+    for account in engine.snapshot().accounts {
+        let running = engine.clone();
+        tasks.push(tokio::spawn(async move {
+            running.launch_one(account).await;
+        }));
+    }
+    wait_for(&state.tickets, 2, &state.entered).await;
+    state.release.notify_waiters();
+    for task in tasks {
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let events = engine.0.journal.recent();
+    let submitted: Vec<_> = events
+        .iter()
+        .filter(|row| row["event"] == "launch_submitted")
+        .collect();
+    assert_eq!(submitted.len(), 2);
+    assert!(
+        submitted[1]["elapsed_ms"].as_u64().unwrap() - submitted[0]["elapsed_ms"].as_u64().unwrap()
+            >= 5000
+    );
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}

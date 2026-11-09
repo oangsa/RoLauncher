@@ -16,7 +16,10 @@ use tower::ServiceExt;
 async fn accepted_stop_reports_stopping_and_a_pending_operation_with_the_process_retained() {
     let path = std::env::temp_dir().join(format!("rbx-api-stop-{}", uuid::Uuid::new_v4()));
     let store = Store::new(path.clone()).unwrap();
-    let mut database = crate::model::Database::default();
+    let mut database = crate::model::Database {
+        version: 2,
+        ..Default::default()
+    };
     let mut account = crate::model::Account::new("1".into(), "fixture".into());
     account.desired_running = true;
     account.tracker = Some("123456789012".into());
