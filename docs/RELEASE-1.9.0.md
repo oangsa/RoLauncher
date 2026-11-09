@@ -1,6 +1,6 @@
 # RoLauncher 1.9.0
 
-Upcoming Free feature release based on published stable 1.8.0. Local packages carry a unique development suffix.
+Free feature release based on published stable 1.8.0.
 
 ## Added
 

@@ -1,4 +1,4 @@
-# RoLauncher 1.9.0-dev.376e7eb20a57
+# RoLauncher 1.9.0
 
 Manage Roblox accounts, save destinations, and rejoin disconnected sessions.
 Windows uses native WinUI; the shared Linux/Sober port remains a beta.
