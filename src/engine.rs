@@ -23,7 +23,7 @@ mod import_tests;
 #[cfg(test)]
 mod lifecycle_tests;
 mod management;
-use close_safety::CloseAttempts;
+use close_safety::{CloseAttempts, resume_verified_handoff, stop_ended_session};
 mod server_selection;
 pub use management::{BulkPatch, ProfileSave};
 
@@ -66,7 +66,12 @@ struct PendingExit {
 }
 impl PendingExit {
     fn settled(&self, account: &Account, now: Instant, utc: chrono::DateTime<Utc>) -> bool {
-        now.saturating_duration_since(self.observed) >= Duration::from_secs(5)
+        let grace = if account.ownership_deadline.is_none() && account.close_intent.is_some() {
+            1
+        } else {
+            5
+        };
+        now.saturating_duration_since(self.observed) >= Duration::from_secs(grace)
             && account
                 .ownership_deadline
                 .is_none_or(|deadline| utc >= deadline)
@@ -75,6 +80,7 @@ impl PendingExit {
 
 const OWNERSHIP_TIMEOUT_ERROR: &str = "Launch tracker has no verified instance. Recovery paused; use Stop, then Start after checking the client";
 const CLOSE_BLOCKED_PREFIX: &str = "Managed client close blocked: ";
+const HANDOFF_UNRESOLVED: &str = "Unable to verify the surviving Roblox client. Waiting for process ownership before closing or rejoining.";
 const CLOSE_FAILED_ERROR: &str = "Managed client close blocked: verified process close failed; inspect the client and use Stop to retry";
 const REJOIN_DISABLED: &str = "Automatic rejoin disabled; use Start to launch manually";
 #[cfg(windows)]
@@ -153,6 +159,8 @@ fn apply_observation(account: &mut Account, observation: Observation) {
             account.close_intent = None;
         }
         account.status = Status::Running;
+        // An owned connection completes bootstrap. Its deadline must not delay a later close.
+        account.ownership_deadline = None;
         account.connected_since.get_or_insert_with(Utc::now);
         account.disconnected_since = None;
         account.last_error = None;
@@ -192,7 +200,11 @@ fn apply_observation(account: &mut Account, observation: Observation) {
         return;
     }
     account.recovery_evidence = RecoveryEvidence::ConfirmedTerminalDisconnect;
-    account.status = Status::Reconnecting;
+    account.status = if account.auto_recovery {
+        Status::Reconnecting
+    } else {
+        Status::Stopping
+    };
     account.disconnected_since.get_or_insert_with(Utc::now);
     account.connected_since = None;
     if !(account.recovery_reason == "RateLimit"
@@ -206,6 +218,7 @@ fn apply_observation(account: &mut Account, observation: Observation) {
         .into();
     }
     account.last_error = Some(match signal {
+        _ if !account.auto_recovery => "Game disconnected; waiting for the session to settle before closing Roblox".into(),
         Signal::ConnectionFailed => {
             "Connection failed: server did not respond (279); allowing 30 seconds to reconnect before recovery".into()
         }
@@ -236,7 +249,7 @@ fn close_authorized(account: &Account) -> bool {
 }
 fn log_unavailable(account: &mut Account) {
     // A transient read failure must not erase an already confirmed disconnect.
-    if account.status == Status::Reconnecting
+    if matches!(account.status, Status::Reconnecting | Status::Stopping)
         || account.status == Status::NeedsAttention
         || account.recovery_evidence == RecoveryEvidence::RecoveryStarted
     {
@@ -247,6 +260,34 @@ fn log_unavailable(account: &mut Account) {
     account.last_error =
         Some("Log unavailable; retrying verified log discovery and read-only monitoring".into());
 }
+fn note_process_exit(a: &mut Account, identity: &ProcessIdentity, clean: bool) {
+    if a.process.as_ref() != Some(identity) {
+        return;
+    }
+    if !a.auto_recovery
+        && a.desired_running
+        && a.close_intent.is_none()
+        && matches!(
+            a.status,
+            Status::Stopping | Status::Running | Status::Reconnecting
+        )
+        && (a.recovery_evidence == RecoveryEvidence::ConfirmedTerminalDisconnect
+            || clean && a.connected_since.is_some())
+    {
+        stop_ended_session(a);
+    } else if matches!(
+        a.status,
+        Status::Running | Status::Launching | Status::Unknown
+    ) {
+        a.status = Status::Unknown;
+        // Reconciliation needs the previous connection evidence to
+        // distinguish a clean game exit from a bootstrap handoff.
+        a.last_error = Some(
+            "Managed process exited; checking for a surviving Roblox client before rejoin".into(),
+        );
+    }
+}
+
 fn process_unavailable(account: &mut Account) {
     // Inaccessibility supplies no new evidence and cannot reset a terminal/attention decision.
     if account.status == Status::NeedsAttention
@@ -1532,7 +1573,8 @@ impl Engine {
                 .retired_launches
                 .clone();
             if discovery.is_none()
-                && last_discovery.elapsed() >= Duration::from_secs(5)
+                && last_discovery.elapsed()
+                    >= Duration::from_secs(if pending_exits.is_empty() { 5 } else { 1 })
                 && (self
                     .snapshot()
                     .accounts
@@ -1552,6 +1594,15 @@ impl Engine {
                 self.0
                     .journal
                     .record("process_discovery_failed", serde_json::json!({}));
+                for a in self.snapshot().accounts {
+                    if let Some(p) = &a.process
+                        && let Some(exit) = pending_exits.get(&(p.pid, p.creation_time.clone()))
+                        && last_discovery >= exit.observed
+                        && exit.settled(&a, Instant::now(), Utc::now())
+                    {
+                        self.pause_unresolved_exit(&a, p);
+                    }
+                }
             }
             if let Some(Ok(Ok(players))) = discovered {
                 for account in self.snapshot().accounts {
@@ -1751,11 +1802,7 @@ impl Engine {
                             "reason": "checking_for_surviving_client_before_replacement",
                         }));
                         let _ = self.update(&account.id, account.generation, |a| {
-                            if matches!(a.status, Status::Running | Status::Launching | Status::Unknown) {
-                                a.status = Status::Unknown;
-                                a.connected_since = None;
-                                a.last_error = Some("Managed process exited; checking for a surviving Roblox client before rejoin".into());
-                            }
+                            note_process_exit(a, &identity, clean);
                         });
                         continue;
                     }
@@ -1994,6 +2041,7 @@ impl Engine {
                 return;
             }
             self.0.journal.record("process_exit_confirmed", serde_json::json!({"account": crate::diagnostics::account(account), "clean_exit": clean}));
+            resume_verified_handoff(account);
             let ordinary_exit = account.recovery_evidence != RecoveryEvidence::RecoveryStarted
                 && account.status != Status::NeedsAttention
                 && !account.disconnect_notified;
