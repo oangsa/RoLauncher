@@ -3,6 +3,15 @@
 Recorded checks below are historical results, not guarantees of live Roblox compatibility.
 Fixtures use isolated data and simulated accounts unless stated otherwise.
 
+## Upcoming 1.9.0 Free instance lifecycle — 2026-11-09
+
+- Passed on native Windows x64: 197 Rust library tests, 49 identity example tests, 100 desktop checks, WinUI interactions/bootstrap, native process/log fixtures, formatting and Clippy.
+- Local development packaging, SHA256/source/blob consistency, packaged shell smoke, secret scans, license/NuGet audits and isolated installer/update checks passed.
+- Both fetched main and the candidate retain 13 RustSec findings; independent security/code review and real Roblox acceptance remain required.
+- Hosted Linux and source-security checks passed on the implementation SHA; earlier scanner-install failures remain recorded, and final-head Windows checks are tracked in the PR.
+
+[Findings, commands, experiment ledger and limitations](INSTANCE-LIFECYCLE-AUDIT.md) · [Exact-path synchronization manifest](INSTANCE-LIFECYCLE-SYNC.json)
+
 ## Upcoming 1.8.0 recovery and diagnostic logs — 2026-10-24
 
 - Passed: 177 Windows Rust tests, 49 identity example tests, 98 desktop checks, formatting, and Clippy; six Rust tests remain explicitly ignored.
