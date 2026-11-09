@@ -454,7 +454,7 @@ impl Engine {
                 } else {
                     Status::Queued
                 };
-            } else if !a.desired_running {
+            } else if !a.desired_running && a.status != Status::NeedsAttention {
                 a.status = if a.process.is_some()
                     || database
                         .retired_launches

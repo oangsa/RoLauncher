@@ -6,6 +6,31 @@ struct Fixture {
 }
 
 #[test]
+fn reopen_preserves_a_denied_stops_attention_state_and_authority_fence() {
+    let f = Fixture::new();
+    f.engine.command("1", "stop").unwrap();
+    let a = f.account();
+    let players = f.players();
+    assert!(
+        f.engine
+            .close_owned(
+                &a,
+                Instant::now(),
+                &mut CloseAttempts::default(),
+                || Ok(players),
+                |_, _| Err("Windows error 5".into())
+            )
+            .is_err()
+    );
+    let reopened = Engine::open(Store::new(f.path.clone()).unwrap(), "fixture".into()).unwrap();
+    let restored = reopened.snapshot().accounts.remove(0);
+    assert_eq!(restored.status, Status::NeedsAttention);
+    assert!(restored.close_intent.unwrap().denied);
+    assert_eq!(restored.process, a.process);
+    assert!(!restored.desired_running);
+}
+
+#[test]
 fn native_stop_failure_completes_the_operation_as_failed_and_preserves_the_process() {
     let f = Fixture::new();
     let op = f.engine.command("1", "stop").unwrap();
