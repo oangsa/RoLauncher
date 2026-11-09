@@ -1172,6 +1172,18 @@ pub use imp::*;
 mod tests {
     use super::*;
     #[test]
+    fn quoted_payload_cannot_supply_a_tracker_argument() {
+        for cmd in [
+            r#"player.exe --payload "ignored -b 123456789 ignored""#,
+            r#"player.exe --payload "ignored roblox-player:1+browsertrackerid:123456789 ignored""#,
+            r#"player.exe -b "123456789"junk"#,
+            "player.exe -b 123456789\0 -b 987654321",
+        ] {
+            assert_eq!(tracker_from_command_line(cmd), None, "{cmd:?}");
+        }
+        assert_eq!(tracker_from_command_line("\"C:\\With Spaces\\player.exe\"\t-b\t\"123456789\""), Some("123456789".into()));
+    }
+    #[test]
     fn match_tracker_argument_only() {
         assert_eq!(
             tracker_from_command_line("RobloxPlayerBeta.exe -b 123456789 -t SECRET"),

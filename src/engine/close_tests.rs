@@ -6,6 +6,35 @@ struct Fixture {
 }
 
 #[test]
+fn stop_reports_pending_until_the_owned_process_exit_is_confirmed() {
+    let f = Fixture::new();
+    let op = f.engine.command("1", "stop").unwrap();
+    assert_eq!(serde_json::to_value(&f.account().status).unwrap(), "stopping");
+    assert_eq!(op.state, "queued");
+    let mut attempts = CloseAttempts::default();
+    assert_eq!(f.tick(&f.account(), Instant::now(), &mut attempts), vec![false]);
+    assert_eq!(f.engine.operation(op.id).unwrap().state, "queued");
+    let a = f.account();
+    f.engine.owned_exit_observed(&a, a.process.as_ref().unwrap(), true);
+    assert_eq!(f.account().status, Status::Stopped);
+    assert_eq!(f.engine.operation(op.id).unwrap().state, "completed");
+}
+
+#[test]
+fn retired_stop_discovery_outage_defers_without_revoking_explicit_intent() {
+    let f = Fixture::new();
+    let (old, players) = pending_stop(&f);
+    let mut attempts = CloseAttempts::default();
+    assert!(!f.engine.close_retired(&old, &players, Instant::now(), &mut attempts,
+        || Err("Windows process query failed".into()), |_, _| panic!("outage cannot authorize a close")).unwrap());
+    let current = f.engine.0.state.lock().unwrap().database.retired_launches[0].clone();
+    assert!(!current.close_intent.as_ref().unwrap().denied);
+    assert_ne!(f.account().status, Status::NeedsAttention);
+    assert!(f.engine.close_retired(&current, &players, Instant::now(), &mut attempts,
+        || Ok(players.clone()), |_, force| { assert!(!force); Ok(()) }).unwrap());
+}
+
+#[test]
 fn transient_discovery_failure_defers_recovery_without_latching_a_pause() {
     for submitted in [false, true] {
         let f = Fixture::new();
