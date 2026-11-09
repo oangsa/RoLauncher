@@ -211,6 +211,8 @@ pub struct Tail {
     pub last_signal_time: Option<chrono::DateTime<chrono::Utc>>,
     #[cfg(target_os = "linux")]
     inode: (u64, u64),
+    #[cfg(windows)]
+    file_id: (u32, u64),
 }
 impl Tail {
     pub fn new(path: PathBuf, from_end: bool) -> std::io::Result<Self> {
@@ -225,6 +227,8 @@ impl Tail {
             pending: Vec::new(),
             discard_line: false,
             last_signal_time: None,
+            #[cfg(windows)]
+            file_id: windows_file_id(&File::open(&path)?)?,
             #[cfg(target_os = "linux")]
             inode: {
                 use std::os::unix::fs::MetadataExt;
@@ -237,8 +241,18 @@ impl Tail {
         self.read_events()
             .map(|events| events.into_iter().map(|event| event.signal).collect())
     }
+    #[cfg(windows)]
+    pub(crate) fn matches_file(&self, file_id: (u32, u64)) -> bool {
+        self.file_id == file_id
+    }
     pub fn read_events(&mut self) -> std::io::Result<Vec<LogEvent>> {
         let mut f = File::open(&self.path)?;
+        #[cfg(windows)]
+        if windows_file_id(&f)? != self.file_id {
+            return Err(std::io::Error::other(
+                "Log descriptor changed; rediscover ownership",
+            ));
+        }
         #[cfg(target_os = "linux")]
         {
             use std::os::unix::fs::MetadataExt;
@@ -298,6 +312,22 @@ impl Tail {
     }
 }
 
+#[cfg(windows)]
+pub(crate) fn windows_file_id(file: &File) -> std::io::Result<(u32, u64)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok((
+        info.dwVolumeSerialNumber,
+        ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64,
+    ))
+}
+
 pub fn timestamp(line: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::DateTime::parse_from_rfc3339(line.split_once(',')?.0)
         .ok()
@@ -307,6 +337,27 @@ pub fn timestamp(line: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn rotated_windows_path_requires_new_ownership_before_reading_any_signal() {
+        let root = std::env::temp_dir().join(format!("rbx-log-identity-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("client.log");
+        std::fs::write(&path, "[FLog::Network] Connection accepted\n").unwrap();
+        let mut tail = Tail::new(path.clone(), false).unwrap();
+        assert_eq!(tail.read().unwrap(), vec![Signal::Connected]);
+        std::fs::rename(&path, root.join("old.log")).unwrap();
+        std::fs::write(
+            &path,
+            "[FLog::Network] Connection accepted\n[FLog::Network] Connection accepted\n",
+        )
+        .unwrap();
+        assert!(
+            tail.read_events().is_err(),
+            "Replacement content must not inherit the original file's verified ownership"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn diagnostic_metadata_keeps_original_permission_codes_and_source_time() {
         for code in [524, 533, 600, 773] {
