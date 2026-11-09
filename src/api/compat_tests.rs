@@ -13,6 +13,73 @@ use axum::{
 use tower::ServiceExt;
 
 #[tokio::test]
+async fn accepted_stop_reports_stopping_and_a_pending_operation_with_the_process_retained() {
+    let path = std::env::temp_dir().join(format!("rbx-api-stop-{}", uuid::Uuid::new_v4()));
+    let store = Store::new(path.clone()).unwrap();
+    let mut database = crate::model::Database {
+        version: 2,
+        ..Default::default()
+    };
+    let mut account = crate::model::Account::new("1".into(), "fixture".into());
+    account.desired_running = true;
+    account.tracker = Some("123456789012".into());
+    account.process = Some(crate::model::ProcessIdentity {
+        pid: 4242,
+        creation_time: "fixture-start".into(),
+        tracker: account.tracker.clone().unwrap(),
+        generation: account.generation,
+    });
+    database.accounts.push(crate::model::SavedAccount {
+        account,
+        encrypted_session: String::new(),
+    });
+    store.save(&database).unwrap();
+    let engine = Engine::open(store, "fixture".into()).unwrap();
+    let app = api::router(engine.clone());
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/accounts/1/stop")
+                .header("authorization", format!("Bearer {}", engine.token()))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let operation: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(operation["state"], "queued");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/status")
+                .header("authorization", format!("Bearer {}", engine.token()))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let snapshot: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(snapshot["accounts"][0]["status"], "stopping");
+    assert_eq!(snapshot["accounts"][0]["desired_running"], false);
+    assert_eq!(snapshot["accounts"][0]["process"]["pid"], 4242);
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
 async fn external_cleanup_requires_separate_persisted_opt_in() {
     let path = std::env::temp_dir().join(format!("rbx-cleanup-setting-{}", uuid::Uuid::new_v4()));
     let store = Store::new(path.clone()).unwrap();

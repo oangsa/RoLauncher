@@ -1,6 +1,6 @@
 use super::*;
 
-fn same_preset(a: &Account, b: &Account) -> bool {
+pub(super) fn same_preset(a: &Account, b: &Account) -> bool {
     a.id != b.id
         && a.game_profile_id.is_some()
         && a.game_profile_id == b.game_profile_id

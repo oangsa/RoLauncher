@@ -55,7 +55,7 @@ public sealed class AccountRow(Account account) : INotifyPropertyChanged
     public string Status => Account.Status switch
     {
         "needs_attention" => "Needs attention",
-        "stopped" => "Stopped", "queued" => "Queued", "launching" => "Launching",
+        "stopped" => "Stopped", "stopping" => "Stopping", "queued" => "Queued", "launching" => "Launching",
         "running" => "Running", "reconnecting" => "Reconnecting", "backoff" => "Backoff", _ => "Unknown"
     };
     private string? _gameName;

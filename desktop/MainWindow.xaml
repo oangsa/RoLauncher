@@ -157,7 +157,7 @@
                 <Grid.ColumnDefinitions><ColumnDefinition Width="1.3*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <TextBox x:Name="NameSearch" PlaceholderText="Search accounts…" TextChanged="Filters_Changed" AutomationProperties.Name="Search accounts by name"/>
                 <ComboBox x:Name="StatusFilter" Grid.Column="1" SelectedIndex="0" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" VerticalContentAlignment="Center" SelectionChanged="Filters_Changed" AutomationProperties.Name="Filter accounts by status">
-                  <ComboBoxItem Content="All statuses" Tag=""/><ComboBoxItem Content="Running" Tag="running"/><ComboBoxItem Content="Stopped" Tag="stopped"/>
+                  <ComboBoxItem Content="All statuses" Tag=""/><ComboBoxItem Content="Running" Tag="running"/><ComboBoxItem Content="Stopped" Tag="stopped"/><ComboBoxItem Content="Stopping" Tag="stopping"/>
                   <ComboBoxItem Content="Queued" Tag="queued"/><ComboBoxItem Content="Launching" Tag="launching"/><ComboBoxItem Content="Reconnecting" Tag="reconnecting"/>
                   <ComboBoxItem Content="Backoff" Tag="backoff"/><ComboBoxItem Content="Needs attention" Tag="needs_attention"/><ComboBoxItem Content="Unknown" Tag="unknown"/>
                 </ComboBox>
@@ -419,7 +419,7 @@
             </Grid>
           <Grid ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
             <ComboBox x:Name="PresetStatus" HorizontalAlignment="Stretch" SelectedIndex="0" SelectionChanged="PresetGroup_Changed" AutomationProperties.Name="Filter lookup by status">
-              <ComboBoxItem Content="All statuses" Tag=""/><ComboBoxItem Content="Running" Tag="running"/><ComboBoxItem Content="Stopped" Tag="stopped"/><ComboBoxItem Content="Queued" Tag="queued"/><ComboBoxItem Content="Launching" Tag="launching"/><ComboBoxItem Content="Reconnecting" Tag="reconnecting"/><ComboBoxItem Content="Backoff" Tag="backoff"/><ComboBoxItem Content="Needs attention" Tag="needs_attention"/><ComboBoxItem Content="Unknown" Tag="unknown"/>
+              <ComboBoxItem Content="All statuses" Tag=""/><ComboBoxItem Content="Running" Tag="running"/><ComboBoxItem Content="Stopped" Tag="stopped"/><ComboBoxItem Content="Stopping" Tag="stopping"/><ComboBoxItem Content="Queued" Tag="queued"/><ComboBoxItem Content="Launching" Tag="launching"/><ComboBoxItem Content="Reconnecting" Tag="reconnecting"/><ComboBoxItem Content="Backoff" Tag="backoff"/><ComboBoxItem Content="Needs attention" Tag="needs_attention"/><ComboBoxItem Content="Unknown" Tag="unknown"/>
             </ComboBox>
             <ComboBox x:Name="PresetRejoin" Grid.Column="1" HorizontalAlignment="Stretch" SelectedIndex="0" SelectionChanged="PresetGroup_Changed" AutomationProperties.Name="Filter lookup by rejoin setting"><ComboBoxItem Content="All rejoin settings" Tag=""/><ComboBoxItem Content="Rejoin on" Tag="on"/><ComboBoxItem Content="Rejoin off" Tag="off"/></ComboBox>
             <Button Grid.Column="2" Content="Clear filters" Click="PresetClearFilters_Click"/>

@@ -133,11 +133,11 @@ public sealed partial class MainWindow
         var rejoining = accounts.Count(a => a.Status is "reconnecting" or "backoff");
         var attention = accounts.Where(a => a.Status is "needs_attention" or "unknown")
             .Select(a => _rows.FirstOrDefault(r => r.Id == a.Id) ?? new AccountRow(a)).ToArray();
-        var pending = accounts.Count(a => a.Status is "queued" or "launching");
+        var pending = accounts.Count(a => a.Status is "queued" or "launching" or "stopping");
         var stopped = accounts.Count(a => a.Status == "stopped");
         DashboardCounts.Text = $"Updated {DateTimeOffset.Now:HH:mm:ss}";
         TotalMetric.Text = total.ToString(); TotalHint.Text = $"{_gameProfiles.Length} saved games";
-        RunningMetric.Text = running.ToString(); RunningHint.Text = $"{pending} queued or launching";
+        RunningMetric.Text = running.ToString(); RunningHint.Text = $"{pending} queued, launching or stopping";
         RejoiningMetric.Text = rejoining.ToString(); RejoiningHint.Text = "Waiting to reconnect or retry";
         AttentionMetric.Text = attention.Length.ToString(); AttentionHint.Text = "Paused or unverified";
         var longest = _rows.OrderByDescending(row => row.LongestSeconds).FirstOrDefault();
@@ -155,7 +155,7 @@ public sealed partial class MainWindow
         var statusCounts = new[] { running, pending, rejoining, attention.Length, stopped };
         if (_statusMeters.Count == 0)
         {
-            foreach (var label in new[] { "Running", "Queued / launching", "Rejoining", "Needs attention / unknown", "Stopped" })
+            foreach (var label in new[] { "Running", "Pending", "Rejoining", "Needs attention / unknown", "Stopped" })
             {
                 var line = new Grid { ColumnSpacing = 12 };
                 line.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });

@@ -134,6 +134,30 @@ fn eligible(
 }
 
 impl Engine {
+    pub(super) fn attach_player(
+        &self,
+        expected: &Account,
+        identity: ProcessIdentity,
+        players: &[platform::Player],
+    ) -> Result<(), String> {
+        self.transaction(|state| {
+            let current = account_mut(state, &expected.id)?;
+            if current.generation != expected.generation
+                || current.process.is_some()
+                || current.tracker.as_ref() != Some(&identity.tracker)
+            {
+                return Err("Player attachment superseded".into());
+            }
+            if !verified_unique(state, &expected.id, &identity, players, false) {
+                let current = account_mut(state, &expected.id)?;
+                current.status = Status::NeedsAttention;
+                current.last_error = Some("Launch ownership is ambiguous; client preserved".into());
+                return Ok(());
+            }
+            attach_verified_player(account_mut(state, &expected.id)?, identity);
+            Ok(())
+        })
+    }
     #[cfg(any(windows, test))]
     pub(super) fn cleanup_launch_conflict(
         &self,
@@ -180,17 +204,20 @@ impl Engine {
     pub fn close_all_instances(&self) -> Result<usize, String> {
         #[cfg(windows)]
         {
-            self.close_all_with(platform::all_players, |identity| {
-                platform::close(identity, true)?;
-                let deadline = Instant::now() + Duration::from_secs(2);
-                while platform::alive(identity)? {
-                    if Instant::now() >= deadline {
-                        return Err("Roblox process has not exited".into());
+            self.close_all_observed_with(
+                || platform::observe_all_players().map(|scan| (scan.players, scan.inaccessible)),
+                |identity| {
+                    platform::close(identity, true)?;
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    while platform::alive(identity)? {
+                        if Instant::now() >= deadline {
+                            return Err("Roblox process has not exited".into());
+                        }
+                        std::thread::sleep(Duration::from_millis(25));
                     }
-                    std::thread::sleep(Duration::from_millis(25));
-                }
-                Ok(())
-            })
+                    Ok(())
+                },
+            )
         }
         #[cfg(not(windows))]
         {
@@ -199,9 +226,18 @@ impl Engine {
     }
 
     #[cfg(any(windows, test))]
+    #[cfg(test)]
     fn close_all_with(
         &self,
         discover: impl FnOnce() -> Result<Vec<platform::Player>, String>,
+        close: impl FnMut(&ProcessIdentity) -> Result<(), String>,
+    ) -> Result<usize, String> {
+        self.close_all_observed_with(|| discover().map(|players| (players, 0)), close)
+    }
+    #[cfg(any(windows, test))]
+    fn close_all_observed_with(
+        &self,
+        discover: impl FnOnce() -> Result<(Vec<platform::Player>, usize), String>,
         mut close: impl FnMut(&ProcessIdentity) -> Result<(), String>,
     ) -> Result<usize, String> {
         let mut state = self.0.state.lock().unwrap();
@@ -269,19 +305,26 @@ impl Engine {
         }
         // A failed discovery/close still leaves automatic relaunch durably stopped.
         self.commit_close_state(&mut state, next)?;
-        let players = discover()?;
+        let (players, inaccessible) = discover()?;
         let mut closed = 0;
         let mut failed = 0;
         for player in players {
-            if close(&player.identity(Uuid::nil())).is_ok() {
+            let identity = player.identity(Uuid::nil());
+            let result = close(&identity);
+            self.0.journal.record("stop_all_process_result", serde_json::json!({"process": crate::diagnostics::process(&identity), "exit_confirmed": result.is_ok(), "error_code": result.as_ref().err().and_then(|error| crate::diagnostics::error_code(error))}));
+            if result.is_ok() {
                 closed += 1;
             } else {
                 failed += 1;
             }
         }
-        if failed > 0 {
+        self.0.journal.record(
+            "stop_all_result",
+            serde_json::json!({"closed": closed, "failed": failed, "inaccessible": inaccessible}),
+        );
+        if failed > 0 || inaccessible > 0 {
             Err(format!(
-                "Closed {closed} Roblox instances; {failed} could not be closed. Automatic rejoin is stopped; retry Close all Roblox."
+                "Closed {closed} Roblox instances; {failed} could not be closed; {inaccessible} could not be inspected. Automatic rejoin is stopped; retry Close all Roblox."
             ))
         } else {
             Ok(closed)
@@ -386,7 +429,11 @@ impl Engine {
 
     // Same durable-before-visible ordering as Engine::transaction; callers already
     // hold the command mutex, including through the subsequent synchronous effect.
-    fn commit_close_state(&self, state: &mut State, mut next: State) -> Result<(), String> {
+    pub(super) fn commit_close_state(
+        &self,
+        state: &mut State,
+        mut next: State,
+    ) -> Result<(), String> {
         normalize_accounts(&mut next);
         management::record_activity(state, &mut next);
         if let Err(error) = self.0.store.save(&next.database) {
@@ -635,7 +682,7 @@ impl Engine {
         let record = &next.database.retired_launches[index];
         let intent = record.close_intent.clone();
         let identity = record.process.clone();
-        let allowed = identity
+        let policy = identity
             .as_ref()
             .zip(intent.as_ref())
             .is_some_and(|(identity, intent)| {
@@ -651,10 +698,29 @@ impl Engine {
                                 && eligible(&a.account, intent, next.network_suspended, false)
                         })
                     && verified_unique(&next, &expected.account_id, identity, observed, true)
-                    && discover().is_ok_and(|players| {
-                        verified_unique(&next, &expected.account_id, identity, &players, true)
-                    })
             });
+        let allowed = if policy {
+            match discover() {
+                Ok(players) => verified_unique(
+                    &next,
+                    &expected.account_id,
+                    identity.as_ref().unwrap(),
+                    &players,
+                    true,
+                ),
+                Err(_) => {
+                    self.0.journal.record("close_deferred", serde_json::json!({"account_id": expected.account_id.parse::<u64>().ok(), "retired": true, "reason": "process_discovery_unavailable"}));
+                    // Observation may freeze identity; an outage grants no effect and
+                    // must not revoke a valid Stop or start its escalation clock.
+                    if next.database.retired_launches[index].process != expected.process {
+                        self.commit_close_state(&mut state, next)?;
+                    }
+                    return Ok(false);
+                }
+            }
+        } else {
+            false
+        };
         if !allowed {
             let mut changed = next.database.retired_launches[index].process != expected.process;
             if let Some(intent) = &mut next.database.retired_launches[index].close_intent {

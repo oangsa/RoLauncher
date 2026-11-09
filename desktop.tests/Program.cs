@@ -35,6 +35,8 @@ Check(draft.TryTarget(out _, out _), "Share server links are supported.");
 draft.Private = "https://www.roblox.com/share?code=ABC&type=Experience";
 Check(!draft.TryTarget(out _, out _), "Non-server shares are rejected.");
 var row = new AccountRow(account);
+Check(new AccountRow(account with { Status = "stopping" }).Status == "Stopping", "Pending shutdown is distinct from Stopped.");
+Check(AccountFilter.Matches(account with { Status = "stopping" }, "", "stopping", ""), "Pending shutdown can be filtered.");
 Check(row.Destination == "Place 1818", "Account game label falls back to the place number.");
 row.SetGameName("Sample experience");
 Check(row.Destination == "Sample experience", "Account game label uses resolved metadata.");

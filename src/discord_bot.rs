@@ -144,6 +144,7 @@ fn status_label(status: &Status) -> &'static str {
     match status {
         Status::Running => "🟢 Online",
         Status::Stopped => "⚪ Stopped",
+        Status::Stopping => "⚪ Stopping",
         Status::Queued => "🟡 Queued",
         Status::Launching => "🟡 Joining",
         Status::Reconnecting => "🟡 Reconnecting",

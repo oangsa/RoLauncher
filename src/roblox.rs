@@ -53,6 +53,8 @@ pub struct Roblox {
     pub(crate) presence_url: Option<String>,
     #[cfg(test)]
     pub(crate) servers_url: Option<String>,
+    #[cfg(test)]
+    pub(crate) ticket_url: Option<String>,
 }
 impl Roblox {
     pub fn new() -> Result<Self, String> {
@@ -70,6 +72,8 @@ impl Roblox {
             presence_url: None,
             #[cfg(test)]
             servers_url: None,
+            #[cfg(test)]
+            ticket_url: None,
         })
     }
     fn cookie_header(cookie: &str) -> Result<HeaderValue, Failure> {
@@ -272,7 +276,18 @@ impl Roblox {
         // Roblox requires JSON media type even though this endpoint has no parameters.
         // An absent Content-Type passes the CSRF challenge but then receives HTTP 415.
         self.client
-            .post("https://auth.roblox.com/v1/authentication-ticket/")
+            .post({
+                #[cfg(test)]
+                {
+                    self.ticket_url
+                        .as_deref()
+                        .unwrap_or("https://auth.roblox.com/v1/authentication-ticket/")
+                }
+                #[cfg(not(test))]
+                {
+                    "https://auth.roblox.com/v1/authentication-ticket/"
+                }
+            })
             .header(COOKIE, cookie)
             .header(
                 "Referer",
