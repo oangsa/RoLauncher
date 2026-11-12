@@ -5169,3 +5169,101 @@ async fn f12_12_journal_records_readiness_transitions() {
     drop(engine);
     std::fs::remove_dir_all(path).unwrap();
 }
+
+#[tokio::test]
+async fn f13_cleanup_rolls_back_then_publishes_on_success() {
+    let (engine, path) = super::tests::fixture(1);
+    engine.command("1", "start").unwrap();
+    let generation = engine.snapshot().accounts[0].generation;
+    engine
+        .update("1", generation, |account| {
+            account.status = Status::Launching;
+            account.tracker = Some("123456789012".into());
+            account.ownership_deadline = Some(Utc::now() + ChronoDuration::seconds(90));
+        })
+        .unwrap();
+    let reservation = engine.snapshot().accounts.remove(0);
+    let stop = engine.command("1", "stop").unwrap();
+    let committed = std::fs::read(path.join("accounts.json")).unwrap();
+    let database = || serde_json::to_value(&engine.0.state.lock().unwrap().database).unwrap();
+    let before = database();
+    let mut events = engine.subscribe();
+    let cleanup = || {
+        engine.submit_launch(&reservation, reservation.target.as_ref().unwrap(), || {
+            panic!("A cancelled reservation must never reach the OS adapter")
+        })
+    };
+    engine.0.store.fail_next_save.store(true, Ordering::SeqCst);
+
+    let error = cleanup().unwrap_err();
+    assert!(error.contains("reservation cleanup failed"));
+    assert_eq!(database(), before);
+    assert_eq!(
+        std::fs::read(path.join("accounts.json")).unwrap(),
+        committed
+    );
+    assert_eq!(
+        serde_json::to_value(engine.0.store.load().unwrap()).unwrap(),
+        before
+    );
+    assert_eq!(engine.operation(stop.id).unwrap().state, "queued");
+    let reopened = Engine::open(engine.0.store.clone(), "simulated".into()).unwrap();
+    assert_eq!(reopened.snapshot().accounts[0].status, Status::Stopping);
+    let retired = reopened.0.store.load().unwrap().retired_launches;
+    assert_eq!(retired.len(), 1);
+    assert_eq!(retired[0].generation, reservation.generation);
+    assert_eq!(Some(&retired[0].tracker), reservation.tracker.as_ref());
+    assert!(reopened.command("1", "start").is_err());
+    drop(reopened);
+    assert!(events.try_recv().is_err());
+    let journal = engine.0.journal.recent();
+    assert!(
+        !journal
+            .iter()
+            .any(|e| e["event"] == "launch_reservation_cleaned")
+    );
+    assert!(journal.iter().any(|e| {
+        e["event"] == "launch_reservation_cleanup_failed"
+            && e["details"]["account_id"] == 1
+            && e["details"]["reason"] == "unsubmitted_launch_cancelled"
+            && e["details"].get("error").is_none()
+    }));
+
+    let wake = engine.0.wake.notified();
+    assert_eq!(
+        cleanup().unwrap_err(),
+        "Launch cancelled before dispatch: retired_launch_pending"
+    );
+    tokio::time::timeout(Duration::from_secs(1), wake)
+        .await
+        .unwrap();
+    assert_eq!(
+        events.try_recv().unwrap().accounts[0].status,
+        Status::Stopped
+    );
+    assert_eq!(engine.operation(stop.id).unwrap().state, "completed");
+    assert!(engine.0.store.load().unwrap().retired_launches.is_empty());
+    assert_eq!(
+        serde_json::to_value(engine.0.store.load().unwrap()).unwrap(),
+        database()
+    );
+    let after = database();
+    let saves = engine.0.store.save_calls.load(Ordering::SeqCst);
+    let _ = cleanup();
+    assert_eq!(database(), after);
+    assert_eq!(engine.0.store.save_calls.load(Ordering::SeqCst), saves);
+    assert!(events.try_recv().is_err());
+    assert_eq!(
+        engine
+            .0
+            .journal
+            .recent()
+            .iter()
+            .filter(|e| { e["event"] == "launch_reservation_cleaned" })
+            .count(),
+        1
+    );
+    engine.command("1", "start").unwrap();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}

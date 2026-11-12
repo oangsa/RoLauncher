@@ -20,6 +20,8 @@ pub struct Store {
     pub directory: PathBuf,
     #[cfg(test)]
     pub(crate) save_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    pub(crate) fail_next_save: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 impl Store {
     pub fn new(directory: PathBuf) -> Result<Self, String> {
@@ -31,6 +33,8 @@ impl Store {
             directory,
             #[cfg(test)]
             save_calls: Default::default(),
+            #[cfg(test)]
+            fail_next_save: Default::default(),
         })
     }
     pub fn load(&self) -> Result<Database, String> {
@@ -93,6 +97,13 @@ impl Store {
             .and_then(|_| file.sync_all())
             .map_err(|_| "Unable to flush account database")?;
         drop(file);
+        #[cfg(test)]
+        if self
+            .fail_next_save
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err("Injected account database replacement failure".into());
+        }
         platform::replace_file(&temp, &path)
     }
     pub fn backups(&self) -> Result<Vec<String>, String> {
