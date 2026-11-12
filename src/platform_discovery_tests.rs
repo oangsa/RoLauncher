@@ -13,6 +13,7 @@ fn tracked(player: &Player) -> TrackedProcess {
             .unwrap(),
         player: player.clone(),
         parent: None,
+        roblox_parent: false,
     }
 }
 
@@ -138,6 +139,136 @@ fn native_observation_of_the_fixture_never_confers_tracker_ownership() {
         ..Default::default()
     };
     assert!(unknown.verified().is_err());
+}
+
+#[test]
+fn target_scoped_verification_distinguishes_inspected_external_from_uninspected_or_child_processes()
+{
+    let owned = current_player();
+    let target = owned.identity(Uuid::new_v4());
+    let external = Player {
+        pid: owned.pid,
+        creation_time: owned.creation_time.clone(),
+        tracker: String::new(),
+    };
+    let mut external_tracked = tracked(&external);
+    external_tracked.player.pid = owned.pid + 777;
+    let external_obs = Player {
+        pid: owned.pid + 777,
+        creation_time: owned.creation_time.clone(),
+        tracker: String::new(),
+    };
+    let (_sender, receiver) = std::sync::mpsc::channel();
+    let mut discovery = Discovery {
+        tracked: vec![tracked(&owned), external_tracked],
+        pending: Some(receiver),
+        ..Default::default()
+    };
+    // 1. Confirmed trackerless external process on a pinned handle: global verified() rejects
+    //    because unowned > 0, while verified_for_target(&target) succeeds because uninspected == 0.
+    let report = discovery
+        .observe(ProcessScan {
+            players: vec![
+                Player {
+                    tracker: String::new(),
+                    ..owned.clone()
+                },
+                external_obs.clone(),
+            ],
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(report.unowned, 1);
+    assert_eq!(report.uninspected, 0);
+    let players_for_target = report.verified_for_target(&target).unwrap();
+    assert_eq!(players_for_target.len(), 2);
+    assert!(report.verified().is_err());
+
+    // 2. A brand-new uninspected process blocks both global and target-scoped verification.
+    let uninspected_obs = Player {
+        pid: owned.pid + 888,
+        creation_time: owned.creation_time.clone(),
+        tracker: String::new(),
+    };
+    let report = discovery
+        .observe(ProcessScan {
+            players: vec![
+                Player {
+                    tracker: String::new(),
+                    ..owned.clone()
+                },
+                external_obs.clone(),
+                uninspected_obs,
+            ],
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(report.unowned, 2);
+    assert_eq!(report.uninspected, 1);
+    assert!(report.verified_for_target(&target).is_err());
+    assert!(report.verified().is_err());
+
+    // 3. An unowned direct child of the target process blocks target-scoped verification.
+    let mut child_parents = std::collections::HashMap::new();
+    child_parents.insert(external_obs.pid, owned.pid);
+    let report_with_child = ProcessScan {
+        players: vec![owned.clone(), external_obs],
+        unowned: 1,
+        uninspected: 0,
+        parents: child_parents,
+        ..Default::default()
+    };
+    assert!(report_with_child.has_unowned_child(owned.pid));
+    assert!(report_with_child.verified_for_target(&target).is_err());
+}
+
+#[test]
+fn close_escalation_pins_and_reuses_original_verified_kernel_process_handle() {
+    use std::os::windows::process::CommandExt;
+    let root = std::env::temp_dir().join(format!("rbx-pinned-close-{}", Uuid::new_v4()));
+    let versions = root.join("Roblox").join("Versions");
+    std::fs::create_dir_all(&versions).unwrap();
+    let exe = versions.join("RobloxPlayerBeta.exe");
+    std::fs::copy(
+        PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32")
+            .join("cmd.exe"),
+        &exe,
+    )
+    .unwrap();
+    let mut child = std::process::Command::new(&exe)
+        .args(["/C", "set /p fixture="])
+        .creation_flags(0x08000000)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let observe_handle =
+        process_handle(child.id(), PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE).unwrap();
+    let identity = ProcessIdentity {
+        pid: child.id(),
+        creation_time: process_time(observe_handle.0).unwrap(),
+        tracker: "555555555555".into(),
+        generation: Uuid::new_v4(),
+    };
+    assert!(pinned_close_handle_value(&identity).is_none());
+    // Graceful close pins the verified kernel handle for the target process.
+    close_with(&identity, false, fixture_image).unwrap();
+    let pinned_raw =
+        pinned_close_handle_value(&identity).expect("graceful close must pin verified handle");
+    assert_ne!(pinned_raw, 0);
+    // Force escalation reuses and consumes the original pinned kernel handle.
+    close_with(&identity, true, fixture_image).unwrap();
+    assert!(
+        pinned_close_handle_value(&identity).is_none(),
+        "force escalation must consume and unpin the verified handle"
+    );
+    assert_eq!(
+        unsafe { WaitForSingleObject(observe_handle.0, 5000) },
+        WAIT_OBJECT_0
+    );
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]

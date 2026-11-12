@@ -1,4 +1,4 @@
-"""Validate Windows/Linux release fragments and combine their checksums in memory."""
+"""Validate Windows release artifacts and checksums in memory."""
 import hashlib
 import re
 
@@ -6,9 +6,8 @@ import re
 def checked_files(dist, version):
     prefix = f"rolauncher-v{version}"
     windows = {f"{prefix}-setup-x64.exe", f"{prefix}-windows-x64.zip", f"{prefix}-source.zip"}
-    linux = {f"{prefix}-linux-x64.tar.gz"}
     digests = {}
-    for suffix, expected in (("-SHA256SUMS.txt", windows), ("-linux-SHA256SUMS.txt", linux)):
+    for suffix, expected in (("-SHA256SUMS.txt", windows),):
         seen = set()
         for line in (dist / (prefix + suffix)).read_text().splitlines():
             digest, filename = line.split()

@@ -2871,3 +2871,223 @@ fn missing_process_does_not_override_policy_manual_or_shared_ownership_denials()
         assert!(f.account().close_intent.unwrap().denied);
     }
 }
+
+#[cfg(windows)]
+#[test]
+fn target_scoped_verification_closes_verified_account_a_alongside_unrelated_unowned_process_b() {
+    for mode in ["stop", "restart", "recovery"] {
+        let f = Fixture::new();
+        let op_id = match mode {
+            "stop" => Some(f.engine.command("1", "stop").unwrap().id),
+            "restart" => Some(f.engine.command("1", "restart").unwrap().id),
+            _ => {
+                f.recovery();
+                f.account().operation_id
+            }
+        };
+        let account_a = f.account();
+        let identity_a = account_a.process.clone().unwrap();
+        let mut attempts = CloseAttempts::default();
+        let make_scan = || {
+            let mut scan = platform::ProcessScan::default();
+            scan.players = vec![
+                platform::Player {
+                    pid: identity_a.pid,
+                    creation_time: identity_a.creation_time.clone(),
+                    tracker: identity_a.tracker.clone(),
+                },
+                platform::Player {
+                    pid: 9999,
+                    creation_time: "unrelated-external".into(),
+                    tracker: String::new(),
+                },
+            ];
+            scan.unowned = 1;
+            scan.uninspected = 0;
+            scan
+        };
+        // Global scan.verified() still rejects unowned > 0.
+        assert!(make_scan().verified().is_err());
+
+        // Target-scoped verification succeeds for Account A (graceful at t=0, force escalation at t=5s).
+        let now = Instant::now();
+        let mut closed = Vec::new();
+        assert!(
+            f.engine
+                .close_owned(
+                    &account_a,
+                    now,
+                    &mut attempts,
+                    || make_scan().verified_for_target(&identity_a),
+                    |process, force| {
+                        closed.push((process.pid, force));
+                        Ok(())
+                    },
+                )
+                .unwrap(),
+            "mode={mode}: graceful close must succeed alongside inspected unrelated unowned process"
+        );
+        let refreshed = f.account();
+        assert!(
+            f.engine
+                .close_owned(
+                    &refreshed,
+                    now + Duration::from_secs(6),
+                    &mut attempts,
+                    || make_scan().verified_for_target(&identity_a),
+                    |process, force| {
+                        closed.push((process.pid, force));
+                        Ok(())
+                    },
+                )
+                .unwrap(),
+            "mode={mode}: force escalation must succeed alongside inspected unrelated unowned process"
+        );
+        assert_eq!(
+            closed,
+            vec![(identity_a.pid, false), (identity_a.pid, true)]
+        );
+
+        // Post-exit reconciliation also succeeds alongside the unrelated unowned process.
+        let mut post_exit_scan = platform::ProcessScan::default();
+        post_exit_scan.players = vec![platform::Player {
+            pid: 9999,
+            creation_time: "unrelated-external".into(),
+            tracker: String::new(),
+        }];
+        post_exit_scan.unowned = 1;
+        post_exit_scan.uninspected = 0;
+        let post_exit_players = post_exit_scan.verified_for_target(&identity_a).unwrap();
+        assert!(
+            f.engine
+                .reconcile_exit(&f.account(), &identity_a, true, &post_exit_players, true)
+        );
+        let after = f.account();
+        assert!(after.process.is_none());
+        match mode {
+            "stop" => {
+                assert_eq!(after.status, Status::Stopped);
+                assert_eq!(
+                    f.engine.operation(op_id.unwrap()).unwrap().state,
+                    "completed"
+                );
+            }
+            "restart" => {
+                assert_eq!(after.status, Status::Queued);
+                assert!(launch_ready(&after, Utc::now()));
+            }
+            _ => {
+                assert_eq!(after.status, Status::Backoff);
+                assert_eq!(after.failures, 1);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn target_scoped_verification_refuses_inaccessible_uninspected_conflicting_and_handoff_cases() {
+    // 1. Inaccessible unrelated process defers close without touching Account A.
+    let f = Fixture::new();
+    f.engine.command("1", "stop").unwrap();
+    let account_a = f.account();
+    let identity_a = account_a.process.clone().unwrap();
+    let mut attempts = CloseAttempts::default();
+    let mut inaccessible_scan = platform::ProcessScan::default();
+    inaccessible_scan.players = f.players();
+    inaccessible_scan.inaccessible = 1;
+    assert!(
+        !f.engine
+            .close_owned(
+                &account_a,
+                Instant::now(),
+                &mut attempts,
+                || inaccessible_scan.verified_for_target(&identity_a),
+                |_, _| panic!("inaccessible unrelated process must defer close"),
+            )
+            .unwrap()
+    );
+    assert_eq!(f.account().status, Status::Stopping);
+
+    // 2. Uninspected process / unavailable target metadata defers close.
+    let mut uninspected_scan = platform::ProcessScan::default();
+    uninspected_scan.players = vec![
+        platform::Player {
+            pid: identity_a.pid,
+            creation_time: identity_a.creation_time.clone(),
+            tracker: identity_a.tracker.clone(),
+        },
+        platform::Player {
+            pid: 9998,
+            creation_time: "uninspected".into(),
+            tracker: String::new(),
+        },
+    ];
+    uninspected_scan.unowned = 1;
+    uninspected_scan.uninspected = 1;
+    assert!(
+        !f.engine
+            .close_owned(
+                &account_a,
+                Instant::now(),
+                &mut attempts,
+                || uninspected_scan.verified_for_target(&identity_a),
+                |_, _| panic!("uninspected process metadata must defer close"),
+            )
+            .unwrap()
+    );
+
+    // 3. Target process itself has pending/missing tracker metadata -> defers close.
+    let mut target_pending_scan = platform::ProcessScan::default();
+    target_pending_scan.players = vec![platform::Player {
+        pid: identity_a.pid,
+        creation_time: identity_a.creation_time.clone(),
+        tracker: String::new(),
+    }];
+    target_pending_scan.unowned = 1;
+    target_pending_scan.metadata_pending = true;
+    assert!(
+        !f.engine
+            .close_owned(
+                &account_a,
+                Instant::now(),
+                &mut attempts,
+                || target_pending_scan.verified_for_target(&identity_a),
+                |_, _| panic!("pending target tracker metadata must defer close"),
+            )
+            .unwrap()
+    );
+
+    // 4. Delayed successor/handoff alongside unrelated unowned process:
+    //    While successor is uninspected, exit reconciliation is deferred; once verified, successor attaches.
+    let f_handoff = Fixture::new();
+    let parent_acc = f_handoff.account();
+    let parent_id = parent_acc.process.clone().unwrap();
+    let mut handoff_scan = platform::ProcessScan::default();
+    handoff_scan.players = vec![
+        platform::Player {
+            pid: 9999,
+            creation_time: "unrelated".into(),
+            tracker: String::new(),
+        },
+        platform::Player {
+            pid: parent_id.pid + 500,
+            creation_time: "child-successor".into(),
+            tracker: parent_id.tracker.clone(),
+        },
+    ];
+    handoff_scan.unowned = 1;
+    handoff_scan.uninspected = 0;
+    let verified_handoff = handoff_scan.verified_for_target(&parent_id).unwrap();
+    assert!(f_handoff.engine.reconcile_exit(
+        &parent_acc,
+        &parent_id,
+        true,
+        &verified_handoff,
+        false
+    ));
+    assert_eq!(
+        f_handoff.account().process.as_ref().map(|p| p.pid),
+        Some(parent_id.pid + 500)
+    );
+}

@@ -30,11 +30,73 @@ pub use management::{BulkPatch, ProfileSave};
 #[derive(Clone)]
 struct State {
     active_multi_instance: bool,
+    launch_allowed: bool,
     database: Database,
     operations: BTreeMap<Uuid, Operation>,
     network_suspended: bool,
     compatibility: String,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LaunchReadinessStage {
+    ProtocolAccepted,
+    BootstrapperStarted,
+    ProcessObserved,
+    OwnershipVerified,
+    Connected,
+    StartupUnresolved,
+    StartupFailed,
+}
+#[derive(Clone)]
+struct PendingLaunchReadiness {
+    account_id: String,
+    operation_id: Option<Uuid>,
+    generation: Uuid,
+    tracker: String,
+    dispatched_at: Instant,
+    stage: LaunchReadinessStage,
+    stage_updated_at: Instant,
+    observed_pid: Option<u32>,
+    deferred_logged: bool,
+}
+struct LaunchCoordinator {
+    next_allowed_at: Instant,
+    last_dispatched: Option<PendingLaunchReadiness>,
+    unverified_processes: usize,
+    inaccessible_processes: usize,
+    bootstrapper_active: bool,
+    ambiguous_logged_for: Option<String>,
+    ambiguous_first_seen: Option<Instant>,
+    ambiguous_timeout_logged_for: Option<String>,
+}
+impl Default for LaunchCoordinator {
+    fn default() -> Self {
+        Self {
+            next_allowed_at: Instant::now(),
+            last_dispatched: None,
+            unverified_processes: 0,
+            inaccessible_processes: 0,
+            bootstrapper_active: false,
+            ambiguous_logged_for: None,
+            ambiguous_first_seen: None,
+            ambiguous_timeout_logged_for: None,
+        }
+    }
+}
+#[cfg(test)]
+type LaunchHook = Arc<dyn Fn(&str, &str) -> Result<(), String> + Send + Sync>;
+#[cfg(test)]
+type PreDispatchHook = Arc<dyn Fn(&str, Uuid, &str) + Send + Sync>;
+#[cfg(test)]
+type ClockHook = Arc<dyn Fn() -> Instant + Send + Sync>;
+
+/// Strict Partial Lock Hierarchy (Level 1 -> Level 2 -> Level 3 -> Level 4)
+/// Locks must ALWAYS be acquired in top-to-bottom order to guarantee provable ordering and zero AB-BA deadlocks:
+///
+/// 1. `launch_slot`: Tokio Mutex (async, held only by `launch_one` to serialize launch attempts across accounts)
+/// 2. `dispatch_lock`: std Mutex (synchronous, serializes dispatch authorization, OS `effect()` submission, gate disable, shutdown completion boundary, and `execute_command`)
+/// 3. `state`: std Mutex (synchronous, held during state transactions, snapshot reads, and account updates)
+/// 4. `launch_coordinator`: std Mutex (synchronous leaf lock, held only for brief coordinator updates; NEVER acquires `state` or `dispatch_lock`)
 struct Inner {
     state: Mutex<State>,
     store: Store,
@@ -47,9 +109,24 @@ struct Inner {
     bot_generation: AtomicU64,
     discord: crate::discord::Discord,
     journal: crate::diagnostics::Journal,
-    launch_slot: tokio::sync::Mutex<Instant>,
+    launch_slot: tokio::sync::Mutex<()>,
+    dispatch_lock: Mutex<()>,
+    launch_coordinator: Mutex<LaunchCoordinator>,
+    launch_spacing: Duration,
+    launch_readiness_timeout: Duration,
+    startup_verification_timeout: Duration,
     #[cfg(test)]
     launch_result: Option<Result<(), String>>,
+    #[cfg(test)]
+    launch_hook: Option<LaunchHook>,
+    #[cfg(test)]
+    pre_dispatch_hook: Option<PreDispatchHook>,
+    #[cfg(test)]
+    post_auth_hook: Option<PreDispatchHook>,
+    #[cfg(test)]
+    discovery_hook: Option<Arc<dyn Fn() -> Result<platform::ProcessScan, String> + Send + Sync>>,
+    #[cfg(test)]
+    clock: Option<ClockHook>,
 }
 #[derive(Clone)]
 pub struct Engine(Arc<Inner>);
@@ -79,14 +156,37 @@ impl PendingExit {
 }
 
 const OWNERSHIP_TIMEOUT_ERROR: &str = "Launch tracker has no verified instance. Recovery paused; use Stop, then Start after checking the client";
+const STARTUP_UNRESOLVED_ERROR: &str = "Roblox did not confirm client startup within the readiness window. Automatic launch is paused while watching for a late client; inspect Roblox or use Stop before retrying";
+const STARTUP_IN_PROGRESS_WAIT_ERROR: &str = "Roblox startup is still in progress; waiting for verified client ownership before starting the next account";
+const STARTUP_AMBIGUOUS_PROCESS_WAIT_ERROR: &str = "Waiting for an unverified Roblox process to finish startup inspection before launching the next account";
+const STARTUP_AMBIGUOUS_TIMEOUT_ERROR: &str = "Roblox startup verification timed out while an unverified process or bootstrapper remained present. Automatic launch is paused; inspect Roblox or use Stop before retrying";
 const CLOSE_BLOCKED_PREFIX: &str = "Managed client close blocked: ";
 const HANDOFF_UNRESOLVED: &str = "Unable to verify the surviving Roblox client. Waiting for process ownership before closing or rejoining.";
 const CLOSE_FAILED_ERROR: &str = "Managed client close blocked: verified process close failed; inspect the client and use Stop to retry";
 const REJOIN_DISABLED: &str = "Automatic rejoin disabled; use Start to launch manually";
+const SINGLE_INSTANCE_WAIT_ERROR: &str =
+    "Multiple instances disabled; waiting for the other managed client to close";
+const SINGLE_INSTANCE_RESTART_REQUIRED_ERROR: &str = "Multiple instances disabled until RoLauncher restarts; waiting for the other managed client to close";
 #[cfg(windows)]
 const LAUNCH_COORDINATION_ERROR: &str = "Roblox launch coordination is not ready. Enable background cleanup in Game joining and retry Start, or use Accounts → More actions → Stop all Roblox";
 #[cfg(not(windows))]
 const LAUNCH_COORDINATION_ERROR: &str = "Multi-instance initialization failed. Check Support and integrations, resolve the reported issue, then restart RoLauncher";
+
+fn single_instance_wait_error(multi_instance_enabled: bool) -> &'static str {
+    if multi_instance_enabled {
+        SINGLE_INSTANCE_RESTART_REQUIRED_ERROR
+    } else {
+        SINGLE_INSTANCE_WAIT_ERROR
+    }
+}
+
+fn single_instance_reason(multi_instance_enabled: bool) -> &'static str {
+    if multi_instance_enabled {
+        "multi_instance_restart_required"
+    } else {
+        "single_instance_wait"
+    }
+}
 
 fn recovery_due(account: &Account, now: chrono::DateTime<Utc>) -> bool {
     account.desired_running
@@ -434,8 +534,11 @@ fn attach_verified_player(account: &mut Account, identity: ProcessIdentity) {
     account.process = Some(identity);
     account.recovery_evidence = RecoveryEvidence::Unavailable;
     account.recovery_process = None;
-    // A late exact match resolves only the ownership-timeout pause, not auth or other failures.
-    let ownership_resolved = account.last_error.as_deref() == Some(OWNERSHIP_TIMEOUT_ERROR);
+    // A late exact match resolves only the ownership-timeout or startup-unresolved pause, not auth or other failures.
+    let ownership_resolved = matches!(
+        account.last_error.as_deref(),
+        Some(OWNERSHIP_TIMEOUT_ERROR | STARTUP_UNRESOLVED_ERROR)
+    );
     if account.desired_running && (account.status != Status::NeedsAttention || ownership_resolved) {
         account.status = Status::Unknown;
         account.last_error =
@@ -535,12 +638,29 @@ impl Engine {
         if bot_running {
             discord.bot_status("starting", "Connecting to Discord…");
         }
+        let initial_launch_allowed = launch_allowed.load(Ordering::Acquire);
         Ok(Self(Arc::new(Inner {
-            launch_slot: tokio::sync::Mutex::new(Instant::now()),
+            launch_slot: tokio::sync::Mutex::new(()),
+            dispatch_lock: Mutex::new(()),
+            launch_coordinator: Mutex::new(LaunchCoordinator::default()),
+            launch_spacing: Duration::from_secs(5),
+            launch_readiness_timeout: Duration::from_secs(8),
+            startup_verification_timeout: Duration::from_secs(35),
             #[cfg(test)]
             launch_result: None,
+            #[cfg(test)]
+            launch_hook: None,
+            #[cfg(test)]
+            pre_dispatch_hook: None,
+            #[cfg(test)]
+            post_auth_hook: None,
+            #[cfg(test)]
+            discovery_hook: None,
+            #[cfg(test)]
+            clock: None,
             state: Mutex::new(State {
                 active_multi_instance,
+                launch_allowed: initial_launch_allowed,
                 database,
                 operations: BTreeMap::new(),
                 network_suspended: false,
@@ -565,7 +685,8 @@ impl Engine {
         &self.0.store.directory
     }
     pub fn snapshot(&self) -> Snapshot {
-        let s = self.0.state.lock().unwrap();
+        let mut s = self.0.state.lock().unwrap();
+        s.launch_allowed = self.0.launch_allowed.load(Ordering::Acquire);
         snapshot(&s)
     }
     pub fn subscribe(&self) -> broadcast::Receiver<Snapshot> {
@@ -581,17 +702,24 @@ impl Engine {
         self.0.shutdown.store(true, Ordering::Release);
         self.0.discord.stop();
         self.0.wake.notify_waiters();
+        let _dispatch = self.0.dispatch_lock.lock().unwrap();
+        self.0
+            .journal
+            .record("shutdown_completed", serde_json::json!({}));
     }
     pub fn is_shutdown(&self) -> bool {
         self.0.shutdown.load(Ordering::Acquire)
     }
     pub fn set_launch_allowed(&self, allowed: bool) {
-        let _state = self.0.state.lock().unwrap();
+        let _dispatch = self.0.dispatch_lock.lock().unwrap();
+        let mut state = self.0.state.lock().unwrap();
+        state.launch_allowed = allowed;
         if self.0.launch_allowed.swap(allowed, Ordering::AcqRel) != allowed {
             self.0.journal.record(
                 "launch_coordination_changed",
                 serde_json::json!({"allowed": allowed}),
             );
+            self.0.wake.notify_waiters();
         }
     }
     pub fn set_multi_instance(&self, enabled: bool) -> Result<(), String> {
@@ -610,16 +738,22 @@ impl Engine {
         &self,
         edit: impl FnOnce(&mut State) -> Result<T, String>,
     ) -> Result<T, String> {
-        self.transaction_inner(edit, false)
+        self.transaction_inner(edit, false, |_| true)
     }
     fn transaction_inner<T>(
         &self,
         edit: impl FnOnce(&mut State) -> Result<T, String>,
         reset_discord: bool,
+        should_commit: impl FnOnce(&T) -> bool,
     ) -> Result<T, String> {
         let mut current = self.0.state.lock().unwrap();
         let mut next = current.clone();
+        next.launch_allowed = self.0.launch_allowed.load(Ordering::Acquire);
         let result = edit(&mut next)?;
+        if !should_commit(&result) {
+            return Ok(result);
+        }
+        next.launch_allowed = self.0.launch_allowed.load(Ordering::Acquire);
         normalize_accounts(&mut next);
         management::record_activity(&current, &mut next);
         if let Err(error) = self.0.store.save(&next.database) {
@@ -845,6 +979,7 @@ impl Engine {
                 Ok(())
             },
             true,
+            |_| true,
         )?;
         if patch.bot.is_some() && !self.bot_settings().enabled {
             self.bot_control("stop")?;
@@ -1005,11 +1140,40 @@ impl Engine {
         source: &'static str,
         result: &Result<Operation, String>,
     ) {
+        let operation_id = result.as_ref().ok().map(|op| op.id);
+        let reason = result.as_ref().err().map(|e| crate::diagnostics::reason(e));
         self.0.journal.record("command_result", serde_json::json!({
             "account_id": id.parse::<u64>().ok(), "action": match action { "start" | "stop" | "restart" | "retry" => action, _ => "unknown" },
-            "source": source, "accepted": result.is_ok(), "operation_id": result.as_ref().ok().map(|op| op.id),
-            "reason": result.as_ref().err().map(|e| crate::diagnostics::reason(e)),
+            "source": source, "accepted": result.is_ok(), "operation_id": operation_id,
+            "reason": reason,
         }));
+        if matches!(action, "start" | "restart" | "retry") {
+            self.0.journal.record(
+                "launch_requested",
+                serde_json::json!({
+                    "account_id": id.parse::<u64>().ok(),
+                    "action": action,
+                    "source": source,
+                    "accepted": result.is_ok(),
+                    "operation_id": operation_id,
+                    "stage": "requested",
+                    "reason": reason,
+                }),
+            );
+            if result.is_ok()
+                && let Some(account) = self.snapshot().accounts.into_iter().find(|a| a.id == id)
+            {
+                self.0.journal.record(
+                    "launch_queued",
+                    serde_json::json!({
+                        "account": crate::diagnostics::account(&account),
+                        "operation_id": account.operation_id,
+                        "generation": account.generation,
+                        "stage": "queued",
+                    }),
+                );
+            }
+        }
     }
     fn execute_command(
         &self,
@@ -1020,6 +1184,7 @@ impl Engine {
         if !matches!(action, "start" | "stop" | "restart") {
             return Err("Unknown command".into());
         }
+        let _dispatch = self.0.dispatch_lock.lock().unwrap();
         self.transaction(|s| {
             if bot.is_some_and(|b| { let mut saved = s.database.discord.bot.clone(); saved.registration = None; !b.enabled || *b != saved || self.bot_generation().is_multiple_of(2) }) || self.is_shutdown() { return Err("Command connection changed".into()); }
             let existing = account_mut(s,id)?.clone();
@@ -1049,7 +1214,34 @@ impl Engine {
                     Ok(())
                 })?;
             }
-            if action!="stop" && !self.0.launch_allowed.load(Ordering::Acquire){return Err(LAUNCH_COORDINATION_ERROR.into());}
+            if action != "stop" && !self.0.launch_allowed.load(Ordering::Acquire) {
+                self.0.journal.record(
+                    "launch_coordination_unavailable",
+                    serde_json::json!({
+                        "account": crate::diagnostics::account(&existing),
+                        "operation_id": existing.operation_id,
+                        "generation": existing.generation,
+                        "stage": "requested",
+                        "reason": "launch_coordination_unavailable",
+                    }),
+                );
+                return Err(LAUNCH_COORDINATION_ERROR.into());
+            }
+            if existing.desired_running
+                && existing.process.is_none()
+                && matches!(existing.status, Status::Queued | Status::Launching | Status::Backoff)
+            {
+                self.0.journal.record(
+                    "launch_cancelled",
+                    serde_json::json!({
+                        "account": crate::diagnostics::account(&existing),
+                        "operation_id": existing.operation_id,
+                        "generation": existing.generation,
+                        "stage": "cancelled",
+                        "reason": if action == "stop" { "user_stop" } else { "manual_restart" },
+                    }),
+                );
+            }
             if let Some(previous) = existing.operation_id.and_then(|id|s.operations.get_mut(&id)) && previous.state == "queued" { previous.state = "cancelled".into(); }
             let op = Operation { id:Uuid::new_v4(),account_id:id.into(),state:if action=="stop" && existing.process.is_none() && existing.tracker.is_none() && !retired_blocks_launch(&s.database, id){"completed"}else{"queued"}.into(),error:None };
             let generation = Uuid::new_v4();
@@ -1068,11 +1260,60 @@ impl Engine {
                     }
                 }
             }
+            let single_instance_deferred = action != "stop"
+                && !s.active_multi_instance
+                && s.database.accounts.iter().any(|other| {
+                    other.account.id != id
+                        && (other.account.process.is_some()
+                            || other.account.tracker.is_some()
+                            || (other.account.desired_running
+                                && matches!(
+                                    other.account.status,
+                                    Status::Queued
+                                        | Status::Launching
+                                        | Status::Running
+                                        | Status::Unknown
+                                        | Status::Backoff
+                                )))
+                });
+            let multi_instance_enabled = s.database.multi_instance_enabled;
             let a = account_mut(s,id)?; a.finish_run(Utc::now()); a.desired_running = action != "stop";
             if a.process.is_none() { a.tracker=None;a.ownership_deadline=None; }
-            a.generation = generation; a.close_intent = if action == "stop" || a.process.is_some() { Some(close_intent) } else { None }; a.failures = 0; a.next_retry = None; a.connected_since = None; a.disconnected_since = None; a.last_error = None; a.recovery_evidence = RecoveryEvidence::Unavailable; a.recovery_process = None;
-            a.status = if action == "stop" { Status::Stopped } else { Status::Queued };
+            a.generation = generation; a.close_intent = if action == "stop" || a.process.is_some() { Some(close_intent) } else { None }; a.failures = 0;
+            a.next_retry = if single_instance_deferred {
+                Some(Utc::now() + ChronoDuration::seconds(5))
+            } else {
+                None
+            };
+            a.connected_since = None; a.disconnected_since = None;
+            a.last_error = if single_instance_deferred {
+                Some(single_instance_wait_error(multi_instance_enabled).into())
+            } else {
+                None
+            };
+            a.recovery_evidence = RecoveryEvidence::Unavailable; a.recovery_process = None;
+            a.status = if action == "stop" {
+                if op.state == "completed" {
+                    Status::Stopped
+                } else {
+                    Status::Stopping
+                }
+            } else {
+                Status::Queued
+            };
             a.public_fallback_active = false; a.recovery_reason.clear(); a.operation_id = Some(op.id);
+            if single_instance_deferred {
+                self.0.journal.record(
+                    "launch_coordination_unavailable",
+                    serde_json::json!({
+                        "account": crate::diagnostics::account(a),
+                        "operation_id": a.operation_id,
+                        "generation": a.generation,
+                        "stage": "queued",
+                        "reason": single_instance_reason(multi_instance_enabled),
+                    }),
+                );
+            }
             s.operations.insert(op.id,op.clone()); Ok(op)
         })
     }
@@ -1161,6 +1402,8 @@ impl Engine {
     }
     async fn launch_loop(&self) {
         let mut pending: HashMap<String, (Uuid, tokio::task::JoinHandle<()>)> = HashMap::new();
+        let mut dispatch_order: HashMap<String, u64> = HashMap::new();
+        let mut next_dispatch_seq = 0u64;
         let mut network_probe_at = Instant::now();
         let mut previous_gate = None;
         while !self.is_shutdown() {
@@ -1211,11 +1454,39 @@ impl Engine {
                     }
                 }
             } else if allowed {
-                for account in &snapshot.accounts {
-                    if pending.len() >= 4 {
+                let max_concurrent = if snapshot.active_multi_instance { 4 } else { 1 };
+                let mut indices: Vec<usize> = (0..snapshot.accounts.len()).collect();
+                indices.sort_by_key(|&idx| {
+                    let a = &snapshot.accounts[idx];
+                    (
+                        a.failures > 0,
+                        dispatch_order.get(&a.id).copied().unwrap_or(0),
+                        idx,
+                    )
+                });
+                for idx in indices {
+                    if pending.len() >= max_concurrent {
                         break;
                     }
+                    let account = &snapshot.accounts[idx];
                     if pending.contains_key(&account.id) || !launch_ready(account, Utc::now()) {
+                        continue;
+                    }
+                    if !snapshot.active_multi_instance
+                        && snapshot.accounts.iter().any(|other| {
+                            other.id != account.id
+                                && (other.process.is_some()
+                                    || other.tracker.is_some()
+                                    || other.status == Status::Launching
+                                    || pending.contains_key(&other.id))
+                        })
+                    {
+                        let wait_msg = single_instance_wait_error(snapshot.multi_instance_enabled);
+                        let _ = self.update(&account.id, account.generation, |a| {
+                            a.status = Status::Queued;
+                            a.next_retry = Some(Utc::now() + ChronoDuration::seconds(5));
+                            a.last_error = Some(wait_msg.into());
+                        });
                         continue;
                     }
                     let blocked = {
@@ -1230,6 +1501,8 @@ impl Engine {
                     if blocked {
                         continue;
                     }
+                    next_dispatch_seq += 1;
+                    dispatch_order.insert(account.id.clone(), next_dispatch_seq);
                     let engine = self.clone();
                     let account = account.clone();
                     let id = account.id.clone();
@@ -1252,31 +1525,397 @@ impl Engine {
             let _ = task.await;
         }
     }
+    fn now(&self) -> Instant {
+        #[cfg(test)]
+        if let Some(clock) = &self.0.clock {
+            return clock();
+        }
+        Instant::now()
+    }
+    pub(super) fn note_launch_stage(
+        &self,
+        account_id: &str,
+        generation: Uuid,
+        stage: LaunchReadinessStage,
+        observed_pid: Option<u32>,
+    ) {
+        let now = self.now();
+        let mut coord = self.0.launch_coordinator.lock().unwrap();
+        if let Some(prev) = &mut coord.last_dispatched
+            && prev.account_id == account_id
+            && prev.generation == generation
+        {
+            prev.stage = stage;
+            prev.stage_updated_at = now;
+            if observed_pid.is_some() {
+                prev.observed_pid = observed_pid;
+            }
+        }
+    }
+    fn mark_startup_unresolved(
+        &self,
+        prev: &PendingLaunchReadiness,
+        reason: &str,
+        wait_ms: u128,
+        next_account_id: Option<&str>,
+    ) {
+        let _ = self.transaction(|state| {
+            let Ok(current) = account_mut(state, &prev.account_id) else {
+                return Ok(());
+            };
+            if current.generation != prev.generation
+                || !current.desired_running
+                || current.process.is_some()
+                || current.tracker.as_deref() != Some(prev.tracker.as_str())
+                || current.status == Status::NeedsAttention
+            {
+                return Ok(());
+            }
+            current.status = Status::NeedsAttention;
+            current.last_error = Some(STARTUP_UNRESOLVED_ERROR.into());
+            let operation = current.operation_id;
+            if let Some(op) = operation.and_then(|id| state.operations.get_mut(&id))
+                && op.state == "queued"
+            {
+                op.state = "failed".into();
+                op.error = Some(STARTUP_UNRESOLVED_ERROR.into());
+            }
+            self.0.journal.record(
+                "launch_readiness_timeout",
+                serde_json::json!({
+                    "account_id": prev.account_id.parse::<u64>().ok(),
+                    "operation_id": prev.operation_id,
+                    "generation": prev.generation,
+                    "tracker": prev.tracker.parse::<u64>().ok(),
+                    "stage": LaunchReadinessStage::StartupUnresolved,
+                    "wait_ms": wait_ms,
+                    "next_account_id": next_account_id.and_then(|id| id.parse::<u64>().ok()),
+                    "reason": reason,
+                }),
+            );
+            Ok(())
+        });
+        self.0.wake.notify_waiters();
+    }
+    fn previous_launch_resolved(&self, prev: &PendingLaunchReadiness) -> bool {
+        let state = self.0.state.lock().unwrap();
+        let Some(saved) = state
+            .database
+            .accounts
+            .iter()
+            .find(|s| s.account.id == prev.account_id)
+        else {
+            return true;
+        };
+        let a = &saved.account;
+        a.generation != prev.generation
+            || !a.desired_running
+            || a.tracker.as_deref() != Some(prev.tracker.as_str())
+            || a.process.is_some()
+            || matches!(
+                a.status,
+                Status::Running
+                    | Status::Stopped
+                    | Status::Stopping
+                    | Status::NeedsAttention
+                    | Status::Backoff
+            )
+    }
+    pub(super) fn poll_launch_readiness(&self, waiting_account: &Account, now: Instant) -> bool {
+        let mut mark_unresolved = None;
+        let mut notify_in_progress = None;
+        let prev_candidate = {
+            self.0
+                .launch_coordinator
+                .lock()
+                .unwrap()
+                .last_dispatched
+                .clone()
+        };
+        let is_resolved = if let Some(prev) = &prev_candidate {
+            if prev.account_id == waiting_account.id {
+                true
+            } else {
+                self.previous_launch_resolved(prev)
+            }
+        } else {
+            false
+        };
+        {
+            let mut coord = self.0.launch_coordinator.lock().unwrap();
+            if let Some(prev) = coord.last_dispatched.clone() {
+                if (is_resolved
+                    && prev_candidate.as_ref().is_some_and(|c| {
+                        c.account_id == prev.account_id && c.generation == prev.generation
+                    }))
+                    || prev.account_id == waiting_account.id
+                {
+                    coord.last_dispatched = None;
+                } else {
+                    let elapsed = now.saturating_duration_since(prev.dispatched_at);
+                    let startup_active = matches!(
+                        prev.stage,
+                        LaunchReadinessStage::BootstrapperStarted
+                            | LaunchReadinessStage::ProcessObserved
+                    ) || coord.bootstrapper_active
+                        || coord.unverified_processes > 0
+                        || coord.inaccessible_processes > 0;
+                    if startup_active {
+                        if elapsed >= self.0.launch_readiness_timeout && !prev.deferred_logged {
+                            if let Some(active) = &mut coord.last_dispatched {
+                                active.deferred_logged = true;
+                            }
+                            self.0.journal.record(
+                                "launch_readiness_deferred",
+                                serde_json::json!({
+                                    "account_id": prev.account_id.parse::<u64>().ok(),
+                                    "operation_id": prev.operation_id,
+                                    "generation": prev.generation,
+                                    "tracker": prev.tracker.parse::<u64>().ok(),
+                                    "stage": prev.stage,
+                                    "wait_ms": elapsed.as_millis(),
+                                    "next_account_id": waiting_account.id.parse::<u64>().ok(),
+                                    "reason": "startup_process_active_waiting_for_ownership",
+                                }),
+                            );
+                            notify_in_progress = Some((prev.account_id.clone(), prev.generation));
+                        }
+                        if elapsed >= self.0.startup_verification_timeout {
+                            coord.last_dispatched = None;
+                            mark_unresolved = Some((
+                                prev,
+                                "startup_verification_timeout_exceeded",
+                                elapsed.as_millis(),
+                            ));
+                        }
+                    } else if elapsed >= self.0.launch_readiness_timeout {
+                        coord.last_dispatched = None;
+                        mark_unresolved = Some((
+                            prev,
+                            "previous_launch_process_unverified_within_readiness_window",
+                            elapsed.as_millis(),
+                        ));
+                    }
+                }
+            }
+        }
+        if let Some((prev_id, prev_gen)) = notify_in_progress {
+            let _ = self.update(&prev_id, prev_gen, |a| {
+                if a.process.is_none() && a.status == Status::Launching {
+                    a.last_error = Some(STARTUP_IN_PROGRESS_WAIT_ERROR.into());
+                }
+            });
+            let _ = self.update(&waiting_account.id, waiting_account.generation, |a| {
+                if a.process.is_none() && a.tracker.is_none() {
+                    a.last_error = Some(STARTUP_IN_PROGRESS_WAIT_ERROR.into());
+                }
+            });
+        }
+        if let Some((prev, reason, wait_ms)) = mark_unresolved {
+            self.mark_startup_unresolved(&prev, reason, wait_ms, Some(&waiting_account.id));
+        }
+        let mut notify_ambiguous = false;
+        let mut notify_ambiguous_timeout = false;
+        let ready = {
+            let mut coord = self.0.launch_coordinator.lock().unwrap();
+            let has_unverified = coord.unverified_processes > 0
+                || coord.inaccessible_processes > 0
+                || coord.bootstrapper_active;
+            if coord.last_dispatched.is_some() {
+                coord.ambiguous_first_seen = None;
+                coord.ambiguous_timeout_logged_for = None;
+                false
+            } else if has_unverified {
+                let first_seen = *coord.ambiguous_first_seen.get_or_insert(now);
+                let ambiguous_elapsed = now.saturating_duration_since(first_seen);
+                if ambiguous_elapsed >= self.0.startup_verification_timeout {
+                    let reason = if coord.bootstrapper_active {
+                        "bootstrapper_active_timeout_exceeded"
+                    } else if coord.inaccessible_processes > 0 {
+                        "inaccessible_process_timeout_exceeded"
+                    } else {
+                        "unverified_roblox_process_timeout_exceeded"
+                    };
+                    if coord.ambiguous_timeout_logged_for.as_deref()
+                        != Some(waiting_account.id.as_str())
+                    {
+                        coord.ambiguous_timeout_logged_for = Some(waiting_account.id.clone());
+                        self.0.journal.record(
+                            "launch_ambiguous_process_timeout",
+                            serde_json::json!({
+                                "account_id": waiting_account.id.parse::<u64>().ok(),
+                                "operation_id": waiting_account.operation_id,
+                                "generation": waiting_account.generation,
+                                "unverified_processes": coord.unverified_processes,
+                                "inaccessible_processes": coord.inaccessible_processes,
+                                "bootstrapper_active": coord.bootstrapper_active,
+                                "wait_ms": ambiguous_elapsed.as_millis(),
+                                "reason": reason,
+                            }),
+                        );
+                        notify_ambiguous_timeout = true;
+                    }
+                    false
+                } else {
+                    if coord.ambiguous_logged_for.as_deref() != Some(waiting_account.id.as_str()) {
+                        coord.ambiguous_logged_for = Some(waiting_account.id.clone());
+                        self.0.journal.record(
+                            "launch_blocked_ambiguous_handoff",
+                            serde_json::json!({
+                                "account_id": waiting_account.id.parse::<u64>().ok(),
+                                "operation_id": waiting_account.operation_id,
+                                "generation": waiting_account.generation,
+                                "stage": "blocked_unverified_process",
+                                "unverified_processes": coord.unverified_processes,
+                                "inaccessible_processes": coord.inaccessible_processes,
+                                "bootstrapper_active": coord.bootstrapper_active,
+                                "reason": "unverified_roblox_process_present",
+                            }),
+                        );
+                        notify_ambiguous = true;
+                    }
+                    false
+                }
+            } else {
+                coord.ambiguous_logged_for = None;
+                coord.ambiguous_first_seen = None;
+                coord.ambiguous_timeout_logged_for = None;
+                now >= coord.next_allowed_at
+            }
+        };
+        if notify_ambiguous_timeout {
+            let _ = self.transaction(|state| {
+                let Ok(a) = account_mut(state, &waiting_account.id) else {
+                    return Ok(());
+                };
+                if a.generation != waiting_account.generation
+                    || !a.desired_running
+                    || a.process.is_some()
+                    || a.tracker.is_some()
+                    || a.status == Status::NeedsAttention
+                {
+                    return Ok(());
+                }
+                a.status = Status::NeedsAttention;
+                a.last_error = Some(STARTUP_AMBIGUOUS_TIMEOUT_ERROR.into());
+                if let Some(op) = a.operation_id.and_then(|id| state.operations.get_mut(&id))
+                    && op.state == "queued"
+                {
+                    op.state = "failed".into();
+                    op.error = Some(STARTUP_AMBIGUOUS_TIMEOUT_ERROR.into());
+                }
+                Ok(())
+            });
+        }
+        if notify_ambiguous {
+            let _ = self.update(&waiting_account.id, waiting_account.generation, |a| {
+                if a.process.is_none() && a.tracker.is_none() {
+                    a.last_error = Some(STARTUP_AMBIGUOUS_PROCESS_WAIT_ERROR.into());
+                }
+            });
+        }
+        ready
+    }
+    fn launch_cancelled_or_superseded(
+        &self,
+        expected: &Account,
+        stage: &'static str,
+        wait_ms: u128,
+    ) -> bool {
+        let state = self.0.state.lock().unwrap();
+        if retired_blocks_launch(&state.database, &expected.id) {
+            self.0.journal.record(
+                "launch_cancelled",
+                serde_json::json!({
+                    "account": crate::diagnostics::account(expected),
+                    "operation_id": expected.operation_id,
+                    "generation": expected.generation,
+                    "stage": stage,
+                    "wait_ms": wait_ms,
+                    "reason": "retired_launch_pending",
+                }),
+            );
+            return true;
+        }
+        let Some(saved) = state
+            .database
+            .accounts
+            .iter()
+            .find(|s| s.account.id == expected.id)
+        else {
+            return true;
+        };
+        let a = &saved.account;
+        if a.generation != expected.generation
+            || !a.desired_running
+            || a.process.is_some()
+            || a.tracker.is_some()
+            || a.status == Status::NeedsAttention
+            || self.is_shutdown()
+        {
+            self.0.journal.record(
+                "launch_cancelled",
+                serde_json::json!({
+                    "account": crate::diagnostics::account(a),
+                    "operation_id": expected.operation_id,
+                    "generation": expected.generation,
+                    "stage": stage,
+                    "wait_ms": wait_ms,
+                    "reason": if a.status == Status::NeedsAttention {
+                        "needs_attention"
+                    } else {
+                        "superseded_stopped_owned_or_shutdown"
+                    },
+                    "shutdown": self.is_shutdown(),
+                }),
+            );
+            return true;
+        }
+        false
+    }
     async fn launch_one(&self, account: Account) {
         if !launch_ready(&account, Utc::now()) {
             return;
         }
-        if !self.snapshot().active_multi_instance
-            && self
-                .snapshot()
-                .accounts
-                .iter()
-                .any(|a| a.id != account.id && (a.process.is_some() || a.tracker.is_some()))
+        let snap = self.snapshot();
+        if !snap.active_multi_instance
+            && snap.accounts.iter().any(|a| {
+                a.id != account.id
+                    && (a.process.is_some() || a.tracker.is_some() || a.status == Status::Launching)
+            })
         {
+            let wait_msg = single_instance_wait_error(snap.multi_instance_enabled);
             let _ = self.update(&account.id, account.generation, |a| {
                 a.status = Status::Queued;
                 a.next_retry = Some(Utc::now() + ChronoDuration::seconds(5));
-                a.last_error = Some(
-                    "Multiple instances disabled; waiting for the other managed client to close"
-                        .into(),
-                );
+                a.last_error = Some(wait_msg.into());
             });
+            self.0.journal.record(
+                "launch_coordination_unavailable",
+                serde_json::json!({
+                    "account": crate::diagnostics::account(&account),
+                    "operation_id": account.operation_id,
+                    "generation": account.generation,
+                    "stage": "queued",
+                    "reason": single_instance_reason(snap.multi_instance_enabled),
+                }),
+            );
             return;
         }
         if retired_blocks_launch(&self.0.state.lock().unwrap().database, &account.id) {
             return;
         }
         if !self.0.launch_allowed.load(Ordering::Acquire) {
+            self.0.journal.record(
+                "launch_coordination_unavailable",
+                serde_json::json!({
+                    "account": crate::diagnostics::account(&account),
+                    "operation_id": account.operation_id,
+                    "generation": account.generation,
+                    "stage": "preparing",
+                    "reason": "launch_coordination_unavailable",
+                }),
+            );
             self.failure(
                 &account.id,
                 account.generation,
@@ -1350,7 +1989,13 @@ impl Engine {
         }
         self.0.journal.record(
             "launch_preparing",
-            serde_json::json!({"account": crate::diagnostics::account(&account)}),
+            serde_json::json!({
+                "account": crate::diagnostics::account(&account),
+                "operation_id": account.operation_id,
+                "generation": account.generation,
+                "tracker": tracker.parse::<u64>().ok(),
+                "stage": "preparing",
+            }),
         );
         let target = match tokio::time::timeout(
             Duration::from_secs(120),
@@ -1395,15 +2040,78 @@ impl Engine {
                 return;
             }
         };
-        // Preparation overlaps; handoffs remain serialized and five seconds apart.
-        let mut launch_slot = self.0.launch_slot.lock().await;
-        tokio::time::sleep_until((*launch_slot).into()).await;
+        if self.launch_cancelled_or_superseded(&account, "ready_for_dispatch", 0) {
+            return;
+        }
+        self.0.journal.record(
+            "launch_ready_for_dispatch",
+            serde_json::json!({
+                "account": crate::diagnostics::account(&account),
+                "operation_id": account.operation_id,
+                "generation": account.generation,
+                "tracker": tracker.parse::<u64>().ok(),
+                "stage": "ready_for_dispatch",
+            }),
+        );
+        let wait_started = Instant::now();
+        self.0.journal.record(
+            "launch_waiting_for_slot",
+            serde_json::json!({
+                "account": crate::diagnostics::account(&account),
+                "operation_id": account.operation_id,
+                "generation": account.generation,
+                "tracker": tracker.parse::<u64>().ok(),
+                "stage": "waiting_for_slot",
+            }),
+        );
+        // Preparation overlaps; handoffs are serialized with minimum spacing and bounded
+        // readiness observation of the previous launch.
+        let _launch_slot = loop {
+            if self.launch_cancelled_or_superseded(
+                &account,
+                "waiting_for_slot",
+                wait_started.elapsed().as_millis(),
+            ) {
+                return;
+            }
+            match tokio::time::timeout(Duration::from_millis(25), self.0.launch_slot.lock()).await {
+                Ok(guard) => break guard,
+                Err(_) => continue,
+            }
+        };
+        loop {
+            if self.launch_cancelled_or_superseded(
+                &account,
+                "waiting_for_slot",
+                wait_started.elapsed().as_millis(),
+            ) {
+                return;
+            }
+            if self.poll_launch_readiness(&account, self.now()) {
+                break;
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+                _ = self.0.wake.notified() => {}
+            }
+        }
+        let slot_wait_ms = wait_started.elapsed().as_millis();
         // Persist the tracker BEFORE launching. Holding the command mutex through ShellExecute
         // makes Stop linearize either before launch or after durable ownership was recorded.
-        let launched = {
+        let prepared: Result<Account, String> = {
             let mut state = self.0.state.lock().unwrap();
             if retired_blocks_launch(&state.database, &account.id) {
-                self.0.journal.record("launch_cancelled", serde_json::json!({"account": crate::diagnostics::account(&account), "reason": "retired_launch_pending"}));
+                self.0.journal.record(
+                    "launch_cancelled",
+                    serde_json::json!({
+                        "account": crate::diagnostics::account(&account),
+                        "operation_id": account.operation_id,
+                        "generation": account.generation,
+                        "stage": "waiting_for_slot",
+                        "wait_ms": slot_wait_ms,
+                        "reason": "retired_launch_pending",
+                    }),
+                );
                 return;
             }
             let mut next = state.clone();
@@ -1416,10 +2124,33 @@ impl Engine {
                 || a.tracker.is_some()
                 || self.is_shutdown()
             {
-                self.0.journal.record("launch_cancelled", serde_json::json!({"account": crate::diagnostics::account(a), "reason": "superseded_stopped_owned_or_shutdown", "shutdown": self.is_shutdown()}));
+                self.0.journal.record(
+                    "launch_cancelled",
+                    serde_json::json!({
+                        "account": crate::diagnostics::account(a),
+                        "operation_id": account.operation_id,
+                        "generation": account.generation,
+                        "stage": "waiting_for_slot",
+                        "wait_ms": slot_wait_ms,
+                        "reason": "superseded_stopped_owned_or_shutdown",
+                        "shutdown": self.is_shutdown(),
+                    }),
+                );
                 return;
             }
             if !self.0.launch_allowed.load(Ordering::Acquire) || state.network_suspended {
+                let allowed = self.0.launch_allowed.load(Ordering::Acquire);
+                self.0.journal.record(
+                    "launch_coordination_unavailable",
+                    serde_json::json!({
+                        "account": crate::diagnostics::account(a),
+                        "operation_id": account.operation_id,
+                        "generation": account.generation,
+                        "stage": "waiting_for_slot",
+                        "wait_ms": slot_wait_ms,
+                        "reason": if !allowed { "launch_coordination_unavailable" } else { "network_suspended" },
+                    }),
+                );
                 a.status = account.status.clone();
                 a.next_retry = Some(Utc::now() + ChronoDuration::seconds(5));
                 let _ = self.commit_close_state(&mut state, next);
@@ -1442,39 +2173,121 @@ impl Engine {
                         && (s.account.process.is_some() || s.account.tracker.is_some())
                 })
             {
+                let multi_enabled = state.database.multi_instance_enabled;
                 a.status = account.status.clone();
                 a.next_retry = Some(Utc::now() + ChronoDuration::seconds(5));
+                a.last_error = Some(single_instance_wait_error(multi_enabled).into());
+                self.0.journal.record(
+                    "launch_coordination_unavailable",
+                    serde_json::json!({
+                        "account": crate::diagnostics::account(a),
+                        "operation_id": account.operation_id,
+                        "generation": account.generation,
+                        "stage": "waiting_for_slot",
+                        "wait_ms": slot_wait_ms,
+                        "reason": single_instance_reason(multi_enabled),
+                    }),
+                );
                 let _ = self.commit_close_state(&mut state, next);
                 return;
+            }
+            if matches!(
+                a.last_error.as_deref(),
+                Some(STARTUP_IN_PROGRESS_WAIT_ERROR) | Some(STARTUP_AMBIGUOUS_PROCESS_WAIT_ERROR)
+            ) {
+                a.last_error = None;
             }
             a.tracker = Some(tracker.clone());
             a.ownership_deadline = Some(Utc::now() + ChronoDuration::seconds(90));
             if let Err(e) = self.0.store.save(&next.database) {
-                self.0.journal.record("launch_cancelled", serde_json::json!({"account": crate::diagnostics::account(&account), "reason": "tracker_save_failed"}));
+                self.0.journal.record(
+                    "launch_cancelled",
+                    serde_json::json!({
+                        "account": crate::diagnostics::account(&account),
+                        "operation_id": account.operation_id,
+                        "generation": account.generation,
+                        "stage": "submitted",
+                        "wait_ms": slot_wait_ms,
+                        "reason": "tracker_save_failed",
+                    }),
+                );
                 Err(e)
             } else {
                 self.journal_changes(&state, &next);
                 *state = next;
-                let current = &state
+                let current = state
                     .database
                     .accounts
                     .iter()
                     .find(|s| s.account.id == account.id)
                     .unwrap()
-                    .account;
-                let result = self.submit_launch(current, &target, || {
-                    #[cfg(test)]
-                    if let Some(result) = &self.0.launch_result {
-                        return result.clone();
-                    }
-                    platform::launch_for(&uri, &account.id)
-                });
-                *launch_slot = Instant::now() + Duration::from_secs(5);
-                result
+                    .account
+                    .clone();
+                Ok(current)
             }
         };
-        if let Err(message) = launched {
-            let _ = self.update(&account.id, account.generation, |a| a.tracker = None);
+        let current_account = match prepared {
+            Ok(acc) => acc,
+            Err(_) => return,
+        };
+        #[cfg(test)]
+        if let Some(hook) = &self.0.pre_dispatch_hook {
+            hook(&account.id, current_account.generation, &tracker);
+        }
+        let launched =
+            self.submit_launch_with_wait(&current_account, &target, slot_wait_ms, || {
+                #[cfg(test)]
+                if let Some(hook) = &self.0.launch_hook {
+                    return hook(&uri, &account.id);
+                }
+                #[cfg(test)]
+                if let Some(result) = &self.0.launch_result {
+                    return result.clone();
+                }
+                platform::launch_for(&uri, &account.id)
+            });
+        if launched.is_ok() {
+            let dispatched_at = self.now();
+            {
+                let mut coord = self.0.launch_coordinator.lock().unwrap();
+                coord.next_allowed_at = dispatched_at + self.0.launch_spacing;
+                coord.last_dispatched = Some(PendingLaunchReadiness {
+                    account_id: account.id.clone(),
+                    operation_id: account.operation_id,
+                    generation: account.generation,
+                    tracker: tracker.clone(),
+                    dispatched_at,
+                    stage: LaunchReadinessStage::ProtocolAccepted,
+                    stage_updated_at: dispatched_at,
+                    observed_pid: None,
+                    deferred_logged: false,
+                });
+            }
+            self.0.journal.record(
+                "launch_stage_transition",
+                serde_json::json!({
+                    "account_id": account.id.parse::<u64>().ok(),
+                    "operation_id": account.operation_id,
+                    "generation": account.generation,
+                    "tracker": tracker.parse::<u64>().ok(),
+                    "stage": LaunchReadinessStage::ProtocolAccepted,
+                }),
+            );
+            self.0.wake.notify_waiters();
+        }
+        if let Err(message) = launched
+            && !message.starts_with("Launch cancelled before dispatch:")
+        {
+            self.note_launch_stage(
+                &account.id,
+                account.generation,
+                LaunchReadinessStage::StartupFailed,
+                None,
+            );
+            let _ = self.update(&account.id, account.generation, |a| {
+                a.tracker = None;
+                a.ownership_deadline = None;
+            });
             self.failure(
                 &account.id,
                 account.generation,
@@ -1483,25 +2296,284 @@ impl Engine {
         }
         // Return immediately: shared discovery binds the PID or expires the 90s deadline.
     }
+    #[cfg(test)]
     fn submit_launch(
         &self,
         account: &Account,
         target: &Target,
         effect: impl FnOnce() -> Result<(), String>,
     ) -> Result<(), String> {
-        if self.is_shutdown() || !self.0.launch_allowed.load(Ordering::Acquire) {
+        self.submit_launch_with_wait(account, target, 0, effect)
+    }
+    fn check_dispatch_authorization(
+        state: &State,
+        account: &Account,
+        is_shutdown: bool,
+        launch_allowed: bool,
+    ) -> Result<(), (&'static str, bool)> {
+        if is_shutdown {
+            Err(("shutdown", true))
+        } else if !launch_allowed {
+            Err(("launch_coordination_unavailable", false))
+        } else if state.network_suspended {
+            Err(("network_suspended", false))
+        } else if retired_blocks_launch(&state.database, &account.id) {
+            Err(("retired_launch_pending", false))
+        } else if let Ok(current) = account_mut(&mut state.clone(), &account.id) {
+            if current.generation != account.generation {
+                Err(("generation_changed", false))
+            } else if !current.desired_running {
+                Err(("superseded_or_stopped", false))
+            } else if current.tracker.is_some()
+                && current.tracker.as_deref() != account.tracker.as_deref()
+            {
+                Err(("tracker_mismatch", false))
+            } else if current.status == Status::Stopping
+                || current.status == Status::Stopped
+                || current.close_intent.as_ref().is_some_and(|i| {
+                    matches!(i.reason, CloseReason::UserStop | CloseReason::ManualRestart)
+                        && !i.denied
+                })
+            {
+                Err(("superseded_or_stopped", false))
+            } else {
+                Ok(())
+            }
+        } else {
+            Err(("account_not_found", false))
+        }
+    }
+
+    // Only call after dispatch authorization rejected this reservation before the OS effect.
+    fn cleanup_unsubmitted_launch(
+        &self,
+        account_id: &str,
+        generation: Uuid,
+        tracker: &str,
+        operation_id: Option<Uuid>,
+    ) -> Result<(), String> {
+        let context = serde_json::json!({
+            "account_id": account_id.parse::<u64>().ok(),
+            "generation": generation,
+            "tracker": tracker.parse::<u64>().ok(),
+            "operation_id": operation_id,
+            "reason": "unsubmitted_launch_cancelled",
+        });
+        let result = self.transaction_inner(
+            |state| {
+                let mut removed = false;
+                let mut stop_intent = None;
+                state.database.retired_launches.retain(|r| {
+                    if r.account_id == account_id
+                        && r.generation == generation
+                        && r.tracker == tracker
+                        && r.process.is_none()
+                    {
+                        removed = true;
+                        stop_intent = r.close_intent.clone();
+                        false
+                    } else {
+                        true
+                    }
+                });
+                let has_other_retired = state
+                    .database
+                    .retired_launches
+                    .iter()
+                    .any(|r| r.account_id == account_id);
+                let Some(slot) = state
+                    .database
+                    .accounts
+                    .iter_mut()
+                    .find(|s| s.account.id == account_id)
+                else {
+                    return Ok(removed);
+                };
+                let account = &mut slot.account;
+                let clear_tracker = account.generation == generation
+                    && account.tracker.as_deref() == Some(tracker)
+                    && account.operation_id == operation_id
+                    && account.process.is_none()
+                    && !has_other_retired;
+                if clear_tracker {
+                    account.tracker = None;
+                    account.ownership_deadline = None;
+                }
+                if removed
+                    && !has_other_retired
+                    && account.process.is_none()
+                    && account.tracker.is_none()
+                    && !account.desired_running
+                    && account.status == Status::Stopping
+                    && let Some(intent) = stop_intent
+                    && intent.reason == CloseReason::UserStop
+                    && account
+                        .close_intent
+                        .as_ref()
+                        .is_some_and(|i| i.id == intent.id)
+                    && account.generation == intent.generation
+                    && account.operation_id == intent.operation_id
+                {
+                    // The transaction normalizes Stopping and completes the current Stop.
+                    account.close_intent = None;
+                }
+                Ok(removed || clear_tracker)
+            },
+            false,
+            |changed| *changed,
+        );
+        match result {
+            Ok(changed) => {
+                if changed {
+                    self.0.journal.record("launch_reservation_cleaned", context);
+                    self.0.wake.notify_waiters();
+                }
+                Ok(())
+            }
+            Err(error) => {
+                self.0
+                    .journal
+                    .record("launch_reservation_cleanup_failed", context);
+                Err(error)
+            }
+        }
+    }
+
+    fn handle_launch_cancellation(
+        &self,
+        account: &Account,
+        wait_ms: u128,
+        reason: &str,
+        is_shutdown: bool,
+    ) -> Result<(), String> {
+        if let Some(tracker) = account.tracker.as_deref() {
+            self.cleanup_unsubmitted_launch(
+                &account.id,
+                account.generation,
+                tracker,
+                account.operation_id,
+            )
+            .map_err(|error| {
+                format!("Launch cancelled before dispatch: reservation cleanup failed: {error}")
+            })?;
+        }
+
+        if reason == "launch_coordination_unavailable" {
+            self.0.journal.record(
+                "launch_coordination_unavailable",
+                serde_json::json!({
+                    "account": crate::diagnostics::account(account),
+                    "operation_id": account.operation_id,
+                    "generation": account.generation,
+                    "stage": "submitted",
+                    "wait_ms": wait_ms,
+                    "reason": reason,
+                }),
+            );
             return Err(LAUNCH_COORDINATION_ERROR.into());
         }
+
+        self.0.journal.record(
+            "launch_cancelled",
+            serde_json::json!({
+                "account": crate::diagnostics::account(account),
+                "operation_id": account.operation_id,
+                "generation": account.generation,
+                "stage": "submitted",
+                "wait_ms": wait_ms,
+                "reason": reason,
+                "shutdown": is_shutdown,
+            }),
+        );
+
+        Err(format!("Launch cancelled before dispatch: {reason}"))
+    }
+
+    fn submit_launch_with_wait(
+        &self,
+        account: &Account,
+        target: &Target,
+        wait_ms: u128,
+        effect: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let auth = {
+            let state = self.0.state.lock().unwrap();
+            Self::check_dispatch_authorization(
+                &state,
+                account,
+                self.is_shutdown(),
+                self.0.launch_allowed.load(Ordering::Acquire),
+            )
+        };
+
+        if let Err((reason, is_shutdown)) = auth {
+            return self.handle_launch_cancellation(account, wait_ms, reason, is_shutdown);
+        }
+
         let context = crate::diagnostics::account(account);
+        self.0.journal.record(
+            "launch_dispatch_authorized",
+            serde_json::json!({
+                "account": context,
+                "operation_id": account.operation_id,
+                "generation": account.generation,
+                "stage": "submitted",
+                "wait_ms": wait_ms,
+            }),
+        );
+
+        #[cfg(test)]
+        if let Some(hook) = &self.0.post_auth_hook {
+            hook(
+                &account.id,
+                account.generation,
+                account.tracker.as_deref().unwrap_or(""),
+            );
+        }
+
+        let _dispatch = self.0.dispatch_lock.lock().unwrap();
+
+        let final_check = {
+            let state = self.0.state.lock().unwrap();
+            Self::check_dispatch_authorization(
+                &state,
+                account,
+                self.is_shutdown(),
+                self.0.launch_allowed.load(Ordering::Acquire),
+            )
+        };
+
+        if let Err((reason, is_shutdown)) = final_check {
+            return self.handle_launch_cancellation(account, wait_ms, reason, is_shutdown);
+        }
+
         // No URI, cookie, ticket, private link or command line reaches the journal.
-        self.0.journal.record("launch_submitted", serde_json::json!({"account": context, "selected_place_id": target.place_id,
-            "specific_server": target.job_id.is_some(), "private_destination": target.private_server_link.is_some()}));
+        self.0.journal.record(
+            "launch_submitted",
+            serde_json::json!({
+                "account": context,
+                "operation_id": account.operation_id,
+                "generation": account.generation,
+                "stage": "submitted",
+                "wait_ms": wait_ms,
+                "selected_place_id": target.place_id,
+                "specific_server": target.job_id.is_some(),
+                "private_destination": target.private_server_link.is_some(),
+            }),
+        );
         let result = effect();
         self.0.journal.record(
             "launch_result",
-            serde_json::json!({"account": context, "accepted_by_os": result.is_ok(),
-            "reason": result.as_ref().err().map(|e| crate::diagnostics::reason(e)),
-            "error_code": result.as_ref().err().and_then(|e| crate::diagnostics::error_code(e))}),
+            serde_json::json!({
+                "account": context,
+                "operation_id": account.operation_id,
+                "generation": account.generation,
+                "stage": "result",
+                "wait_ms": wait_ms,
+                "accepted_by_os": result.is_ok(),
+                "reason": result.as_ref().err().map(|e| crate::diagnostics::reason(e)),
+                "error_code": result.as_ref().err().and_then(|e| crate::diagnostics::error_code(e)),
+            }),
         );
         result
     }
@@ -1528,21 +2600,273 @@ impl Engine {
             });
         }
     }
-    fn discover_players(&self) -> Result<Vec<platform::Player>, String> {
+    #[cfg(windows)]
+    fn observe_players_logged(&self) -> Result<platform::ProcessScan, String> {
+        #[cfg(test)]
+        if let Some(hook) = &self.0.discovery_hook {
+            let started = Instant::now();
+            let scan = hook()?;
+            self.0.journal.record(
+                "process_observation",
+                serde_json::json!({
+                    "observed": scan.players.len(),
+                    "inaccessible": scan.inaccessible,
+                    "rejected_image": scan.rejected,
+                    "unowned": scan.unowned,
+                    "uninspected": scan.uninspected,
+                    "metadata_pending": scan.metadata_pending,
+                    "bootstrapper_active": scan.bootstrapper_active,
+                    "duration_ms": started.elapsed().as_millis(),
+                    "processes": scan
+                        .players
+                        .iter()
+                        .take(50)
+                        .map(|p| crate::diagnostics::process(&p.identity(Uuid::nil())))
+                        .collect::<Vec<_>>(),
+                }),
+            );
+            return Ok(scan);
+        }
+        let started = Instant::now();
+        let scan = platform::observe_players()?;
+        self.0.journal.record(
+            "process_observation",
+            serde_json::json!({
+                "observed": scan.players.len(),
+                "inaccessible": scan.inaccessible,
+                "rejected_image": scan.rejected,
+                "unowned": scan.unowned,
+                "uninspected": scan.uninspected,
+                "metadata_pending": scan.metadata_pending,
+                "bootstrapper_active": scan.bootstrapper_active,
+                "duration_ms": started.elapsed().as_millis(),
+                "processes": scan
+                    .players
+                    .iter()
+                    .take(50)
+                    .map(|p| crate::diagnostics::process(&p.identity(Uuid::nil())))
+                    .collect::<Vec<_>>(),
+            }),
+        );
+        Ok(scan)
+    }
+    fn discover_for_target(
+        &self,
+        target: &ProcessIdentity,
+    ) -> Result<Vec<platform::Player>, String> {
         #[cfg(windows)]
         {
-            let started = Instant::now();
-            let scan = platform::observe_players()?;
-            self.0.journal.record("process_observation", serde_json::json!({
-                "observed": scan.players.len(), "inaccessible": scan.inaccessible,
-                "rejected_image": scan.rejected, "unowned": scan.unowned,
-                "metadata_pending": scan.metadata_pending, "duration_ms": started.elapsed().as_millis(),
-                "processes": scan.players.iter().take(50).map(|p| crate::diagnostics::process(&p.identity(Uuid::nil()))).collect::<Vec<_>>()
-            }));
-            scan.verified()
+            self.observe_players_logged()?.verified_for_target(target)
         }
         #[cfg(not(windows))]
-        platform::players()
+        {
+            let _ = target;
+            platform::players()
+        }
+    }
+    fn discover_for_retired(
+        &self,
+        retired: &RetiredLaunch,
+    ) -> Result<Vec<platform::Player>, String> {
+        #[cfg(windows)]
+        {
+            self.observe_players_logged()?
+                .verified_for_tracker(&retired.tracker, retired.process.as_ref())
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = retired;
+            platform::players()
+        }
+    }
+    #[cfg(any(not(windows), test))]
+    pub(super) fn reconcile_launch_discovery(
+        &self,
+        players: &[platform::Player],
+        complete: bool,
+    ) -> bool {
+        let uninspected = if complete {
+            0
+        } else {
+            players.iter().filter(|p| p.tracker.is_empty()).count()
+        };
+        self.observe_startup_scan(players, uninspected, 0, !complete, false)
+    }
+    pub(super) fn observe_startup_scan(
+        &self,
+        players: &[platform::Player],
+        uninspected: usize,
+        inaccessible: usize,
+        metadata_pending: bool,
+        bootstrapper_active: bool,
+    ) -> bool {
+        let complete = !metadata_pending && uninspected == 0 && inaccessible == 0;
+        let now = self.now();
+        let mut exited_before_verification = None;
+        let mut stage_to_record = None;
+        {
+            let mut coord = self.0.launch_coordinator.lock().unwrap();
+            coord.unverified_processes = uninspected;
+            coord.inaccessible_processes = inaccessible;
+            coord.bootstrapper_active = bootstrapper_active;
+            if uninspected == 0 && inaccessible == 0 && !bootstrapper_active {
+                coord.ambiguous_logged_for = None;
+                coord.ambiguous_first_seen = None;
+                coord.ambiguous_timeout_logged_for = None;
+            } else {
+                coord.ambiguous_first_seen.get_or_insert(now);
+            }
+            if let Some(prev) = coord.last_dispatched.as_mut() {
+                let matching_tracker_pid = players
+                    .iter()
+                    .find(|p| !p.tracker.is_empty() && p.tracker == prev.tracker)
+                    .map(|p| p.pid);
+                let unowned_candidate_pid =
+                    players.iter().find(|p| p.tracker.is_empty()).map(|p| p.pid);
+                if let Some(pid) = matching_tracker_pid {
+                    stage_to_record = Some((
+                        prev.account_id.clone(),
+                        prev.generation,
+                        LaunchReadinessStage::ProcessObserved,
+                        Some(pid),
+                    ));
+                } else if uninspected > 0 || inaccessible > 0 {
+                    stage_to_record = Some((
+                        prev.account_id.clone(),
+                        prev.generation,
+                        LaunchReadinessStage::ProcessObserved,
+                        unowned_candidate_pid,
+                    ));
+                } else if bootstrapper_active
+                    && prev.stage == LaunchReadinessStage::ProtocolAccepted
+                {
+                    stage_to_record = Some((
+                        prev.account_id.clone(),
+                        prev.generation,
+                        LaunchReadinessStage::BootstrapperStarted,
+                        None,
+                    ));
+                } else if prev.stage == LaunchReadinessStage::ProcessObserved
+                    && let Some(observed_pid) = prev.observed_pid
+                {
+                    if !players.iter().any(|p| p.pid == observed_pid) && inaccessible == 0 {
+                        let elapsed_ms = now
+                            .saturating_duration_since(prev.dispatched_at)
+                            .as_millis();
+                        let removed = coord.last_dispatched.take().unwrap();
+                        exited_before_verification = Some((removed, elapsed_ms));
+                    } else if !metadata_pending && uninspected == 0 && inaccessible == 0 {
+                        prev.stage = LaunchReadinessStage::ProtocolAccepted;
+                        prev.observed_pid = None;
+                        prev.stage_updated_at = now;
+                    }
+                }
+            }
+        }
+        if let Some((account_id, generation, stage, pid)) = stage_to_record {
+            self.note_launch_stage(&account_id, generation, stage, pid);
+        }
+        if let Some((prev, wait_ms)) = exited_before_verification {
+            self.mark_startup_unresolved(
+                &prev,
+                "observed_process_exited_before_verification",
+                wait_ms,
+                None,
+            );
+        }
+        let mut attached_any = false;
+        for account in self.snapshot().accounts {
+            if account.process.is_some() || account.tracker.is_none() {
+                continue;
+            }
+            let matches: Vec<_> = players
+                .iter()
+                .filter(|p| !p.tracker.is_empty() && Some(&p.tracker) == account.tracker.as_ref())
+                .collect();
+            if !matches.is_empty() {
+                self.note_launch_stage(
+                    &account.id,
+                    account.generation,
+                    LaunchReadinessStage::ProcessObserved,
+                    Some(matches[0].pid),
+                );
+                self.0.journal.record(
+                    "launch_process_observed",
+                    serde_json::json!({
+                        "account": crate::diagnostics::account(&account),
+                        "operation_id": account.operation_id,
+                        "generation": account.generation,
+                        "tracker": account.tracker.as_ref().and_then(|t| t.parse::<u64>().ok()),
+                        "stage": "process_observed",
+                        "candidates": matches
+                            .iter()
+                            .map(|p| crate::diagnostics::process(&p.identity(account.generation)))
+                            .collect::<Vec<_>>(),
+                    }),
+                );
+            }
+            if !complete {
+                continue;
+            }
+            self.0.journal.record(
+                "launch_discovery",
+                serde_json::json!({
+                    "account": crate::diagnostics::account(&account),
+                    "candidates": matches
+                        .iter()
+                        .map(|p| crate::diagnostics::process(&p.identity(account.generation)))
+                        .collect::<Vec<_>>(),
+                }),
+            );
+            if matches.len() == 1 {
+                let identity = matches[0].identity(account.generation);
+                if self.attach_player(&account, identity, players).is_ok() {
+                    attached_any = true;
+                }
+            } else if matches.len() > 1 {
+                let message =
+                    "Multiple primary instances share this launch tracker; ownership is ambiguous";
+                let _ = self.update(&account.id, account.generation, |a| {
+                    a.status = Status::NeedsAttention;
+                    a.last_error = Some(message.into());
+                });
+                self.note_launch_stage(
+                    &account.id,
+                    account.generation,
+                    LaunchReadinessStage::StartupFailed,
+                    Some(matches[0].pid),
+                );
+                self.finish_operation(&account.id, account.generation, Some(message.into()));
+            } else if account.desired_running
+                && account.process.is_none()
+                && account.status != Status::NeedsAttention
+                && account.ownership_deadline.is_none_or(|t| t <= Utc::now())
+            {
+                let _ = self.update(&account.id, account.generation, |a| {
+                    a.status = Status::NeedsAttention;
+                    a.last_error = Some(OWNERSHIP_TIMEOUT_ERROR.into());
+                });
+                self.note_launch_stage(
+                    &account.id,
+                    account.generation,
+                    LaunchReadinessStage::StartupUnresolved,
+                    None,
+                );
+                self.finish_operation(
+                    &account.id,
+                    account.generation,
+                    Some("Launch ownership could not be verified".into()),
+                );
+            } else if !account.desired_running && account.process.is_none() {
+                // Stopped processes are handled below; late launches use durable tombstones.
+            }
+        }
+        if attached_any
+            || (!metadata_pending && uninspected == 0 && inaccessible == 0 && !bootstrapper_active)
+        {
+            self.0.wake.notify_waiters();
+        }
+        attached_any
     }
     async fn monitor_loop(&self) {
         let mut tails: HashMap<(u32, String), crate::logs::Tail> = HashMap::new();
@@ -1552,6 +2876,7 @@ impl Engine {
         let mut exit_watches: HashMap<(u32, String), platform::ExitWatch> = HashMap::new();
         let mut pending_exits: HashMap<(u32, String), PendingExit> = HashMap::new();
         let mut discovery = None;
+        let mut metadata_pending = false;
         let mut log_discovery = None;
         #[cfg(windows)]
         let mut memory_task: Option<tokio::task::JoinHandle<MemoryProbe>> = None;
@@ -1572,138 +2897,241 @@ impl Engine {
                 .database
                 .retired_launches
                 .clone();
+            let has_unresolved_launch = self
+                .snapshot()
+                .accounts
+                .iter()
+                .any(|a| a.process.is_none() && a.tracker.is_some());
+            let has_waiting_launch = self.snapshot().accounts.iter().any(|a| {
+                a.desired_running
+                    && a.process.is_none()
+                    && a.status != Status::Stopped
+                    && a.status != Status::Stopping
+            });
+            let coord_needs_discovery = {
+                let coord = self.0.launch_coordinator.lock().unwrap();
+                (coord.unverified_processes > 0
+                    || coord.inaccessible_processes > 0
+                    || coord.bootstrapper_active
+                    || coord.last_dispatched.is_some())
+                    && (has_waiting_launch || has_unresolved_launch)
+            };
+            let should_discover = has_unresolved_launch
+                || !retired.is_empty()
+                || !pending_exits.is_empty()
+                || coord_needs_discovery
+                || metadata_pending;
+            let discovery_interval = if metadata_pending {
+                Duration::from_millis(250)
+            } else if !pending_exits.is_empty() || has_unresolved_launch || coord_needs_discovery {
+                Duration::from_secs(1)
+            } else {
+                Duration::from_secs(5)
+            };
             if discovery.is_none()
-                && last_discovery.elapsed()
-                    >= Duration::from_secs(if pending_exits.is_empty() { 5 } else { 1 })
-                && (self
-                    .snapshot()
-                    .accounts
-                    .iter()
-                    .any(|a| a.process.is_none() && a.tracker.is_some())
-                    || !retired.is_empty()
-                    || !pending_exits.is_empty())
+                && last_discovery.elapsed() >= discovery_interval
+                && should_discover
             {
+                #[cfg(windows)]
                 let engine = self.clone();
                 discovery = Some(tokio::task::spawn_blocking(move || {
-                    engine.discover_players()
+                    #[cfg(windows)]
+                    {
+                        engine.observe_players_logged()
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        platform::players()
+                    }
                 }));
                 last_discovery = Instant::now();
             }
             let discovered = completed_task(&mut discovery).await;
-            if matches!(discovered, Some(Err(_)) | Some(Ok(Err(_)))) {
-                self.0
-                    .journal
-                    .record("process_discovery_failed", serde_json::json!({}));
-                for a in self.snapshot().accounts {
-                    if let Some(p) = &a.process
-                        && let Some(exit) = pending_exits.get(&(p.pid, p.creation_time.clone()))
-                        && last_discovery >= exit.observed
-                        && exit.settled(&a, Instant::now(), Utc::now())
-                    {
-                        self.pause_unresolved_exit(&a, p);
+            match discovered {
+                Some(Err(_)) | Some(Ok(Err(_))) => {
+                    metadata_pending = false;
+                    self.observe_startup_scan(&[], 0, 1, false, false);
+                    self.0
+                        .journal
+                        .record("process_discovery_failed", serde_json::json!({}));
+                    for a in self.snapshot().accounts {
+                        if let Some(p) = &a.process
+                            && let Some(exit) = pending_exits.get(&(p.pid, p.creation_time.clone()))
+                            && last_discovery >= exit.observed
+                            && exit.settled(&a, Instant::now(), Utc::now())
+                        {
+                            self.pause_unresolved_exit(&a, p);
+                        }
                     }
                 }
-            }
-            if let Some(Ok(Ok(players))) = discovered {
-                for account in self.snapshot().accounts {
-                    let Some(identity) = account.process.as_ref() else {
-                        continue;
-                    };
-                    let key = (identity.pid, identity.creation_time.clone());
-                    let Some(pending) = pending_exits.get(&key) else {
-                        continue;
-                    };
-                    // A scan started before the exit cannot establish successor absence.
-                    if last_discovery < pending.observed {
-                        continue;
-                    }
-                    if self.reconcile_exit(
-                        &account,
-                        identity,
-                        pending.clean,
-                        &players,
-                        pending.settled(&account, Instant::now(), Utc::now()),
-                    ) {
-                        pending_exits.remove(&key);
-                        last_log_discovery = Instant::now() - Duration::from_secs(30);
-                    }
-                }
-                for old in &retired {
-                    if old.process.is_none()
-                        && old.deadline <= Utc::now()
-                        && !players.iter().any(|p| p.tracker == old.tracker)
-                    {
-                        let _ = self.transaction(|s| {
-                            s.database.retired_launches.retain(|r| {
-                                !(r.tracker == old.tracker
-                                    && r.generation == old.generation
-                                    && r.process.is_none())
-                            });
-                            Ok(())
-                        });
-                        continue;
-                    }
-                    if let Some(identity) = &old.process
-                        && matches!(platform::alive(identity), Ok(false))
-                    {
-                        let _ = self.transaction(|s| {
-                            s.database.retired_launches.retain(|r| {
-                                !(r.account_id == old.account_id
-                                    && r.generation == old.generation
-                                    && r.tracker == old.tracker
-                                    && r.process.as_ref() == Some(identity))
-                            });
-                            Ok(())
-                        });
-                        close_attempts.remove(identity);
-                        continue;
-                    }
-                    let _ = self.close_retired(
-                        old,
-                        &players,
-                        Instant::now(),
-                        &mut close_attempts,
-                        || self.discover_players(),
-                        platform::close,
+                #[cfg(windows)]
+                Some(Ok(Ok(scan))) => {
+                    metadata_pending = scan.metadata_pending;
+                    let startup_verified = self.observe_startup_scan(
+                        &scan.players,
+                        scan.uninspected,
+                        scan.inaccessible,
+                        scan.metadata_pending,
+                        scan.bootstrapper_active,
                     );
-                }
-                for account in self.snapshot().accounts {
-                    if account.process.is_some() || account.tracker.is_none() {
-                        continue;
-                    }
-                    let matches: Vec<_> = players
-                        .iter()
-                        .filter(|p| Some(&p.tracker) == account.tracker.as_ref())
-                        .collect();
-                    self.0.journal.record("launch_discovery", serde_json::json!({"account": crate::diagnostics::account(&account),
-                        "candidates": matches.iter().map(|p| crate::diagnostics::process(&p.identity(account.generation))).collect::<Vec<_>>()}));
-                    if matches.len() == 1 {
-                        let identity = matches[0].identity(account.generation);
-                        let _ = self.attach_player(&account, identity, &players);
+                    if scan.inaccessible == 0 && startup_verified {
                         // Discover its log now; an empty scan during startup
                         // must not leave a newly verified player waiting 30s.
                         last_log_discovery = Instant::now() - Duration::from_secs(30);
-                    } else if matches.len() > 1 {
-                        let _=self.update(&account.id,account.generation,|a| { a.status=Status::NeedsAttention;a.last_error=Some("Multiple primary instances share this launch tracker; ownership is ambiguous".into()); });
-                    } else if account.desired_running
-                        && account.process.is_none()
-                        && account.status != Status::NeedsAttention
-                        && account.ownership_deadline.is_none_or(|t| t <= Utc::now())
-                    {
-                        let _ = self.update(&account.id, account.generation, |a| {
-                            a.status = Status::NeedsAttention;
-                            a.last_error = Some(OWNERSHIP_TIMEOUT_ERROR.into());
-                        });
-                        self.finish_operation(
-                            &account.id,
-                            account.generation,
-                            Some("Launch ownership could not be verified".into()),
-                        );
-                    } else if !account.desired_running && account.process.is_none() {
-                        // Stopped processes are handled below; late launches use durable tombstones.
                     }
+                    if scan.inaccessible > 0 || (scan.uninspected > 0 && !scan.metadata_pending) {
+                        self.0
+                            .journal
+                            .record("process_discovery_failed", serde_json::json!({}));
+                    }
+                    for account in self.snapshot().accounts {
+                        let Some(identity) = account.process.as_ref() else {
+                            continue;
+                        };
+                        let key = (identity.pid, identity.creation_time.clone());
+                        let Some(pending) = pending_exits.get(&key) else {
+                            continue;
+                        };
+                        // A scan started before the exit cannot establish successor absence.
+                        if last_discovery < pending.observed {
+                            continue;
+                        }
+                        let settled = pending.settled(&account, Instant::now(), Utc::now());
+                        match scan.verified_for_target(identity) {
+                            Ok(players) => {
+                                if self.reconcile_exit(
+                                    &account,
+                                    identity,
+                                    pending.clean,
+                                    &players,
+                                    settled,
+                                ) {
+                                    pending_exits.remove(&key);
+                                    last_log_discovery = Instant::now() - Duration::from_secs(30);
+                                }
+                            }
+                            Err(_) if settled => {
+                                self.pause_unresolved_exit(&account, identity);
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                    for old in &retired {
+                        if let Some(identity) = &old.process
+                            && matches!(platform::alive(identity), Ok(false))
+                        {
+                            let _ = self.transaction(|s| {
+                                s.database.retired_launches.retain(|r| {
+                                    !(r.account_id == old.account_id
+                                        && r.generation == old.generation
+                                        && r.tracker == old.tracker
+                                        && r.process.as_ref() == Some(identity))
+                                });
+                                Ok(())
+                            });
+                            close_attempts.remove(identity);
+                            continue;
+                        }
+                        let Ok(players) =
+                            scan.verified_for_tracker(&old.tracker, old.process.as_ref())
+                        else {
+                            continue;
+                        };
+                        if old.process.is_none()
+                            && old.deadline <= Utc::now()
+                            && !players.iter().any(|p| p.tracker == old.tracker)
+                        {
+                            let _ = self.transaction(|s| {
+                                s.database.retired_launches.retain(|r| {
+                                    !(r.tracker == old.tracker
+                                        && r.generation == old.generation
+                                        && r.process.is_none())
+                                });
+                                Ok(())
+                            });
+                            continue;
+                        }
+                        let _ = self.close_retired(
+                            old,
+                            &players,
+                            Instant::now(),
+                            &mut close_attempts,
+                            || self.discover_for_retired(old),
+                            platform::close,
+                        );
+                    }
+                    last_discovery = Instant::now();
                 }
-                last_discovery = Instant::now();
+                #[cfg(not(windows))]
+                Some(Ok(Ok(players))) => {
+                    metadata_pending = false;
+                    if self.reconcile_launch_discovery(&players, true) {
+                        last_log_discovery = Instant::now() - Duration::from_secs(30);
+                    }
+                    for account in self.snapshot().accounts {
+                        let Some(identity) = account.process.as_ref() else {
+                            continue;
+                        };
+                        let key = (identity.pid, identity.creation_time.clone());
+                        let Some(pending) = pending_exits.get(&key) else {
+                            continue;
+                        };
+                        if last_discovery < pending.observed {
+                            continue;
+                        }
+                        if self.reconcile_exit(
+                            &account,
+                            identity,
+                            pending.clean,
+                            &players,
+                            pending.settled(&account, Instant::now(), Utc::now()),
+                        ) {
+                            pending_exits.remove(&key);
+                            last_log_discovery = Instant::now() - Duration::from_secs(30);
+                        }
+                    }
+                    for old in &retired {
+                        if old.process.is_none()
+                            && old.deadline <= Utc::now()
+                            && !players.iter().any(|p| p.tracker == old.tracker)
+                        {
+                            let _ = self.transaction(|s| {
+                                s.database.retired_launches.retain(|r| {
+                                    !(r.tracker == old.tracker
+                                        && r.generation == old.generation
+                                        && r.process.is_none())
+                                });
+                                Ok(())
+                            });
+                            continue;
+                        }
+                        if let Some(identity) = &old.process
+                            && matches!(platform::alive(identity), Ok(false))
+                        {
+                            let _ = self.transaction(|s| {
+                                s.database.retired_launches.retain(|r| {
+                                    !(r.account_id == old.account_id
+                                        && r.generation == old.generation
+                                        && r.tracker == old.tracker
+                                        && r.process.as_ref() == Some(identity))
+                                });
+                                Ok(())
+                            });
+                            close_attempts.remove(identity);
+                            continue;
+                        }
+                        let _ = self.close_retired(
+                            old,
+                            &players,
+                            Instant::now(),
+                            &mut close_attempts,
+                            || self.discover_for_retired(old),
+                            platform::close,
+                        );
+                    }
+                    last_discovery = Instant::now();
+                }
+                None => {}
             }
             // Even an unavailable metadata provider must finish the operation's
             // timeout. Retain its tracker so timeout never authorizes a duplicate.
@@ -1875,7 +3303,7 @@ impl Engine {
                         &account,
                         Instant::now(),
                         &mut close_attempts,
-                        || self.discover_players(),
+                        || self.discover_for_target(&identity),
                         platform::close,
                     )
                     .unwrap_or(false)
@@ -1972,7 +3400,12 @@ impl Engine {
                     }
                 }
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            let sleep_duration = if metadata_pending {
+                Duration::from_millis(250)
+            } else {
+                Duration::from_secs(1)
+            };
+            tokio::select! { _ = tokio::time::sleep(sleep_duration) => {}, _ = self.0.wake.notified() => {} }
         }
     }
     fn observe(
@@ -2020,6 +3453,20 @@ impl Engine {
                         ..
                     })
                 ) && account.status == Status::Running;
+                if connected {
+                    self.0.journal.record(
+                        "launch_connected",
+                        serde_json::json!({
+                            "account": crate::diagnostics::account(account),
+                            "operation_id": account.operation_id,
+                            "generation": account.generation,
+                            "tracker": identity.tracker.parse::<u64>().ok(),
+                            "process": crate::diagnostics::process(identity),
+                            "stage": "connected",
+                            "source": source,
+                        }),
+                    );
+                }
                 let paused = account.status == Status::NeedsAttention;
                 let operation = account.operation_id;
                 let error = account.last_error.clone();
@@ -2031,6 +3478,12 @@ impl Engine {
             })
             .unwrap_or(false);
         if accepted {
+            self.note_launch_stage(
+                id,
+                generation,
+                LaunchReadinessStage::Connected,
+                Some(identity.pid),
+            );
             self.finish_operation(id, generation, None);
         }
     }
@@ -2206,6 +3659,27 @@ fn account_mut<'a>(s: &'a mut State, id: &str) -> Result<&'a mut Account, String
         .map(|a| &mut a.account)
         .ok_or_else(|| "Account not found".into())
 }
+fn effective_compatibility(s: &State) -> String {
+    let mut text = s.compatibility.clone();
+    if s.database.multi_instance_enabled != s.active_multi_instance {
+        let suffix = if s.database.multi_instance_enabled {
+            "restart RoLauncher to enable multiple instances"
+        } else {
+            "restart RoLauncher to disable multiple instances"
+        };
+        if !text.to_lowercase().contains("restart") {
+            text = format!("{text}; {suffix}");
+        }
+    }
+    if !s.launch_allowed
+        && !text.to_lowercase().contains("blocked")
+        && !text.to_lowercase().contains("failed")
+        && !text.to_lowercase().contains("conflict")
+    {
+        text = format!("{text}; launch coordination blocked by an existing Roblox client");
+    }
+    text
+}
 fn snapshot(s: &State) -> Snapshot {
     Snapshot {
         external_background_cleanup_enabled: s.database.external_background_cleanup_enabled,
@@ -2222,7 +3696,7 @@ fn snapshot(s: &State) -> Snapshot {
             .map(|a| a.account.clone())
             .collect(),
         network_suspended: s.network_suspended,
-        compatibility: s.compatibility.clone(),
+        compatibility: effective_compatibility(s),
         profiles: s.database.profiles.clone(),
         update_repository: s.database.update_repository.clone(),
         include_beta_updates: s.database.include_beta_updates,

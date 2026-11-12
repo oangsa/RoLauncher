@@ -1,10 +1,6 @@
 name: Linux development port
 
 on:
-  push:
-    branches: [main, dev, 'feature/**', 'codex/**', 'hotfix/**']
-  pull_request:
-    branches: [dev, main]
   workflow_dispatch:
 
 permissions:
@@ -12,6 +8,7 @@ permissions:
 
 jobs:
   linux-checks:
+    if: false
     name: Linux checks (${{ matrix.distro }})
     runs-on: ubuntu-latest
     timeout-minutes: 45

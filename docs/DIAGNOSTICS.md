@@ -26,8 +26,9 @@ A disk failure does not stop launching or recovery; later events retry logging a
 ## Reading the timeline
 
 - `command_result`: Start, Stop, Restart, or Retry acceptance, source, and operation ID; repeated operation IDs identify reused commands.
-- `launch_preparing`, `launch_submitted`, `launch_result`: preparation and each OS handoff, linked by account, generation, operation, and tracker.
-- `launch_result.accepted_by_os` confirms protocol handoff; a verified connection requires a later disk-log signal.
+- `launch_requested`, `launch_queued`, `launch_preparing`, `launch_ready_for_dispatch`, `launch_waiting_for_slot`, `launch_submitted`, `launch_result`: correlated launch stages from request acceptance through preparation, slot/readiness waiting, and OS protocol handoff, linked by account, generation, operation, and tracker.
+- `launch_result.accepted_by_os` confirms protocol handoff only (`Launching` with operation `queued`); `launch_process_observed`, `launch_ownership_verified`, and `launch_connected` record candidate discovery, unique tracker attachment, and verified game connection (`Running` with operation `completed`).
+- `launch_readiness_timeout`, `launch_cancelled`, `launch_coordination_unavailable`: bounded readiness fallback before the next queued dispatch, cancellation before protocol submission, or blocked multi-instance/coordination gate.
 - `launch_discovery`: matching process candidates; PID and creation fingerprint distinguish reused PIDs and ambiguous ownership.
 - `process_observation`: native candidates, unavailable trackers, inaccessible/rejected images, pending metadata, safe process fingerprints, and scan duration.
 - `launch_timeout`: the ownership deadline expired, including during metadata outages; the tracker remains reserved against duplicate launch.

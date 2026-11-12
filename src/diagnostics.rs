@@ -224,7 +224,23 @@ pub(crate) fn reason(message: &str) -> &'static str {
             "Launch tracker has no verified instance",
             "ownership_timeout",
         ),
+        (
+            "Roblox did not confirm client startup",
+            "startup_readiness_unresolved",
+        ),
+        (
+            "Roblox startup is still in progress",
+            "startup_in_progress_wait",
+        ),
+        (
+            "Waiting for an unverified Roblox process",
+            "ambiguous_startup_process_wait",
+        ),
         ("Multiple primary instances", "ambiguous_launch_ownership"),
+        (
+            "Launch ownership is ambiguous",
+            "ambiguous_launch_ownership",
+        ),
         ("Automatic rejoin disabled", "rejoin_disabled"),
         (
             "Unable to verify the surviving Roblox client",
@@ -255,6 +271,10 @@ pub(crate) fn reason(message: &str) -> &'static str {
         ("Managed client exited", "process_exited"),
         ("Managed process exited; checking", "process_exit_pending"),
         ("Client closed normally", "normal_exit"),
+        (
+            "Multiple instances disabled until RoLauncher restarts",
+            "multi_instance_restart_required",
+        ),
         ("Multiple instances disabled", "single_instance_wait"),
         ("Waiting for a same-preset account", "peer_join_pending"),
         (

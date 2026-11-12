@@ -215,7 +215,7 @@ class OwnerEvidenceTests(unittest.TestCase):
         self.assertNotEqual(pre['nonce'], final['nonce'])
         self.assertEqual(pre['binding'], final['binding'])
         self.assertEqual(pre['binding']['intent'], self.api.intent)
-        self.assertEqual(pre['binding']['linux']['id'], 13)
+        self.assertIsNone(pre['binding']['linux'])
         self.assertTrue(self.api.release['immutable'])
 
     def test_signed_source_run_attempt_nonce_phase_policy_and_trusted_sha_binding(self):
@@ -558,14 +558,12 @@ class OwnerEvidenceTests(unittest.TestCase):
 
     def test_nested_source_linux_attempt_and_intent_binding(self):
         c = self.prepare()
-        for field in ('source-sha', 'source-run', 'source-attempt', 'linux-sha', 'linux-attempt', 'intent', 'receipt'):
+        for field in ('source-sha', 'source-run', 'source-attempt', 'intent', 'receipt'):
             def change(payload):
                 binding = payload['challenge']['binding']
                 if field == 'source-sha': binding['source']['head_sha'] = 'f' * 40
                 if field == 'source-run': binding['source']['id'] += 1
                 if field == 'source-attempt': binding['source']['run_attempt'] += 1
-                if field == 'linux-sha': binding['linux']['head_sha'] = 'f' * 40
-                if field == 'linux-attempt': binding['linux']['run_attempt'] += 1
                 if field == 'intent': binding['intent']['id'] = 'different'
                 if field == 'receipt': binding['receipt_sha256'] = '0' * 64
             with self.subTest(field=field), self.assertRaisesRegex(ValueError, 'binding'):
@@ -638,7 +636,7 @@ class OwnerEvidenceTests(unittest.TestCase):
         self.assertEqual(policy['inbox'], 35)
         self.assertIs(policy['public_disclosure_approved'], True)
         self.assertEqual(policy['disclosure_sha256'],
-                         '9a6ade9194ff6d87897e07de05e280b367351f823074537d6db66e42b58cd6fa')
+                         '2374d11602c59de90a2f5544ddae61555677e90792f97546a533730015d3ad70')
         self.assertEqual(policy['keys'], [
             'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIfhxAsJYk67VBohpkfYVBKdEkJV1/6IASKEBesgTAoW'
         ])

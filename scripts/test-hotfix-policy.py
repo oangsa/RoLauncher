@@ -230,7 +230,7 @@ class HotfixTests(unittest.TestCase):
         faults = ('owner', 'branch', 'foreign', 'old-schema', 'baseline-tag', 'stale-baseline', 'unpublished',
                   'not-patch', 'patch-hash', 'extra-commit', 'nonlinear', 'unexpected-path', 'missing-patch',
                   'dependencies', 'premium-review', 'intent-plus-code', 'merge-parents', 'replayed',
-                  'dev-commit', 'governance-application', 'missing-windows', 'failed-linux', 'artifact-source',
+                  'dev-commit', 'governance-application', 'missing-windows', 'artifact-source',
                   'source-bytes', 'hidden-tag-bypass', 'missing-rules', 'dependency-upgrade')
         for fault in faults:
             with self.subTest(fault=fault):
@@ -297,6 +297,8 @@ class HotfixTests(unittest.TestCase):
 
     def test_branch_names_grant_admission_only_after_scope_evidence(self):
         from hotfix_policy import check_branch_flow
+        for prefix in ('feature/test', 'fix/test', 'codex/test'):
+            self.assertEqual(check_branch_flow(dict(pull_request=dict(head=dict(ref=prefix), base=dict(ref='dev'))), None), 'development')
         for fault in ('fork', 'branch', 'application', 'intent', 'version'):
             with self.subTest(fault=fault):
                 api = HotfixFixture()
@@ -442,7 +444,7 @@ class HotfixTests(unittest.TestCase):
         receipt = json.loads(api.assets['release-promotion.json']['data'])
         self.assertEqual(receipt['intent'], reference.INTENT)
         self.assertEqual(receipt['source'], SHA)
-        self.assertEqual(len(receipt['files']), 5)
+        self.assertEqual(len(receipt['files']), 4)
 
     def test_recovery_corrects_digest_in_immutable_source_intent_envelope(self):
         api = MalformedIntentRecoveryFixture()
