@@ -3,6 +3,13 @@
 Recorded checks below are historical results, not guarantees of live Roblox compatibility.
 Fixtures use isolated data and simulated accounts unless stated otherwise.
 
+## Upcoming 1.9.1 multi-instance launch reliability — 2026-11-12
+
+- Reproduced and fixed three multi-instance launch defects: blind 5-second protocol handoff without prior-process readiness observation, concurrent multi-account ticket preparation when `active_multi_instance` is false (including pending-restart settings changes), and `ProcessScan::verified()` blocking verified tracker attachment whenever an unowned (`tracker == ""`) Roblox process exists.
+- Added correlated launch lifecycle journal events (`launch_requested`, `launch_queued`, `launch_preparing`, `launch_ready_for_dispatch`, `launch_waiting_for_slot`, `launch_submitted`, `launch_result`, `launch_process_observed`, `launch_ownership_verified`, `launch_connected`, `launch_readiness_timeout`, `launch_cancelled`, `launch_coordination_unavailable`) with secret-exclusion checks.
+- Passed on native Windows x64: Rust library and example suites, 100 desktop checks, WinUI smoke and authenticated Rust/WinUI bootstrap, formatting, Clippy with `-D warnings`, release/versioning/packaging policy scripts, and local development build (`scripts/build.ps1 -UseCurrentVersion`).
+- No live Roblox account or client was launched, stopped, or modified; live multi-account Roblox client acceptance remains required on an interactive desktop with real accounts.
+
 ## Upcoming 1.9.0 Free instance lifecycle — 2026-11-09
 
 - Passed on native Windows x64: 197 Rust library tests, 49 identity example tests, 100 desktop checks, WinUI interactions/bootstrap, native process/log fixtures, formatting and Clippy.

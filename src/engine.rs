@@ -1918,6 +1918,7 @@ impl Engine {
         }
         // Return immediately: shared discovery binds the PID or expires the 90s deadline.
     }
+    #[cfg(test)]
     fn submit_launch(
         &self,
         account: &Account,
