@@ -235,3 +235,110 @@ async fn concurrent_preparation_preserves_five_second_protocol_handoff_spacing()
     drop(engine);
     std::fs::remove_dir_all(path).unwrap();
 }
+
+#[tokio::test]
+async fn single_instance_and_pending_restart_modes_do_not_concurrently_prepare_second_start() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (engine, path) = super::tests::fixture(2);
+    engine.set_multi_instance(false).unwrap();
+    drop(engine);
+    let mut reopened = Engine::open(
+        Store::new(path.clone()).unwrap(),
+        "Multi-instance: off · Compatibility: passed".into(),
+    )
+    .unwrap();
+    let inner = Arc::get_mut(&mut reopened.0).unwrap();
+    inner.roblox.servers_url = Some(format!("{url}/servers"));
+    inner.roblox.ticket_url = Some(format!("{url}/ticket"));
+    inner.launch_result = Some(Ok(()));
+    reopened
+        .transaction(|s| {
+            for saved in &mut s.database.accounts {
+                saved.encrypted_session = platform::protect("DISPOSABLE_FIXTURE_SESSION")?;
+                saved.account.target.as_mut().unwrap().job_id = Some(Uuid::from_u128(1));
+            }
+            Ok(())
+        })
+        .unwrap();
+    // Enabling multi-instance at runtime without restarting must not claim active readiness
+    // or allow concurrent multi-account ticket preparation.
+    reopened.set_multi_instance(true).unwrap();
+    let snap = reopened.snapshot();
+    assert!(snap.multi_instance_enabled && !snap.active_multi_instance);
+    assert!(
+        snap.compatibility.to_lowercase().contains("restart"),
+        "expected compatibility to report restart required, got: {}",
+        snap.compatibility
+    );
+    reopened.command("1", "start").unwrap();
+    reopened.command("2", "start").unwrap();
+    let snap = reopened.snapshot();
+    assert!(
+        snap.accounts[1]
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.starts_with("Multiple instances disabled")),
+        "second account must surface single-instance wait error immediately, got: {:?}",
+        snap.accounts[1].last_error
+    );
+    let running = reopened.clone();
+    let worker = tokio::spawn(async move { running.launch_loop().await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        state.tickets.load(Ordering::SeqCst),
+        1,
+        "only one account may prepare/request a ticket while active_multi_instance is false"
+    );
+    state.release.notify_waiters();
+    reopened.shutdown();
+    tokio::time::timeout(Duration::from_secs(2), worker)
+        .await
+        .unwrap()
+        .unwrap();
+    server.abort();
+    drop(reopened);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn second_launch_waits_for_first_process_readiness_and_records_readiness_stages() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (engine, path) = engine_fixture(2, &url, true);
+    let mut tasks = Vec::new();
+    for account in engine.snapshot().accounts {
+        let running = engine.clone();
+        tasks.push(tokio::spawn(async move {
+            running.launch_one(account).await;
+        }));
+    }
+    wait_for(&state.tickets, 2, &state.entered).await;
+    state.release.notify_waiters();
+    for task in tasks {
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let events = engine.0.journal.recent();
+    for stage in [
+        "launch_requested",
+        "launch_queued",
+        "launch_preparing",
+        "launch_ready_for_dispatch",
+        "launch_waiting_for_slot",
+        "launch_submitted",
+        "launch_result",
+        "launch_readiness_timeout",
+    ] {
+        assert!(
+            events.iter().any(|row| row["event"] == stage),
+            "missing expected diagnostic stage {stage}"
+        );
+    }
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
