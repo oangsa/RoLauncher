@@ -6,7 +6,9 @@ pub struct ProcessScan {
     pub inaccessible: usize,
     pub rejected: usize,
     pub unowned: usize,
+    pub uninspected: usize,
     pub metadata_pending: bool,
+    pub bootstrapper_active: bool,
     parents: std::collections::HashMap<u32, u32>,
 }
 impl ProcessScan {
@@ -18,12 +20,69 @@ impl ProcessScan {
         }
         Ok(self.players)
     }
+
+    pub fn has_unowned_child(&self, parent_pid: u32) -> bool {
+        self.players.iter().any(|p| {
+            p.tracker.is_empty() && self.parents.get(&p.pid).copied() == Some(parent_pid)
+        })
+    }
+
+    pub fn verified_for_target(&self, target: &ProcessIdentity) -> Result<Vec<Player>, String> {
+        if target.tracker.is_empty() {
+            return Err("Target process has no verified tracker".into());
+        }
+        if self.inaccessible > 0
+            || self.uninspected > 0
+            || self.players.iter().any(|p| {
+                p.pid == target.pid
+                    && p.creation_time == target.creation_time
+                    && p.tracker.is_empty()
+                    && self.metadata_pending
+            })
+        {
+            return Err(
+                "Process observation incomplete; waiting for verified tracker metadata".into(),
+            );
+        }
+        if self.has_unowned_child(target.pid) {
+            return Err(
+                "Target process has an unverified child process; waiting for handoff metadata"
+                    .into(),
+            );
+        }
+        Ok(self.players.clone())
+    }
+
+    pub fn verified_for_tracker(
+        &self,
+        tracker: &str,
+        process: Option<&ProcessIdentity>,
+    ) -> Result<Vec<Player>, String> {
+        if tracker.is_empty() {
+            return Err("Target tracker is empty".into());
+        }
+        if self.inaccessible > 0 || self.uninspected > 0 {
+            return Err(
+                "Process observation incomplete; waiting for verified tracker metadata".into(),
+            );
+        }
+        if let Some(target) = process
+            && self.has_unowned_child(target.pid)
+        {
+            return Err(
+                "Target process has an unverified child process; waiting for handoff metadata"
+                    .into(),
+            );
+        }
+        Ok(self.players.clone())
+    }
 }
 
 struct TrackedProcess {
     handle: Handle,
     player: Player,
     parent: Option<Player>,
+    roblox_parent: bool,
 }
 // Windows process handles support query/wait from another thread. Ownership is
 // transferred, never duplicated without the kernel, and Drop closes each once.
@@ -57,9 +116,8 @@ fn native_players(verify: impl Fn(HANDLE) -> bool) -> Result<ProcessScan, String
             .iter()
             .position(|c| *c == 0)
             .unwrap_or(row.szExeFile.len());
-        if String::from_utf16_lossy(&row.szExeFile[..len])
-            .eq_ignore_ascii_case("RobloxPlayerBeta.exe")
-        {
+        let exe_name = String::from_utf16_lossy(&row.szExeFile[..len]);
+        if exe_name.eq_ignore_ascii_case("RobloxPlayerBeta.exe") {
             let mut owner_session = 0;
             if unsafe { ProcessIdToSessionId(row.th32ProcessID, &mut owner_session) } == 0 {
                 if unsafe { GetLastError() } != ERROR_INVALID_PARAMETER {
@@ -96,6 +154,21 @@ fn native_players(verify: impl Fn(HANDLE) -> bool) -> Result<ProcessScan, String
                     Err(_) => scan.inaccessible += 1,
                 }
             }
+        } else if exe_name.eq_ignore_ascii_case("RobloxPlayerLauncher.exe")
+            || exe_name.eq_ignore_ascii_case("RobloxPlayerInstaller.exe")
+        {
+            let mut owner_session = 0;
+            if unsafe { ProcessIdToSessionId(row.th32ProcessID, &mut owner_session) } != 0
+                && owner_session == session
+                && let Ok(handle) = process_handle(
+                    row.th32ProcessID,
+                    PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+                )
+                && unsafe { WaitForSingleObject(handle.0, 0) } == WAIT_TIMEOUT
+                && valid_bootstrapper_image(handle.0)
+            {
+                scan.bootstrapper_active = true;
+            }
         }
         next = unsafe { Process32NextW(snapshot.0, &mut row) } != 0;
     }
@@ -120,34 +193,38 @@ fn query_trackers(mut candidates: Vec<TrackedProcess>) -> MetadataResult {
             "SELECT ProcessId, ParentProcessId, CommandLine FROM Win32_Process WHERE Name = 'RobloxPlayerBeta.exe'",
         )
         .map_err(|_| "Windows process query failed")?;
+    let mut inspected = Vec::new();
     for row in rows {
-        if let Some(candidate) = candidates
-            .iter_mut()
-            .find(|c| c.player.pid == row.process_id)
-            && unsafe { WaitForSingleObject(candidate.handle.0, 0) } == WAIT_TIMEOUT
+        if let Some(pos) = candidates
+            .iter()
+            .position(|c| c.player.pid == row.process_id)
+            && unsafe { WaitForSingleObject(candidates[pos].handle.0, 0) } == WAIT_TIMEOUT
             && let Some(cmd) = row.command_line.as_deref()
         {
+            let mut candidate = candidates.swap_remove(pos);
+            let no_tracker_args = command_arguments(cmd).is_some_and(|args| {
+                args.iter().skip(1).all(|arg| {
+                    !arg.eq_ignore_ascii_case("-b")
+                        && !arg.to_ascii_lowercase().starts_with("roblox-player:")
+                })
+            });
             if let Some(tracker) = tracker_from_command_line(cmd) {
                 candidate.player.tracker = tracker;
                 candidate.parent = None;
+                inspected.push(candidate);
             } else if let Some(parent) = &candidate.parent
                 && parent.pid == row.parent_process_id
-                && command_arguments(cmd).is_some_and(|args| {
-                    args.iter().skip(1).all(|arg| {
-                        !arg.eq_ignore_ascii_case("-b")
-                            && !arg.to_ascii_lowercase().starts_with("roblox-player:")
-                    })
-                })
+                && no_tracker_args
             {
                 candidate.player.tracker.clone_from(&parent.tracker);
+                inspected.push(candidate);
+            } else if candidate.parent.is_none() && !candidate.roblox_parent && no_tracker_args {
+                inspected.push(candidate);
             }
         }
     }
-    candidates.retain(|c| {
-        !c.player.tracker.is_empty()
-            && unsafe { WaitForSingleObject(c.handle.0, 0) } == WAIT_TIMEOUT
-    });
-    Ok(candidates)
+    inspected.retain(|c| unsafe { WaitForSingleObject(c.handle.0, 0) } == WAIT_TIMEOUT);
+    Ok(inspected)
 }
 
 impl Discovery {
@@ -172,17 +249,32 @@ impl Discovery {
             }
         }
         // Keep the exited parent's original handle while a potential direct child exists.
+        let tracked_parents: std::collections::HashSet<u32> = self
+            .tracked
+            .iter()
+            .filter(|c| !c.player.tracker.is_empty())
+            .map(|c| c.player.pid)
+            .chain(scan.players.iter().map(|p| p.pid))
+            .collect();
         self.tracked
             .retain(|c| match unsafe { WaitForSingleObject(c.handle.0, 0) } {
-                WAIT_TIMEOUT => scan
-                    .players
-                    .iter()
-                    .any(|p| p.pid == c.player.pid && p.creation_time == c.player.creation_time),
+                WAIT_TIMEOUT => {
+                    scan.players.iter().any(|p| {
+                        p.pid == c.player.pid && p.creation_time == c.player.creation_time
+                    }) && (!c.player.tracker.is_empty()
+                        || !scan
+                            .parents
+                            .get(&c.player.pid)
+                            .is_some_and(|parent| tracked_parents.contains(parent)))
+                }
                 WAIT_OBJECT_0 => {
-                    c.parent.is_none() && scan.parents.values().any(|pid| *pid == c.player.pid)
+                    !c.player.tracker.is_empty()
+                        && c.parent.is_none()
+                        && scan.parents.values().any(|pid| *pid == c.player.pid)
                 }
                 _ => false,
             });
+        let mut uninspected = 0;
         for player in &mut scan.players {
             if let Some(cached) = self.tracked.iter().find(|c| {
                 c.player.pid == player.pid
@@ -190,14 +282,17 @@ impl Discovery {
                     && unsafe { WaitForSingleObject(c.handle.0, 0) } == WAIT_TIMEOUT
             }) {
                 player.tracker.clone_from(&cached.player.tracker);
+            } else if player.tracker.is_empty() {
+                uninspected += 1;
             }
         }
         scan.unowned = scan.players.iter().filter(|p| p.tracker.is_empty()).count();
+        scan.uninspected = uninspected;
         if self.pending.is_none()
             && !scan.players.is_empty()
             && self.last_query.is_none_or(|last| {
                 last.elapsed()
-                    >= std::time::Duration::from_secs(if scan.unowned > 0 { 1 } else { 5 })
+                    >= std::time::Duration::from_secs(if scan.uninspected > 0 { 1 } else { 5 })
             })
         {
             if scan.players.len() > 512 {
@@ -218,11 +313,16 @@ impl Discovery {
                                 .tracked
                                 .iter()
                                 .find(|c| {
-                                    c.parent.is_none()
+                                    !c.player.tracker.is_empty()
+                                        && c.parent.is_none()
                                         && scan.parents.get(&p.pid) == Some(&c.player.pid)
                                         && child_born_before_exit(c, p)
                                 })
                                 .map(|c| c.player.clone()),
+                            roblox_parent: scan
+                                .parents
+                                .get(&p.pid)
+                                .is_some_and(|parent| tracked_parents.contains(parent)),
                             player: Player {
                                 tracker: String::new(),
                                 ..p.clone()

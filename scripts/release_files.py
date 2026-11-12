@@ -1,4 +1,4 @@
-"""Validate Windows/Linux release fragments and combine their checksums in memory."""
+"""Validate Windows release artifacts and checksums in memory."""
 import hashlib
 import re
 

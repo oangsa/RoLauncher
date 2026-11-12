@@ -1,7 +1,7 @@
 # RoLauncher 1.9.1
 
 Manage Roblox accounts, save destinations, and rejoin disconnected sessions.
-Windows uses native WinUI; the shared Linux/Sober port remains a beta.
+RoLauncher is a native WinUI 3 desktop application for Windows.
 
 ## Download
 
@@ -10,8 +10,7 @@ Choose **setup-x64.exe**, install, and open it from Start. A portable ZIP is ava
 
 - Windows 10 (1809+) or Windows 11, x64.
 - Browser sign-in requires [WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/).
-- Linux: [1.7.0 preview](https://github.com/oangsa/RoLauncher/releases/tag/v1.7.0) and [setup](docs/LINUX.md#install-the-linux-preview).
-  Native GNOME/KDE and live Sober acceptance remain pending.
+- Linux support is discontinued and unsupported; [historical 1.7.0 preview notes](docs/LINUX.md) are retained for archival reference only.
 
 ## Get started
 

@@ -12,6 +12,8 @@ struct CloseAttempt {
 impl CloseAttempts {
     pub(super) fn remove(&mut self, identity: &ProcessIdentity) {
         self.0.retain(|a| a.identity != *identity);
+        #[cfg(windows)]
+        platform::unpin_close(identity);
     }
     fn force(
         &self,
@@ -35,7 +37,7 @@ impl CloseAttempts {
             .iter()
             .any(|a| a.account_id == id && a.intent == *intent && a.identity == *identity)
         {
-            self.remove(identity);
+            self.0.retain(|a| a.identity != *identity);
             self.0.push(CloseAttempt {
                 account_id: id.into(),
                 intent: intent.clone(),
@@ -57,6 +59,8 @@ impl CloseAttempts {
     }
     fn deny(&mut self, id: &str, intent: &CloseIntent, identity: &ProcessIdentity, now: Instant) {
         self.record(id, intent, identity, now);
+        #[cfg(windows)]
+        platform::unpin_close(identity);
         for a in &mut self.0 {
             if a.account_id == id && a.intent == *intent && a.identity == *identity {
                 a.denied = true;
@@ -72,6 +76,9 @@ fn verified_unique(
     players: &[platform::Player],
     retired: bool,
 ) -> bool {
+    if identity.tracker.is_empty() {
+        return false;
+    }
     let matches: Vec<_> = players
         .iter()
         .filter(|p| p.tracker == identity.tracker)
@@ -79,6 +86,7 @@ fn verified_unique(
     matches.len() == 1
         && matches[0].pid == identity.pid
         && matches[0].creation_time == identity.creation_time
+        && players.iter().filter(|p| p.pid == identity.pid).count() == 1
         && uniquely_claimed(state, id, identity, retired)
 }
 
@@ -275,19 +283,44 @@ impl Engine {
                     op.state = "failed".into();
                     op.error = error;
                 }
+                self.note_launch_stage(
+                    &expected.id,
+                    expected.generation,
+                    LaunchReadinessStage::StartupFailed,
+                    Some(identity.pid),
+                );
                 return Ok(());
             }
             let current = account_mut(state, &expected.id)?;
+            let late_after_unresolved =
+                current.last_error.as_deref() == Some(STARTUP_UNRESOLVED_ERROR);
+            let opid = current.operation_id;
             attach_verified_player(current, identity.clone());
+            let current_snapshot = crate::diagnostics::account(current);
+            let current_generation = current.generation;
+            if late_after_unresolved
+                && let Some(op) = opid.and_then(|id| state.operations.get_mut(&id))
+                && op.error.as_deref() == Some(STARTUP_UNRESOLVED_ERROR)
+            {
+                op.state = "queued".into();
+                op.error = None;
+            }
+            self.note_launch_stage(
+                &expected.id,
+                current_generation,
+                LaunchReadinessStage::OwnershipVerified,
+                Some(identity.pid),
+            );
             self.0.journal.record(
                 "launch_ownership_verified",
                 serde_json::json!({
-                    "account": crate::diagnostics::account(current),
-                    "operation_id": current.operation_id,
-                    "generation": current.generation,
+                    "account": current_snapshot,
+                    "operation_id": opid,
+                    "generation": current_generation,
                     "tracker": identity.tracker.parse::<u64>().ok(),
                     "process": crate::diagnostics::process(&identity),
                     "stage": "ownership_verified",
+                    "late_after_readiness_timeout": late_after_unresolved,
                 }),
             );
             Ok(())

@@ -224,6 +224,18 @@ pub(crate) fn reason(message: &str) -> &'static str {
             "Launch tracker has no verified instance",
             "ownership_timeout",
         ),
+        (
+            "Roblox did not confirm client startup",
+            "startup_readiness_unresolved",
+        ),
+        (
+            "Roblox startup is still in progress",
+            "startup_in_progress_wait",
+        ),
+        (
+            "Waiting for an unverified Roblox process",
+            "ambiguous_startup_process_wait",
+        ),
         ("Multiple primary instances", "ambiguous_launch_ownership"),
         (
             "Launch ownership is ambiguous",

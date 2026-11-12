@@ -511,51 +511,97 @@ async fn slow_first_process_delays_second_dispatch_until_verified_then_connects_
 
 #[tokio::test]
 async fn five_concurrent_starts_and_ten_queued_accounts_schedule_fairly_without_starvation() {
-    let state = Preparation::default();
-    let (url, server) = http_fixture(state.clone()).await;
-    let (mut engine, path) = engine_fixture(10, &url, true);
-    {
-        let inner = Arc::get_mut(&mut engine.0).unwrap();
-        inner.launch_spacing = Duration::from_millis(10);
-        inner.launch_readiness_timeout = Duration::from_millis(20);
-    }
-    let running = engine.clone();
-    let worker = tokio::spawn(async move { running.launch_loop().await });
-    // Release ticket requests in waves as the 4-concurrency launch loop schedules all 10 accounts.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while engine
-        .snapshot()
-        .accounts
-        .iter()
-        .any(|a| a.tracker.is_none())
-    {
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for 10 queued accounts to dispatch"
+    for count in [5usize, 10usize] {
+        let state = Preparation::default();
+        let (url, server) = http_fixture(state.clone()).await;
+        let (mut engine, path) = engine_fixture(count, &url, true);
+        let dispatched_order = Arc::new(Mutex::new(Vec::<String>::new()));
+        {
+            let order = dispatched_order.clone();
+            let inner = Arc::get_mut(&mut engine.0).unwrap();
+            inner.launch_spacing = Duration::from_millis(10);
+            inner.launch_readiness_timeout = Duration::from_millis(20);
+            inner.launch_hook = Some(Arc::new(move |_uri, account_id| {
+                order.lock().unwrap().push(account_id.to_owned());
+                Ok(())
+            }));
+        }
+        if count == 5 {
+            let mut tasks = Vec::new();
+            for account in engine.snapshot().accounts {
+                let running = engine.clone();
+                tasks.push(tokio::spawn(async move {
+                    running.launch_one(account).await;
+                }));
+            }
+            wait_for(&state.tickets, 5, &state.entered).await;
+            state.release.notify_waiters();
+            for task in tasks {
+                tokio::time::timeout(Duration::from_secs(5), task)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+        } else {
+            let running = engine.clone();
+            let worker = tokio::spawn(async move { running.launch_loop().await });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while engine
+                .snapshot()
+                .accounts
+                .iter()
+                .any(|a| a.tracker.is_none())
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for {count} queued accounts to dispatch"
+                );
+                state.release.notify_waiters();
+                tokio::time::sleep(Duration::from_millis(15)).await;
+            }
+            engine.shutdown();
+            tokio::time::timeout(Duration::from_secs(2), worker)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        let order = dispatched_order.lock().unwrap().clone();
+        assert_eq!(
+            order.len(),
+            count,
+            "expected exactly one dispatch per account"
         );
-        state.release.notify_waiters();
-        tokio::time::sleep(Duration::from_millis(15)).await;
+        let mut unique_accounts = std::collections::HashSet::new();
+        for id in &order {
+            assert!(
+                unique_accounts.insert(id.clone()),
+                "duplicate submission for account {id}"
+            );
+        }
+        let snap = engine.snapshot();
+        let mut trackers = std::collections::HashSet::new();
+        for a in &snap.accounts {
+            let tracker = a.tracker.as_ref().expect("durable tracker reserved");
+            assert!(
+                trackers.insert(tracker.clone()),
+                "duplicate tracker reserved"
+            );
+            let op = engine.operation(a.operation_id.unwrap()).unwrap();
+            if Some(&a.id) == order.last() {
+                assert_eq!(a.status, Status::Launching);
+                assert_eq!(op.state, "queued");
+            } else {
+                // Prior accounts whose readiness window elapsed without a client are marked
+                // NeedsAttention with their tracker reservation preserved.
+                assert_eq!(a.status, Status::NeedsAttention);
+                assert_eq!(a.last_error.as_deref(), Some(STARTUP_UNRESOLVED_ERROR));
+                assert_eq!(op.state, "failed");
+            }
+        }
+        server.abort();
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
     }
-    engine.shutdown();
-    tokio::time::timeout(Duration::from_secs(2), worker)
-        .await
-        .unwrap()
-        .unwrap();
-    let submitted: Vec<u64> = engine
-        .0
-        .journal
-        .recent()
-        .into_iter()
-        .filter(|row| row["event"] == "launch_submitted")
-        .map(|row| row["details"]["account"]["account_id"].as_u64().unwrap())
-        .collect();
-    assert_eq!(submitted.len(), 10);
-    for id in 1..=10 {
-        assert!(submitted.contains(&id), "account {id} was starved");
-    }
-    server.abort();
-    drop(engine);
-    std::fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
@@ -781,6 +827,580 @@ async fn protocol_handoff_failure_marks_operation_failed_and_partial_profile_rep
     assert_eq!(results.len(), 2);
     assert!(results[0].operation.is_some() && results[0].error.is_none());
     assert!(results[1].operation.is_none() && results[1].error.is_some());
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn deterministic_readiness_matrix_covers_2s_6s_12s_20s_30s_and_boundary_arrivals() {
+    // 1. First client appears at 2s (before 5s minimum spacing) and at 6s (after 5s spacing, before 8s timeout),
+    // plus boundary arrival immediately before timeout (7.95s).
+    for (appear_ms, expected_second_dispatch_ms) in
+        [(2_000u64, 5_000u64), (6_000, 6_000), (7_950, 7_950)]
+    {
+        let state = Preparation::default();
+        let (url, server) = http_fixture(state.clone()).await;
+        let (mut engine, path) = engine_fixture(2, &url, true);
+        let base_instant = Instant::now();
+        let now_cell = Arc::new(Mutex::new(base_instant));
+        let dispatched = Arc::new(Mutex::new(Vec::<(String, u64)>::new()));
+        {
+            let clock_ref = now_cell.clone();
+            let dispatched_ref = dispatched.clone();
+            let clock_for_hook = now_cell.clone();
+            let inner = Arc::get_mut(&mut engine.0).unwrap();
+            inner.launch_spacing = Duration::from_secs(5);
+            inner.launch_readiness_timeout = Duration::from_secs(8);
+            inner.startup_verification_timeout = Duration::from_secs(35);
+            inner.clock = Some(Arc::new(move || *clock_ref.lock().unwrap()));
+            inner.launch_hook = Some(Arc::new(move |_uri, id| {
+                let elapsed = clock_for_hook
+                    .lock()
+                    .unwrap()
+                    .saturating_duration_since(base_instant)
+                    .as_millis() as u64;
+                dispatched_ref
+                    .lock()
+                    .unwrap()
+                    .push((id.to_owned(), elapsed));
+                Ok(())
+            }));
+        }
+        let accounts = engine.snapshot().accounts;
+        let e1 = engine.clone();
+        let a1 = accounts[0].clone();
+        let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+        wait_for(&state.tickets, 1, &state.entered).await;
+        state.release.notify_waiters();
+        t1.await.unwrap();
+
+        let e2 = engine.clone();
+        let a2 = accounts[1].clone();
+        let t2 = tokio::spawn(async move { e2.launch_one(a2).await });
+        wait_for(&state.tickets, 2, &state.entered).await;
+        state.release.notify_waiters();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(dispatched.lock().unwrap().len(), 1);
+
+        // Advance clock to appear_ms and observe Account 1's verified process.
+        *now_cell.lock().unwrap() = base_instant + Duration::from_millis(appear_ms);
+        let tracker1 = engine.snapshot().accounts[0].tracker.clone().unwrap();
+        assert!(engine.observe_startup_scan(
+            &[platform::Player {
+                pid: 4100,
+                creation_time: "100".into(),
+                tracker: tracker1,
+            }],
+            0,
+            false,
+            false,
+        ));
+        if appear_ms < 5_000 {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            assert_eq!(
+                dispatched.lock().unwrap().len(),
+                1,
+                "second launch must still wait for 5s spacing when first client appears at 2s"
+            );
+            *now_cell.lock().unwrap() = base_instant + Duration::from_millis(5_000);
+            engine.0.wake.notify_waiters();
+        }
+        tokio::time::timeout(Duration::from_secs(2), t2)
+            .await
+            .unwrap()
+            .unwrap();
+        let records = dispatched.lock().unwrap().clone();
+        assert_eq!(
+            records,
+            vec![
+                ("1".to_owned(), 0),
+                ("2".to_owned(), expected_second_dispatch_ms)
+            ]
+        );
+        let snap = engine.snapshot();
+        assert_eq!(snap.accounts[0].status, Status::Unknown);
+        assert_eq!(snap.accounts[1].status, Status::Launching);
+        assert_eq!(
+            engine
+                .operation(snap.accounts[0].operation_id.unwrap())
+                .unwrap()
+                .state,
+            "queued"
+        );
+        assert_eq!(
+            engine
+                .operation(snap.accounts[1].operation_id.unwrap())
+                .unwrap()
+                .state,
+            "queued"
+        );
+        server.abort();
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    // 2. Slow startup at 12s, 20s, and 30s with active bootstrapper/uninspected process observed:
+    // readiness timeout at 8s must defer (not dispatch Account 2 early) and verify cleanly at 12s/20s/30s.
+    for slow_secs in [12u64, 20, 30] {
+        let state = Preparation::default();
+        let (url, server) = http_fixture(state.clone()).await;
+        let (mut engine, path) = engine_fixture(2, &url, true);
+        let base_instant = Instant::now();
+        let now_cell = Arc::new(Mutex::new(base_instant));
+        let dispatched = Arc::new(Mutex::new(Vec::<(String, u64)>::new()));
+        {
+            let clock_ref = now_cell.clone();
+            let dispatched_ref = dispatched.clone();
+            let clock_for_hook = now_cell.clone();
+            let inner = Arc::get_mut(&mut engine.0).unwrap();
+            inner.launch_spacing = Duration::from_secs(5);
+            inner.launch_readiness_timeout = Duration::from_secs(8);
+            inner.startup_verification_timeout = Duration::from_secs(35);
+            inner.clock = Some(Arc::new(move || *clock_ref.lock().unwrap()));
+            inner.launch_hook = Some(Arc::new(move |_uri, id| {
+                let elapsed = clock_for_hook
+                    .lock()
+                    .unwrap()
+                    .saturating_duration_since(base_instant)
+                    .as_secs();
+                dispatched_ref
+                    .lock()
+                    .unwrap()
+                    .push((id.to_owned(), elapsed));
+                Ok(())
+            }));
+        }
+        let accounts = engine.snapshot().accounts;
+        let e1 = engine.clone();
+        let a1 = accounts[0].clone();
+        let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+        wait_for(&state.tickets, 1, &state.entered).await;
+        state.release.notify_waiters();
+        t1.await.unwrap();
+
+        let e2 = engine.clone();
+        let a2 = accounts[1].clone();
+        let t2 = tokio::spawn(async move { e2.launch_one(a2).await });
+        wait_for(&state.tickets, 2, &state.entered).await;
+        state.release.notify_waiters();
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        // At 3s, bootstrapper starts; at 6s, client process appears without tracker metadata yet.
+        *now_cell.lock().unwrap() = base_instant + Duration::from_secs(3);
+        assert!(!engine.observe_startup_scan(&[], 0, false, true));
+        *now_cell.lock().unwrap() = base_instant + Duration::from_secs(6);
+        assert!(!engine.observe_startup_scan(
+            &[platform::Player {
+                pid: 4200,
+                creation_time: "200".into(),
+                tracker: String::new(),
+            }],
+            1,
+            true,
+            false,
+        ));
+        // Advance past the 8s readiness timeout to 9s: Account 2 must NOT dispatch while startup is active.
+        *now_cell.lock().unwrap() = base_instant + Duration::from_secs(9);
+        engine.0.wake.notify_waiters();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert_eq!(
+            dispatched.lock().unwrap().len(),
+            1,
+            "Account 2 must not collide while Account 1 startup process is active at {slow_secs}s"
+        );
+        let snap_mid = engine.snapshot();
+        assert_eq!(snap_mid.accounts[0].status, Status::Launching);
+        assert_eq!(
+            snap_mid.accounts[0].last_error.as_deref(),
+            Some(STARTUP_IN_PROGRESS_WAIT_ERROR)
+        );
+        assert_eq!(
+            snap_mid.accounts[1].last_error.as_deref(),
+            Some(STARTUP_IN_PROGRESS_WAIT_ERROR)
+        );
+
+        // At slow_secs (12s, 20s, or 30s), WMI resolves the tracker for PID 4200.
+        *now_cell.lock().unwrap() = base_instant + Duration::from_secs(slow_secs);
+        let tracker1 = snap_mid.accounts[0].tracker.clone().unwrap();
+        assert!(engine.observe_startup_scan(
+            &[platform::Player {
+                pid: 4200,
+                creation_time: "200".into(),
+                tracker: tracker1,
+            }],
+            0,
+            false,
+            false,
+        ));
+        tokio::time::timeout(Duration::from_secs(2), t2)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            dispatched.lock().unwrap().clone(),
+            vec![("1".to_owned(), 0), ("2".to_owned(), slow_secs)]
+        );
+        let snap_end = engine.snapshot();
+        assert_eq!(snap_end.accounts[0].status, Status::Unknown);
+        assert_eq!(
+            snap_end.accounts[0].last_error.as_deref(),
+            Some("PID verified; waiting for a verified log and connection signal")
+        );
+        assert_eq!(snap_end.accounts[1].status, Status::Launching);
+        assert!(snap_end.accounts[1].last_error.is_none());
+        server.abort();
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    // 3. Silent handoff timeout at 8s followed by late client arrival immediately after timeout (8.05s)
+    // and at 12s, 20s, 30s after Account 2 has already dispatched.
+    for late_ms in [8_050u64, 12_000, 20_000, 30_000] {
+        let state = Preparation::default();
+        let (url, server) = http_fixture(state.clone()).await;
+        let (mut engine, path) = engine_fixture(2, &url, true);
+        let base_instant = Instant::now();
+        let now_cell = Arc::new(Mutex::new(base_instant));
+        let dispatched = Arc::new(Mutex::new(Vec::<(String, u64)>::new()));
+        {
+            let clock_ref = now_cell.clone();
+            let dispatched_ref = dispatched.clone();
+            let clock_for_hook = now_cell.clone();
+            let inner = Arc::get_mut(&mut engine.0).unwrap();
+            inner.launch_spacing = Duration::from_secs(5);
+            inner.launch_readiness_timeout = Duration::from_secs(8);
+            inner.clock = Some(Arc::new(move || *clock_ref.lock().unwrap()));
+            inner.launch_hook = Some(Arc::new(move |_uri, id| {
+                let elapsed = clock_for_hook
+                    .lock()
+                    .unwrap()
+                    .saturating_duration_since(base_instant)
+                    .as_millis() as u64;
+                dispatched_ref
+                    .lock()
+                    .unwrap()
+                    .push((id.to_owned(), elapsed));
+                Ok(())
+            }));
+        }
+        let accounts = engine.snapshot().accounts;
+        let op1_id = accounts[0].operation_id.unwrap();
+        let op2_id = accounts[1].operation_id.unwrap();
+        let e1 = engine.clone();
+        let a1 = accounts[0].clone();
+        let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+        wait_for(&state.tickets, 1, &state.entered).await;
+        state.release.notify_waiters();
+        t1.await.unwrap();
+
+        let e2 = engine.clone();
+        let a2 = accounts[1].clone();
+        let t2 = tokio::spawn(async move { e2.launch_one(a2).await });
+        wait_for(&state.tickets, 2, &state.entered).await;
+        state.release.notify_waiters();
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        // At 8_000ms with no process observed, Account 1 becomes StartupUnresolved (NeedsAttention)
+        // with its 90s tracker reservation intact, and Account 2 dispatches at 8_000ms.
+        *now_cell.lock().unwrap() = base_instant + Duration::from_millis(8_000);
+        engine.0.wake.notify_waiters();
+        tokio::time::timeout(Duration::from_secs(2), t2)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            dispatched.lock().unwrap().clone(),
+            vec![("1".to_owned(), 0), ("2".to_owned(), 8_000)]
+        );
+        let snap_timeout = engine.snapshot();
+        let tracker1 = snap_timeout.accounts[0]
+            .tracker
+            .clone()
+            .expect("tracker1 preserved");
+        let tracker2 = snap_timeout.accounts[1]
+            .tracker
+            .clone()
+            .expect("tracker2 reserved");
+        assert_ne!(tracker1, tracker2);
+        assert_eq!(snap_timeout.accounts[0].status, Status::NeedsAttention);
+        assert_eq!(
+            snap_timeout.accounts[0].last_error.as_deref(),
+            Some(STARTUP_UNRESOLVED_ERROR)
+        );
+        assert_eq!(engine.operation(op1_id).unwrap().state, "failed");
+        assert_eq!(snap_timeout.accounts[1].status, Status::Launching);
+        assert_eq!(engine.operation(op2_id).unwrap().state, "queued");
+
+        // Now at late_ms (8.05s, 12s, 20s, or 30s), Account 1's late process and Account 2's process appear.
+        *now_cell.lock().unwrap() = base_instant + Duration::from_millis(late_ms);
+        let players = vec![
+            platform::Player {
+                pid: 4301,
+                creation_time: "301".into(),
+                tracker: tracker1,
+            },
+            platform::Player {
+                pid: 4302,
+                creation_time: "302".into(),
+                tracker: tracker2,
+            },
+        ];
+        assert!(engine.observe_startup_scan(&players, 0, false, false));
+        let snap_recovered = engine.snapshot();
+        for (idx, op_id, expected_pid) in [(0usize, op1_id, 4301u32), (1usize, op2_id, 4302u32)] {
+            let acc = &snap_recovered.accounts[idx];
+            let proc = acc.process.as_ref().expect("late/second process attached");
+            assert_eq!(proc.pid, expected_pid);
+            assert_eq!(acc.status, Status::Unknown);
+            assert_eq!(
+                acc.last_error.as_deref(),
+                Some("PID verified; waiting for a verified log and connection signal")
+            );
+            assert_eq!(engine.operation(op_id).unwrap().state, "queued");
+            engine.observe(
+                &acc.id,
+                acc.generation,
+                proc,
+                Observation::DiskLog(
+                    crate::logs::parse_event(
+                        "[FLog::Network] Connection accepted from 127.0.0.1|5000",
+                    )
+                    .unwrap(),
+                ),
+            );
+            assert_eq!(engine.operation(op_id).unwrap().state, "completed");
+            assert!(engine.snapshot().accounts[idx].last_error.is_none());
+        }
+        server.abort();
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn unverified_process_exits_before_verification_and_ambiguous_handoff_blocks_until_inspected()
+{
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(2, &url, true);
+    let base_instant = Instant::now();
+    let now_cell = Arc::new(Mutex::new(base_instant));
+    let dispatched = Arc::new(Mutex::new(Vec::<(String, u64)>::new()));
+    {
+        let clock_ref = now_cell.clone();
+        let dispatched_ref = dispatched.clone();
+        let clock_for_hook = now_cell.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_spacing = Duration::from_secs(5);
+        inner.launch_readiness_timeout = Duration::from_secs(8);
+        inner.startup_verification_timeout = Duration::from_secs(35);
+        inner.clock = Some(Arc::new(move || *clock_ref.lock().unwrap()));
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            let elapsed = clock_for_hook
+                .lock()
+                .unwrap()
+                .saturating_duration_since(base_instant)
+                .as_secs();
+            dispatched_ref
+                .lock()
+                .unwrap()
+                .push((id.to_owned(), elapsed));
+            Ok(())
+        }));
+    }
+    let accounts = engine.snapshot().accounts;
+    let op1_id = accounts[0].operation_id.unwrap();
+    let e1 = engine.clone();
+    let a1 = accounts[0].clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_waiters();
+    t1.await.unwrap();
+
+    let e2 = engine.clone();
+    let a2 = accounts[1].clone();
+    let t2 = tokio::spawn(async move { e2.launch_one(a2).await });
+    wait_for(&state.tickets, 2, &state.entered).await;
+    state.release.notify_waiters();
+    tokio::time::sleep(Duration::from_millis(25)).await;
+
+    // Scenario 7: At 2s, a client process appears without tracker metadata yet (uninspected = 1).
+    *now_cell.lock().unwrap() = base_instant + Duration::from_secs(2);
+    assert!(!engine.observe_startup_scan(
+        &[platform::Player {
+            pid: 5100,
+            creation_time: "50".into(),
+            tracker: String::new(),
+        }],
+        1,
+        true,
+        false,
+    ));
+    assert!(engine.snapshot().accounts[0].process.is_none());
+
+    // Scenario 8: At 3s, PID 5100 exits before verification! Next complete scan only has an
+    // uninspected external process PID 6100 (`uninspected = 1`) and then at 5s PID 6100 is still uninspected.
+    // First, let's verify PID 5100 exiting with no other uninspected processes marks Account 1 StartupUnresolved immediately.
+    *now_cell.lock().unwrap() = base_instant + Duration::from_secs(3);
+    assert!(!engine.observe_startup_scan(&[], 0, false, false));
+    let snap = engine.snapshot();
+    assert_eq!(snap.accounts[0].status, Status::NeedsAttention);
+    assert_eq!(
+        snap.accounts[0].last_error.as_deref(),
+        Some(STARTUP_UNRESOLVED_ERROR)
+    );
+    assert!(snap.accounts[0].tracker.is_some());
+    assert_eq!(engine.operation(op1_id).unwrap().state, "failed");
+    assert!(engine.0.journal.recent().iter().any(|e| {
+        e["event"] == "launch_readiness_timeout"
+            && e["details"]["reason"] == "observed_process_exited_before_verification"
+    }));
+
+    // Now suppose at 4s an uninspected process PID 6100 appears (`uninspected = 1`):
+    // Even after 5s spacing (at 6s), Account 2 must block with `launch_blocked_ambiguous_handoff`
+    // until PID 6100 is inspected!
+    *now_cell.lock().unwrap() = base_instant + Duration::from_secs(4);
+    assert!(!engine.observe_startup_scan(
+        &[platform::Player {
+            pid: 6100,
+            creation_time: "60".into(),
+            tracker: String::new(),
+        }],
+        1,
+        true,
+        false,
+    ));
+    *now_cell.lock().unwrap() = base_instant + Duration::from_secs(6);
+    engine.0.wake.notify_waiters();
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert_eq!(
+        dispatched.lock().unwrap().len(),
+        1,
+        "Account 2 must block while an uninspected Roblox process is present"
+    );
+    assert_eq!(
+        engine.snapshot().accounts[1].last_error.as_deref(),
+        Some(STARTUP_AMBIGUOUS_PROCESS_WAIT_ERROR)
+    );
+    assert!(engine.0.journal.recent().iter().any(|e| {
+        e["event"] == "launch_blocked_ambiguous_handoff"
+            && e["details"]["reason"] == "unverified_roblox_process_present"
+    }));
+
+    // At 7s, WMI finishes inspecting PID 6100 and confirms it is an unrelated external trackerless
+    // process (`uninspected = 0, metadata_pending = false`). Account 2 now dispatches immediately!
+    *now_cell.lock().unwrap() = base_instant + Duration::from_secs(7);
+    assert!(!engine.observe_startup_scan(
+        &[platform::Player {
+            pid: 6100,
+            creation_time: "60".into(),
+            tracker: String::new(),
+        }],
+        0,
+        false,
+        false,
+    ));
+    tokio::time::timeout(Duration::from_secs(2), t2)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        dispatched.lock().unwrap().clone(),
+        vec![("1".to_owned(), 0), ("2".to_owned(), 7)]
+    );
+    assert!(engine.snapshot().accounts[1].last_error.is_none());
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn cancel_first_launch_restart_unresolved_and_engine_shutdown_during_readiness_wait() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(3, &url, true);
+    let base_instant = Instant::now();
+    let now_cell = Arc::new(Mutex::new(base_instant));
+    let dispatched = Arc::new(Mutex::new(Vec::<(String, u64)>::new()));
+    {
+        let clock_ref = now_cell.clone();
+        let dispatched_ref = dispatched.clone();
+        let clock_for_hook = now_cell.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_spacing = Duration::from_secs(5);
+        inner.launch_readiness_timeout = Duration::from_secs(8);
+        inner.clock = Some(Arc::new(move || *clock_ref.lock().unwrap()));
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            let elapsed = clock_for_hook
+                .lock()
+                .unwrap()
+                .saturating_duration_since(base_instant)
+                .as_secs();
+            dispatched_ref
+                .lock()
+                .unwrap()
+                .push((id.to_owned(), elapsed));
+            Ok(())
+        }));
+    }
+    let accounts = engine.snapshot().accounts;
+    let e1 = engine.clone();
+    let a1 = accounts[0].clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_waiters();
+    t1.await.unwrap();
+
+    // Restarting an unresolved launch must be rejected until Stop + discovery clears its retired tracker.
+    assert!(engine.command("1", "restart").is_err());
+
+    let e2 = engine.clone();
+    let a2 = accounts[1].clone();
+    let t2 = tokio::spawn(async move { e2.launch_one(a2).await });
+    wait_for(&state.tickets, 2, &state.entered).await;
+    state.release.notify_waiters();
+    tokio::time::sleep(Duration::from_millis(25)).await;
+
+    // Scenario 9: Cancel Account 1 during readiness waiting at 2s; Account 2 dispatches once 5s spacing elapses.
+    *now_cell.lock().unwrap() = base_instant + Duration::from_secs(2);
+    let stop_op = engine.command("1", "stop").unwrap();
+    assert_eq!(engine.operation(stop_op.id).unwrap().state, "queued");
+    assert_eq!(engine.snapshot().accounts[0].status, Status::Stopping);
+    *now_cell.lock().unwrap() = base_instant + Duration::from_secs(5);
+    engine.0.wake.notify_waiters();
+    tokio::time::timeout(Duration::from_secs(2), t2)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        dispatched.lock().unwrap().clone(),
+        vec![("1".to_owned(), 0), ("2".to_owned(), 5)]
+    );
+
+    // Account 3 now waits for Account 2's readiness, and an unexpected engine shutdown occurs at 6s.
+    let e3 = engine.clone();
+    let a3 = accounts[2].clone();
+    let t3 = tokio::spawn(async move { e3.launch_one(a3).await });
+    wait_for(&state.tickets, 3, &state.entered).await;
+    state.release.notify_waiters();
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    *now_cell.lock().unwrap() = base_instant + Duration::from_secs(6);
+    engine.shutdown();
+    tokio::time::timeout(Duration::from_secs(2), t3)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        dispatched.lock().unwrap().len(),
+        2,
+        "Account 3 must abort without dispatching when engine shuts down during readiness wait"
+    );
+    assert!(engine.0.journal.recent().iter().any(|e| {
+        e["event"] == "launch_cancelled"
+            && e["details"]["account"]["account_id"].as_u64() == Some(3)
+            && e["details"]["shutdown"] == true
+    }));
     server.abort();
     drop(engine);
     std::fs::remove_dir_all(path).unwrap();

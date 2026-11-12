@@ -1,4 +1,6 @@
-# Linux/Sober beta
+# Historical Linux/Sober preview (discontinued and unsupported)
+
+> **Status: Discontinued and unsupported.** RoLauncher is now Windows-only. The notes below are preserved strictly as a historical archive of the 1.7.0 experimental preview and must not be used as current installation or support instructions.
 
 **Linux UI/UX parity and live Sober support remain unverified.** Windows retains native WinUI.
 Builds and simulated smoke tests do not certify native GNOME/KDE support.

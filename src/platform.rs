@@ -237,6 +237,33 @@ mod imp {
             }
         }
     }
+    struct PinnedClose {
+        handle: Handle,
+        identity: ProcessIdentity,
+    }
+    unsafe impl Send for PinnedClose {}
+    static PINNED_CLOSES: std::sync::LazyLock<std::sync::Mutex<Vec<PinnedClose>>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+    pub fn unpin_close(identity: &ProcessIdentity) {
+        if let Ok(mut pinned) = PINNED_CLOSES.lock() {
+            pinned.retain(|entry| {
+                entry.identity != *identity
+                    && unsafe { WaitForSingleObject(entry.handle.0, 0) } == WAIT_TIMEOUT
+            });
+        }
+    }
+
+    #[cfg(test)]
+    pub fn pinned_close_handle_value(identity: &ProcessIdentity) -> Option<isize> {
+        PINNED_CLOSES.lock().ok().and_then(|pinned| {
+            pinned
+                .iter()
+                .find(|entry| entry.identity == *identity)
+                .map(|entry| entry.handle.0 as isize)
+        })
+    }
+
     pub fn close(identity: &ProcessIdentity, force: bool) -> Result<(), String> {
         close_with(identity, force, valid_player_image)
     }
@@ -245,27 +272,63 @@ mod imp {
         force: bool,
         verify: impl Fn(HANDLE) -> bool,
     ) -> Result<(), String> {
+        if force
+            && let Some(pinned) = PINNED_CLOSES.lock().ok().and_then(|mut list| {
+                let pos = list.iter().position(|entry| entry.identity == *identity)?;
+                Some(list.swap_remove(pos))
+            })
+        {
+            if unsafe { WaitForSingleObject(pinned.handle.0, 0) } == WAIT_OBJECT_0 {
+                return Ok(());
+            }
+            if process_time(pinned.handle.0)? != identity.creation_time
+                || !same_session(identity.pid)
+                || !verify(pinned.handle.0)
+            {
+                return Err("Instance identity changed; refusing to close it".into());
+            }
+            return terminate_verified_handle(pinned.handle.0);
+        }
+        let mut has_terminate = true;
         let h = match process_handle(
             identity.pid,
-            PROCESS_QUERY_LIMITED_INFORMATION
-                | SYNCHRONIZE
-                | if force { PROCESS_TERMINATE } else { 0 },
+            PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE | PROCESS_TERMINATE,
         ) {
             Ok(h) => h,
-            Err(_) if unsafe { GetLastError() } == ERROR_INVALID_PARAMETER => return Ok(()),
+            Err(_) if unsafe { GetLastError() } == ERROR_INVALID_PARAMETER => {
+                unpin_close(identity);
+                return Ok(());
+            }
+            Err(_) if !force => {
+                has_terminate = false;
+                match process_handle(
+                    identity.pid,
+                    PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+                ) {
+                    Ok(h) => h,
+                    Err(_) if unsafe { GetLastError() } == ERROR_INVALID_PARAMETER => {
+                        unpin_close(identity);
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
             Err(error) => return Err(error),
         };
         if unsafe { WaitForSingleObject(h.0, 0) } == WAIT_OBJECT_0 {
+            unpin_close(identity);
             return Ok(());
         }
         if process_time(h.0)? != identity.creation_time
             || !same_session(identity.pid)
             || !verify(h.0)
         {
+            unpin_close(identity);
             return Err("Instance identity changed; refusing to close it".into());
         }
         if force {
             terminate_verified_handle(h.0)?;
+            unpin_close(identity);
         } else {
             unsafe extern "system" fn callback(hwnd: HWND, context: LPARAM) -> i32 {
                 let (pid, handle, failed) = unsafe { &mut *(context as *mut (u32, HANDLE, bool)) };
@@ -282,10 +345,24 @@ mod imp {
                 1
             }
             let mut context = (identity.pid, h.0, false);
-            if unsafe { EnumWindows(Some(callback), &mut context as *mut _ as isize) } == 0
+            unsafe {
+                SetLastError(0);
+            }
+            if (unsafe { EnumWindows(Some(callback), &mut context as *mut _ as isize) } == 0
+                && unsafe { GetLastError() } != 0)
                 || context.2
             {
                 return Err(last_error("Managed window close unavailable"));
+            }
+            if has_terminate && let Ok(mut pinned) = PINNED_CLOSES.lock() {
+                pinned.retain(|entry| {
+                    entry.identity != *identity
+                        && unsafe { WaitForSingleObject(entry.handle.0, 0) } == WAIT_TIMEOUT
+                });
+                pinned.push(PinnedClose {
+                    handle: h,
+                    identity: identity.clone(),
+                });
             }
         }
         Ok(())
@@ -323,7 +400,12 @@ mod imp {
             1
         }
         let mut visible = std::collections::HashSet::<u32>::new();
-        if unsafe { EnumWindows(Some(collect_visible), &mut visible as *mut _ as isize) } == 0 {
+        unsafe {
+            SetLastError(0);
+        }
+        if unsafe { EnumWindows(Some(collect_visible), &mut visible as *mut _ as isize) } == 0
+            && unsafe { GetLastError() } != 0
+        {
             return Err(last_error("Visible client query unavailable"));
         }
         Ok(visible)
@@ -437,7 +519,12 @@ mod imp {
                 1
             }
             let context = (identity.pid, handle.0);
-            if unsafe { EnumWindows(Some(close_hidden), &context as *const _ as isize) } == 0 {
+            unsafe {
+                SetLastError(0);
+            }
+            if unsafe { EnumWindows(Some(close_hidden), &context as *const _ as isize) } == 0
+                && unsafe { GetLastError() } != 0
+            {
                 return Err(last_error("Background client close unavailable"));
             }
         }
