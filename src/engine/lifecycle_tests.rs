@@ -5267,3 +5267,287 @@ async fn f13_cleanup_rolls_back_then_publishes_on_success() {
     drop(engine);
     std::fs::remove_dir_all(path).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f14_monitor_recovers_ambiguous_launch_automatically() {
+    let fixture = Preparation::default();
+    let (url, server) = http_fixture(fixture.clone()).await;
+    let (mut engine, path) = engine_fixture(2, &url, true);
+    let initial = engine.snapshot().accounts.remove(0);
+    assert_eq!(initial.status, Status::Queued);
+    assert_eq!(engine.snapshot().accounts[1].status, Status::Queued);
+    assert!(initial.tracker.is_none());
+    assert!(engine.0.store.load().unwrap().retired_launches.is_empty());
+    engine
+        .0
+        .launch_coordinator
+        .lock()
+        .unwrap()
+        .unverified_processes = 1;
+
+    let (scan_started, mut scans) = tokio::sync::mpsc::unbounded_channel();
+    let (scan_result, responses) =
+        std::sync::mpsc::channel::<Result<platform::ProcessScan, String>>();
+    let responses = Mutex::new(responses);
+    let scan_count = Arc::new(AtomicUsize::new(0));
+    let (dispatch, mut dispatched) = tokio::sync::mpsc::unbounded_channel();
+    let inner = Arc::get_mut(&mut engine.0).unwrap();
+    let calls = scan_count.clone();
+    inner.discovery_hook = Some(Arc::new(move || {
+        let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
+        let _ = scan_started.send(call);
+        responses
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap_or_else(|_| Err("Fixture scan response unavailable".into()))
+    }));
+    inner.launch_hook = Some(Arc::new(move |_, id| {
+        let _ = dispatch.send(id.to_owned());
+        Ok(())
+    }));
+
+    let running = engine.clone();
+    let launcher = tokio::spawn(async move { running.launch_loop().await });
+    let running = engine.clone();
+    let monitor = tokio::spawn(async move { running.monitor_loop().await });
+    wait_for(&fixture.tickets, 2, &fixture.entered).await;
+    fixture.release.notify_waiters();
+    fixture.release.notify_one();
+
+    let timeout = Duration::from_secs(10);
+    let ambiguous = || {
+        let mut scan = platform::ProcessScan::default();
+        scan.players.push(platform::Player {
+            pid: u32::MAX,
+            creation_time: "fixture".into(),
+            tracker: String::new(),
+        });
+        scan.uninspected = 1;
+        scan
+    };
+    let mut metadata_pending = ambiguous();
+    metadata_pending.metadata_pending = true;
+    let mut inaccessible = platform::ProcessScan::default();
+    inaccessible.inaccessible = 1;
+    let mut bootstrapper = platform::ProcessScan::default();
+    bootstrapper.bootstrapper_active = true;
+    for (index, result) in [
+        Ok(ambiguous()),
+        Ok(metadata_pending),
+        Err("Fixture WMI failure".into()),
+        Ok(inaccessible),
+        Ok(bootstrapper),
+        Ok(platform::ProcessScan::default()),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            tokio::time::timeout(timeout, scans.recv()).await.unwrap(),
+            Some(index + 1)
+        );
+        {
+            let coordinator = engine.0.launch_coordinator.lock().unwrap();
+            match index {
+                0..=2 => assert_eq!(coordinator.unverified_processes, 1),
+                3 | 4 => assert_eq!(coordinator.inaccessible_processes, 1),
+                5 => assert!(coordinator.bootstrapper_active),
+                _ => unreachable!(),
+            }
+        }
+        if index == 5 {
+            let stop = engine.command("2", "stop").unwrap();
+            assert_eq!(engine.operation(stop.id).unwrap().state, "completed");
+        }
+        if index == 0 {
+            // Hold the blocking adapter across a discovery interval.
+            assert!(
+                tokio::time::timeout(Duration::from_millis(1200), scans.recv())
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(dispatched.try_recv().is_err());
+        let waiting = engine.snapshot();
+        assert_eq!(waiting.accounts[0].generation, initial.generation);
+        assert!(
+            waiting
+                .accounts
+                .iter()
+                .all(|account| account.tracker.is_none())
+        );
+        scan_result.send(result).unwrap();
+    }
+
+    assert_eq!(
+        tokio::time::timeout(timeout, dispatched.recv())
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("1")
+    );
+    let account = engine.snapshot().accounts.remove(0);
+    assert_eq!(account.generation, initial.generation);
+    assert_eq!(account.operation_id, initial.operation_id);
+    assert_eq!(account.status, Status::Launching);
+    assert!(account.tracker.is_some());
+    assert_eq!(
+        engine.0.store.load().unwrap().accounts[0].account.tracker,
+        account.tracker
+    );
+    {
+        let coordinator = engine.0.launch_coordinator.lock().unwrap();
+        assert_eq!(coordinator.unverified_processes, 0);
+        assert_eq!(coordinator.inaccessible_processes, 0);
+        assert!(!coordinator.bootstrapper_active);
+    }
+    assert_eq!(engine.snapshot().accounts[1].status, Status::Stopped);
+    let journal = engine.0.journal.recent();
+    let authorized = journal
+        .iter()
+        .position(|e| e["event"] == "launch_dispatch_authorized")
+        .unwrap();
+    let submitted = journal
+        .iter()
+        .position(|e| e["event"] == "launch_submitted")
+        .unwrap();
+    assert!(authorized < submitted);
+    assert_eq!(
+        journal
+            .iter()
+            .filter(|e| e["event"] == "launch_submitted")
+            .count(),
+        1
+    );
+    engine.shutdown();
+    drop(scan_result);
+    tokio::time::timeout(timeout, launcher)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(timeout, monitor)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(dispatched.try_recv().is_err());
+    assert!(scan_count.load(Ordering::SeqCst) >= 6);
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f14_stop_and_shutdown_while_monitor_scan_is_in_flight() {
+    let fixture = Preparation::default();
+    let (url, server) = http_fixture(fixture.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    engine
+        .0
+        .launch_coordinator
+        .lock()
+        .unwrap()
+        .unverified_processes = 1;
+    let (started, mut scan_started) = tokio::sync::mpsc::unbounded_channel();
+    let (release, held) = std::sync::mpsc::channel();
+    let held = Mutex::new(held);
+    let (finished, mut scan_finished) = tokio::sync::mpsc::unbounded_channel();
+    let dispatched = Arc::new(AtomicUsize::new(0));
+    let inner = Arc::get_mut(&mut engine.0).unwrap();
+    inner.discovery_hook = Some(Arc::new(move || {
+        let _ = started.send(());
+        let result = held.lock().unwrap().recv_timeout(Duration::from_secs(10));
+        let _ = finished.send(());
+        result.map_err(|_| "Fixture scan was not released".to_string())?;
+        Ok(platform::ProcessScan::default())
+    }));
+    let calls = dispatched.clone();
+    inner.launch_hook = Some(Arc::new(move |_, _| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }));
+    let running = engine.clone();
+    let launcher = tokio::spawn(async move { running.launch_loop().await });
+    let running = engine.clone();
+    let monitor = tokio::spawn(async move { running.monitor_loop().await });
+    let timeout = Duration::from_secs(10);
+    assert_eq!(
+        tokio::time::timeout(timeout, scan_started.recv())
+            .await
+            .unwrap(),
+        Some(())
+    );
+    wait_for(&fixture.tickets, 1, &fixture.entered).await;
+    fixture.release.notify_one();
+
+    let before = engine.snapshot().accounts.remove(0);
+    let stop = engine.command("1", "stop").unwrap();
+    let stopped = engine.snapshot().accounts.remove(0);
+    assert_ne!(stopped.generation, before.generation);
+    assert_eq!(stopped.status, Status::Stopped);
+    assert!(stopped.tracker.is_none());
+    assert_eq!(engine.operation(stop.id).unwrap().state, "completed");
+    assert!(scan_finished.try_recv().is_err());
+    release.send(()).unwrap();
+    assert_eq!(
+        tokio::time::timeout(timeout, scan_finished.recv())
+            .await
+            .unwrap(),
+        Some(())
+    );
+    tokio::time::timeout(timeout, async {
+        while engine
+            .0
+            .launch_coordinator
+            .lock()
+            .unwrap()
+            .unverified_processes
+            != 0
+        {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), scan_started.recv())
+            .await
+            .is_err()
+    );
+
+    engine
+        .0
+        .launch_coordinator
+        .lock()
+        .unwrap()
+        .unverified_processes = 1;
+    engine.command("1", "start").unwrap();
+    assert_eq!(
+        tokio::time::timeout(timeout, scan_started.recv())
+            .await
+            .unwrap(),
+        Some(())
+    );
+    assert!(scan_finished.try_recv().is_err());
+    engine.shutdown();
+    tokio::time::timeout(timeout, launcher)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(timeout, monitor)
+        .await
+        .unwrap()
+        .unwrap();
+    release.send(()).unwrap();
+    assert_eq!(
+        tokio::time::timeout(timeout, scan_finished.recv())
+            .await
+            .unwrap(),
+        Some(())
+    );
+    assert_eq!(dispatched.load(Ordering::SeqCst), 0);
+    assert!(scan_started.try_recv().is_err());
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
