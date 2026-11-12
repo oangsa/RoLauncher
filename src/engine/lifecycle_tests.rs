@@ -893,6 +893,7 @@ async fn deterministic_readiness_matrix_covers_2s_6s_12s_20s_30s_and_boundary_ar
                 tracker: tracker1,
             }],
             0,
+            0,
             false,
             false,
         ));
@@ -988,7 +989,7 @@ async fn deterministic_readiness_matrix_covers_2s_6s_12s_20s_30s_and_boundary_ar
 
         // At 3s, bootstrapper starts; at 6s, client process appears without tracker metadata yet.
         *now_cell.lock().unwrap() = base_instant + Duration::from_secs(3);
-        assert!(!engine.observe_startup_scan(&[], 0, false, true));
+        assert!(!engine.observe_startup_scan(&[], 0, 0, false, true));
         *now_cell.lock().unwrap() = base_instant + Duration::from_secs(6);
         assert!(!engine.observe_startup_scan(
             &[platform::Player {
@@ -997,6 +998,7 @@ async fn deterministic_readiness_matrix_covers_2s_6s_12s_20s_30s_and_boundary_ar
                 tracker: String::new(),
             }],
             1,
+            0,
             true,
             false,
         ));
@@ -1029,6 +1031,7 @@ async fn deterministic_readiness_matrix_covers_2s_6s_12s_20s_30s_and_boundary_ar
                 creation_time: "200".into(),
                 tracker: tracker1,
             }],
+            0,
             0,
             false,
             false,
@@ -1146,7 +1149,7 @@ async fn deterministic_readiness_matrix_covers_2s_6s_12s_20s_30s_and_boundary_ar
                 tracker: tracker2,
             },
         ];
-        assert!(engine.observe_startup_scan(&players, 0, false, false));
+        assert!(engine.observe_startup_scan(&players, 0, 0, false, false));
         let snap_recovered = engine.snapshot();
         for (idx, op_id, expected_pid) in [(0usize, op1_id, 4301u32), (1usize, op2_id, 4302u32)] {
             let acc = &snap_recovered.accounts[idx];
@@ -1234,6 +1237,7 @@ async fn unverified_process_exits_before_verification_and_ambiguous_handoff_bloc
             tracker: String::new(),
         }],
         1,
+        0,
         true,
         false,
     ));
@@ -1243,7 +1247,7 @@ async fn unverified_process_exits_before_verification_and_ambiguous_handoff_bloc
     // uninspected external process PID 6100 (`uninspected = 1`) and then at 5s PID 6100 is still uninspected.
     // First, let's verify PID 5100 exiting with no other uninspected processes marks Account 1 StartupUnresolved immediately.
     *now_cell.lock().unwrap() = base_instant + Duration::from_secs(3);
-    assert!(!engine.observe_startup_scan(&[], 0, false, false));
+    assert!(!engine.observe_startup_scan(&[], 0, 0, false, false));
     let snap = engine.snapshot();
     assert_eq!(snap.accounts[0].status, Status::NeedsAttention);
     assert_eq!(
@@ -1268,6 +1272,7 @@ async fn unverified_process_exits_before_verification_and_ambiguous_handoff_bloc
             tracker: String::new(),
         }],
         1,
+        0,
         true,
         false,
     ));
@@ -1297,6 +1302,7 @@ async fn unverified_process_exits_before_verification_and_ambiguous_handoff_bloc
             creation_time: "60".into(),
             tracker: String::new(),
         }],
+        0,
         0,
         false,
         false,
@@ -1401,6 +1407,240 @@ async fn cancel_first_launch_restart_unresolved_and_engine_shutdown_during_readi
             && e["details"]["account"]["account_id"].as_u64() == Some(3)
             && e["details"]["shutdown"] == true
     }));
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_poll_launch_readiness_and_attach_player_no_deadlock() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(2, &url, true);
+    let base_instant = Instant::now();
+    let now_cell = Arc::new(Mutex::new(base_instant));
+    {
+        let clock_ref = now_cell.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_spacing = Duration::from_millis(50);
+        inner.launch_readiness_timeout = Duration::from_secs(8);
+        inner.clock = Some(Arc::new(move || *clock_ref.lock().unwrap()));
+    }
+    let accounts = engine.snapshot().accounts;
+    let e1 = engine.clone();
+    let a1 = accounts[0].clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_waiters();
+    t1.await.unwrap();
+
+    let tracker1 = engine.snapshot().accounts[0].tracker.clone().unwrap();
+    let waiting_account = engine.snapshot().accounts[1].clone();
+
+    // Concurrently poll readiness on task 1 while attaching player under transaction on task 2.
+    // Lock decoupling guarantees zero AB-BA inversion between launch_coordinator and state.
+    let e_poll = engine.clone();
+    let e_attach = engine.clone();
+    let acc_for_attach = engine.snapshot().accounts[0].clone();
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let b1 = barrier.clone();
+    let b2 = barrier.clone();
+
+    let poll_handle = tokio::spawn(async move {
+        b1.wait().await;
+        for _ in 0..20 {
+            let _ = e_poll.poll_launch_readiness(&waiting_account, Instant::now());
+            tokio::task::yield_now().await;
+        }
+    });
+
+    let attach_handle = tokio::spawn(async move {
+        b2.wait().await;
+        let identity = ProcessIdentity {
+            pid: 9999,
+            creation_time: "999".into(),
+            generation: acc_for_attach.generation,
+            tracker: tracker1.clone(),
+        };
+        let players = vec![platform::Player {
+            pid: 9999,
+            creation_time: "999".into(),
+            tracker: tracker1,
+        }];
+        let _ = e_attach.attach_player(&acc_for_attach, identity, &players);
+    });
+
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let _ = tokio::join!(poll_handle, attach_handle);
+    })
+    .await
+    .expect("concurrent polling and player attachment must not deadlock");
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn inaccessible_process_defers_launch_and_blocks_ambiguous_handoff() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(2, &url, true);
+    let base_instant = Instant::now();
+    let now_cell = Arc::new(Mutex::new(base_instant));
+    let dispatched = Arc::new(Mutex::new(Vec::<(String, u64)>::new()));
+    {
+        let clock_ref = now_cell.clone();
+        let dispatched_ref = dispatched.clone();
+        let clock_for_hook = now_cell.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_spacing = Duration::from_secs(5);
+        inner.launch_readiness_timeout = Duration::from_secs(8);
+        inner.startup_verification_timeout = Duration::from_secs(35);
+        inner.clock = Some(Arc::new(move || *clock_ref.lock().unwrap()));
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            let elapsed = clock_for_hook
+                .lock()
+                .unwrap()
+                .saturating_duration_since(base_instant)
+                .as_secs();
+            dispatched_ref
+                .lock()
+                .unwrap()
+                .push((id.to_owned(), elapsed));
+            Ok(())
+        }));
+    }
+    let accounts = engine.snapshot().accounts;
+    let e1 = engine.clone();
+    let a1 = accounts[0].clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_waiters();
+    t1.await.unwrap();
+
+    let e2 = engine.clone();
+    let a2 = accounts[1].clone();
+    let t2 = tokio::spawn(async move { e2.launch_one(a2).await });
+    wait_for(&state.tickets, 2, &state.entered).await;
+    state.release.notify_waiters();
+    tokio::time::sleep(Duration::from_millis(25)).await;
+
+    // At 4s, an inaccessible process is observed (inaccessible = 1).
+    *now_cell.lock().unwrap() = base_instant + Duration::from_secs(4);
+    assert!(!engine.observe_startup_scan(&[], 0, 1, false, false));
+
+    // At 9s (past normal 8s timeout), Account 2 must still be deferred because inaccessible = 1 indicates active startup.
+    *now_cell.lock().unwrap() = base_instant + Duration::from_secs(9);
+    engine.0.wake.notify_waiters();
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert_eq!(
+        dispatched.lock().unwrap().len(),
+        1,
+        "Account 2 must defer while an inaccessible process candidate is starting"
+    );
+
+    // At 12s, the process becomes accessible with matching tracker.
+    *now_cell.lock().unwrap() = base_instant + Duration::from_secs(12);
+    let tracker1 = engine.snapshot().accounts[0].tracker.clone().unwrap();
+    assert!(engine.observe_startup_scan(
+        &[platform::Player {
+            pid: 7700,
+            creation_time: "700".into(),
+            tracker: tracker1,
+        }],
+        0,
+        0,
+        false,
+        false,
+    ));
+
+    tokio::time::timeout(Duration::from_secs(2), t2)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        dispatched.lock().unwrap().clone(),
+        vec![("1".to_owned(), 0), ("2".to_owned(), 12)]
+    );
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn ambiguous_unverified_process_recovers_after_timeout() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(2, &url, true);
+    let base_instant = Instant::now();
+    let now_cell = Arc::new(Mutex::new(base_instant));
+    let dispatched = Arc::new(Mutex::new(Vec::<(String, u64)>::new()));
+    {
+        let clock_ref = now_cell.clone();
+        let dispatched_ref = dispatched.clone();
+        let clock_for_hook = now_cell.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_spacing = Duration::from_secs(5);
+        inner.launch_readiness_timeout = Duration::from_secs(8);
+        inner.startup_verification_timeout = Duration::from_secs(35);
+        inner.clock = Some(Arc::new(move || *clock_ref.lock().unwrap()));
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            let elapsed = clock_for_hook
+                .lock()
+                .unwrap()
+                .saturating_duration_since(base_instant)
+                .as_secs();
+            dispatched_ref
+                .lock()
+                .unwrap()
+                .push((id.to_owned(), elapsed));
+            Ok(())
+        }));
+    }
+    // No launch dispatched yet. An uninspected process PID 8800 appears without tracker.
+    assert!(!engine.observe_startup_scan(
+        &[platform::Player {
+            pid: 8800,
+            creation_time: "800".into(),
+            tracker: String::new(),
+        }],
+        1,
+        0,
+        true,
+        false,
+    ));
+
+    let accounts = engine.snapshot().accounts;
+    let e1 = engine.clone();
+    let a1 = accounts[0].clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_waiters();
+    tokio::time::sleep(Duration::from_millis(25)).await;
+
+    // At 10s, Account 1 is still blocked by the ambiguous uninspected process.
+    *now_cell.lock().unwrap() = base_instant + Duration::from_secs(10);
+    engine.0.wake.notify_waiters();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert_eq!(dispatched.lock().unwrap().len(), 0);
+
+    // At 36s (past 35s startup_verification_timeout), the stale ambiguous process must timeout,
+    // allowing Account 1 to dispatch rather than starving the queue indefinitely.
+    *now_cell.lock().unwrap() = base_instant + Duration::from_secs(36);
+    engine.0.wake.notify_waiters();
+    tokio::time::timeout(Duration::from_secs(2), t1)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(dispatched.lock().unwrap().len(), 1);
+    assert!(engine.0.journal.recent().iter().any(|e| {
+        e["event"] == "launch_ambiguous_process_timeout"
+            && e["details"]["reason"] == "unverified_roblox_process_timeout_exceeded"
+    }));
+
     server.abort();
     drop(engine);
     std::fs::remove_dir_all(path).unwrap();

@@ -265,7 +265,7 @@ impl Engine {
         identity: ProcessIdentity,
         players: &[platform::Player],
     ) -> Result<(), String> {
-        self.transaction(|state| {
+        let stage_recording = self.transaction(|state| {
             let current = account_mut(state, &expected.id)?;
             if current.generation != expected.generation
                 || current.process.is_some()
@@ -283,13 +283,7 @@ impl Engine {
                     op.state = "failed".into();
                     op.error = error;
                 }
-                self.note_launch_stage(
-                    &expected.id,
-                    expected.generation,
-                    LaunchReadinessStage::StartupFailed,
-                    Some(identity.pid),
-                );
-                return Ok(());
+                return Ok((expected.generation, LaunchReadinessStage::StartupFailed));
             }
             let current = account_mut(state, &expected.id)?;
             let late_after_unresolved =
@@ -305,12 +299,6 @@ impl Engine {
                 op.state = "queued".into();
                 op.error = None;
             }
-            self.note_launch_stage(
-                &expected.id,
-                current_generation,
-                LaunchReadinessStage::OwnershipVerified,
-                Some(identity.pid),
-            );
             self.0.journal.record(
                 "launch_ownership_verified",
                 serde_json::json!({
@@ -323,8 +311,15 @@ impl Engine {
                     "late_after_readiness_timeout": late_after_unresolved,
                 }),
             );
-            Ok(())
-        })
+            Ok((current_generation, LaunchReadinessStage::OwnershipVerified))
+        })?;
+        self.note_launch_stage(
+            &expected.id,
+            stage_recording.0,
+            stage_recording.1,
+            Some(identity.pid),
+        );
+        Ok(())
     }
     #[cfg(any(windows, test))]
     pub(super) fn cleanup_launch_conflict(
