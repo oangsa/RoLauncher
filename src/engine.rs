@@ -2142,6 +2142,7 @@ impl Engine {
                 && last_discovery.elapsed() >= discovery_interval
                 && (has_unresolved_launch || !retired.is_empty() || !pending_exits.is_empty())
             {
+                #[cfg(windows)]
                 let engine = self.clone();
                 discovery = Some(tokio::task::spawn_blocking(move || {
                     #[cfg(windows)]

@@ -2,7 +2,7 @@ name: Protected release promotion
 
 on:
   workflow_run:
-    workflows: [CI and release, Linux development port, Beta release]
+    workflows: [CI and release, Beta release]
     types: [completed]
 
 permissions:

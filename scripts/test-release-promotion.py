@@ -56,10 +56,9 @@ class GitHubFixture:
                        head={"ref": "dev", "repo": {"full_name": REPO}})
         self.history = [{"sha": "b" * 40}]
         self.jobs = [{"name": n, "conclusion": "success", "head_sha": SHA}
-                     for n in ("Branch flow", "Windows checks", "Linux checks and package (Ubuntu 24.04)")]
+                     for n in ("Branch flow", "Windows checks")]
         self.branch = {"commit": {"sha": SHA}}
-        checks = ["Branch flow", "Windows checks", "Linux checks and package (Ubuntu 24.04)",
-                  "Linux checks (Ubuntu)", "Linux checks (Arch)"]
+        checks = ["Branch flow", "Windows checks"]
         self.rules = [{"type": t, "ruleset_id": 2} for t in ("pull_request", "non_fast_forward", "deletion")]
         self.rules.append({"type": "required_status_checks", "ruleset_id": 2, "parameters": {
             "strict_required_status_checks_policy": True,
@@ -84,7 +83,6 @@ class GitHubFixture:
         prefix = "rolauncher-v2.3.4"
         for artifact_id, name, suffix, endings in (
             (30, "release-files", "-SHA256SUMS.txt", ["-setup-x64.exe", "-windows-x64.zip", "-source.zip"]),
-            (31, "release-linux-files", "-linux-SHA256SUMS.txt", ["-linux-x64.tar.gz"]),
         ):
             entries = {prefix + ending: ("synthetic " + ending).encode() for ending in endings}
             entries[prefix + suffix] = "".join(hashlib.sha256(data).hexdigest() + "  " + n + "\n"
@@ -106,7 +104,6 @@ class GitHubFixture:
         self.run.update(path=".github/workflows/beta-release.yml", head_branch="beta-v2.3.4", actor={"id": 7})
         self.jobs = [j for j in self.jobs if j["name"] != "Branch flow"]
         self.artifacts[0]["name"] = "beta-windows-attempt-1"
-        self.artifacts[1]["name"] = "beta-linux-attempt-1"
         self.tag = {"object": {"type": "commit", "sha": SHA}}
         return self
 
@@ -359,7 +356,7 @@ class PromotionTests(unittest.TestCase):
         receipt = json.loads(github.assets["release-promotion.json"]["data"])
         self.assertEqual(receipt["intent"], INTENT)
         self.assertEqual(receipt["source"], SHA)
-        self.assertEqual(len(receipt["files"]), 5)
+        self.assertEqual(len(receipt["files"]), 4)
         github.writes.clear()
         self.assertEqual(promote(github, github.run), "consumed")
         self.assertEqual(github.writes, [])
@@ -499,12 +496,9 @@ class PromotionTests(unittest.TestCase):
                 self.assertEqual(github.release, before)
 
     def test_failed_linux_or_incomplete_api_evidence_denies(self):
-        for fault in ("linux-failed", "linux-skipped", "linux-source", "missing-digest", "intent-version", "pagination"):
+        for fault in ("missing-digest", "intent-version", "pagination"):
             with self.subTest(fault=fault):
                 github = GitHubFixture().with_intent()
-                if fault == "linux-failed": github.linux_run["conclusion"] = "failure"
-                if fault == "linux-skipped": github.linux_jobs[1]["conclusion"] = "skipped"
-                if fault == "linux-source": github.linux_run["head_sha"] = "b" * 40
                 if fault == "missing-digest": github.artifacts[0].pop("digest")
                 if fault == "intent-version": github.intent["version"] = "2.3.5"
                 if fault == "pagination": github.files += [{"filename": f"docs/{i}.md", "status": "added"} for i in range(99)]
