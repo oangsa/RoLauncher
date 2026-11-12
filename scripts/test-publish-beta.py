@@ -79,8 +79,7 @@ class BetaChecks(unittest.TestCase):
             dist = Path(temp)
             prefix = "rolauncher-v1.1.0"
             fragments = {}
-            for suffix, endings in (("-SHA256SUMS.txt", ["-setup-x64.exe", "-windows-x64.zip", "-source.zip"]),
-                                    ("-linux-SHA256SUMS.txt", ["-linux-x64.tar.gz"])):
+            for suffix, endings in (("-SHA256SUMS.txt", ["-setup-x64.exe", "-windows-x64.zip", "-source.zip"]),):
                 lines = []
                 for ending in endings:
                     name = prefix + ending
@@ -89,11 +88,11 @@ class BetaChecks(unittest.TestCase):
                 fragments[suffix] = "".join(lines)
                 (dist / (prefix + suffix)).write_text(fragments[suffix])
             files = beta.checked_files(dist, "1.1.0")
-            self.assertEqual(len(files), 5)
-            self.assertEqual(len(files[prefix + "-SHA256SUMS.txt"].splitlines()), 4)
+            self.assertEqual(len(files), 4)
+            self.assertEqual(len(files[prefix + "-SHA256SUMS.txt"].splitlines()), 3)
             for suffix, original in fragments.items():
                 self.assertEqual((dist / (prefix + suffix)).read_text(), original)
-            (dist / (prefix + "-linux-x64.tar.gz")).write_bytes(b"corrupt")
+            (dist / (prefix + "-windows-x64.zip")).write_bytes(b"corrupt")
             with self.assertRaisesRegex(ValueError, "checksum"):
                 beta.checked_files(dist, "1.1.0")
 

@@ -13,6 +13,16 @@ fn image_under_root(path: &std::path::Path, root: &std::path::Path) -> bool {
     let root = root.to_string_lossy().to_lowercase();
     path.starts_with(&(root + "\\")) && path.ends_with("\\robloxplayerbeta.exe")
 }
+fn bootstrapper_under_root(path: &std::path::Path, root: &std::path::Path) -> bool {
+    let (Ok(path), Ok(root)) = (path.canonicalize(), root.canonicalize()) else {
+        return false;
+    };
+    let path = path.to_string_lossy().to_lowercase();
+    let root = root.to_string_lossy().to_lowercase();
+    path.starts_with(&(root + "\\"))
+        && (path.ends_with("\\robloxplayerlauncher.exe")
+            || path.ends_with("\\robloxplayerinstaller.exe"))
+}
 fn same_session(pid: u32) -> bool {
     let (mut current, mut actual) = (0, 0);
     unsafe {
@@ -29,6 +39,15 @@ fn valid_player_image(handle: HANDLE) -> bool {
         return false;
     };
     image_under_root(&path, &PathBuf::from(local).join("Roblox").join("Versions"))
+}
+fn valid_bootstrapper_image(handle: HANDLE) -> bool {
+    let Some(path) = image_path(handle) else {
+        return false;
+    };
+    let Some(local) = std::env::var_os("LOCALAPPDATA") else {
+        return false;
+    };
+    bootstrapper_under_root(&path, &PathBuf::from(local).join("Roblox").join("Versions"))
 }
 
 #[cfg(test)]

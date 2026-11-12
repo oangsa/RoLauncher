@@ -106,8 +106,8 @@ The explicit review attestation flags partial cherry-picks for human review and 
 
 ## Checks and artifacts
 
-- Required main CI jobs: Branch flow, Windows checks, Linux checks and package (Ubuntu 24.04).
-- Separate Linux workflow: Linux checks (Ubuntu) and Linux checks (Arch), same exact main SHA.
+- Required main CI jobs: Branch flow and Windows checks.
+- Historical Linux workflows (Ubuntu and Arch) are discontinued and are no longer required for release promotion.
 - All runs must be official successful pushes; exact latest attempts and named successful jobs are rechecked before final publication.
 - Artifacts must match run ID/SHA/attempt, fixed basenames and mandatory GitHub archive SHA256 digests.
 - ZIP budgets reject duplicate/path/link/encrypted/unsupported entries; payload checksum sets must match exactly.

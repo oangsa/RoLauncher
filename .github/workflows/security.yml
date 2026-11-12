@@ -51,8 +51,7 @@
         "fail-fast": false,
         "matrix": {
           "include": [
-            { "os": "windows-2025", "project": "desktop/RoLauncher.Desktop.csproj", "directory": "desktop" },
-            { "os": "ubuntu-24.04", "project": "desktop.linux/RoLauncher.Linux.csproj", "directory": "desktop.linux" }
+            { "os": "windows-2025", "project": "desktop/RoLauncher.Desktop.csproj", "directory": "desktop" }
           ]
         }
       },

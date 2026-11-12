@@ -20,8 +20,8 @@ REPO = "oangsa/RoLauncher"
 CI = ".github/workflows/ci-release.yml"
 BETA = ".github/workflows/beta-release.yml"
 STABLE_VERSION = r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
-CHECKS = {"Branch flow", "Windows checks", "Linux checks and package (Ubuntu 24.04)"}
-LINUX_CHECKS = {"Linux checks (Ubuntu)", "Linux checks (Arch)"}
+CHECKS = {"Branch flow", "Windows checks"}
+LINUX_CHECKS = set()
 GITHUB_ACTIONS_ID = 15368  # Public GitHub Actions App, verified against hosted check runs.
 MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_EXPANDED_BYTES = 512 * 1024 * 1024  # Across both platform archives, not per entry.
@@ -179,8 +179,7 @@ def artifact_files(call, run, version, beta=False):
     require(result["total_count"] == len(result["artifacts"]) and len(result["artifacts"]) < 100,
             "Incomplete artifact evidence")
     prefix = "rolauncher-v" + version
-    layouts = {"beta-windows" if beta else "release-files": {prefix + s for s in ("-setup-x64.exe", "-windows-x64.zip", "-source.zip", "-SHA256SUMS.txt")},
-               "beta-linux" if beta else "release-linux-files": {prefix + s for s in ("-linux-x64.tar.gz", "-linux-SHA256SUMS.txt")}}
+    layouts = {"beta-windows" if beta else "release-files": {prefix + s for s in ("-setup-x64.exe", "-windows-x64.zip", "-source.zip", "-SHA256SUMS.txt")}}
     layouts = {f'{name}-attempt-{run["run_attempt"]}': entries for name, entries in layouts.items()}
     provenance = []
     expanded = 0
@@ -253,15 +252,6 @@ def promote(call, run, evidence=None):
     source_checks = CHECKS - {"Branch flow"} if beta else CHECKS
     successful_jobs(call, run, source_checks)
     linux_run = None
-    if not beta:
-        linux = call(f"/actions/workflows/linux.yml/runs?event=push&branch=main&head_sha={sha}&per_page=100")
-        require(linux["total_count"] == len(linux["workflow_runs"]) and linux["total_count"] == 1,
-                "One matching Linux validation run required")
-        linux_run = linux["workflow_runs"][0]
-        require(linux_run["head_sha"] == sha and linux_run["event"] == "push" and linux_run["head_branch"] == "main"
-                and linux_run["head_repository"]["full_name"] == REPO and linux_run["path"] == ".github/workflows/linux.yml",
-                "Wrong Linux validation source")
-        successful_jobs(call, linux_run, LINUX_CHECKS)
     if not beta:
         require(call("/branches/main")["commit"]["sha"] == sha, "Stale intent: main has advanced")
     manifest_version = tomllib.loads(content(call, "Cargo.toml", sha))["package"]["version"]
