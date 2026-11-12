@@ -94,7 +94,7 @@ type ClockHook = Arc<dyn Fn() -> Instant + Send + Sync>;
 /// Locks must ALWAYS be acquired in top-to-bottom order to guarantee provable ordering and zero AB-BA deadlocks:
 ///
 /// 1. `launch_slot`: Tokio Mutex (async, held only by `launch_one` to serialize launch attempts across accounts)
-/// 2. `dispatch_lock`: std Mutex (synchronous, serializes dispatch authorization, OS `effect()` submission, and `execute_command`)
+/// 2. `dispatch_lock`: std Mutex (synchronous, serializes dispatch authorization, OS `effect()` submission, gate disable, shutdown completion boundary, and `execute_command`)
 /// 3. `state`: std Mutex (synchronous, held during state transactions, snapshot reads, and account updates)
 /// 4. `launch_coordinator`: std Mutex (synchronous leaf lock, held only for brief coordinator updates; NEVER acquires `state` or `dispatch_lock`)
 struct Inner {
@@ -121,6 +121,10 @@ struct Inner {
     launch_hook: Option<LaunchHook>,
     #[cfg(test)]
     pre_dispatch_hook: Option<PreDispatchHook>,
+    #[cfg(test)]
+    post_auth_hook: Option<PreDispatchHook>,
+    #[cfg(test)]
+    discovery_hook: Option<Arc<dyn Fn() -> Result<platform::ProcessScan, String> + Send + Sync>>,
     #[cfg(test)]
     clock: Option<ClockHook>,
 }
@@ -649,6 +653,10 @@ impl Engine {
             #[cfg(test)]
             pre_dispatch_hook: None,
             #[cfg(test)]
+            post_auth_hook: None,
+            #[cfg(test)]
+            discovery_hook: None,
+            #[cfg(test)]
             clock: None,
             state: Mutex::new(State {
                 active_multi_instance,
@@ -694,11 +702,16 @@ impl Engine {
         self.0.shutdown.store(true, Ordering::Release);
         self.0.discord.stop();
         self.0.wake.notify_waiters();
+        let _dispatch = self.0.dispatch_lock.lock().unwrap();
+        self.0
+            .journal
+            .record("shutdown_completed", serde_json::json!({}));
     }
     pub fn is_shutdown(&self) -> bool {
         self.0.shutdown.load(Ordering::Acquire)
     }
     pub fn set_launch_allowed(&self, allowed: bool) {
+        let _dispatch = self.0.dispatch_lock.lock().unwrap();
         let mut state = self.0.state.lock().unwrap();
         state.launch_allowed = allowed;
         if self.0.launch_allowed.swap(allowed, Ordering::AcqRel) != allowed {
@@ -2287,72 +2300,128 @@ impl Engine {
     ) -> Result<(), String> {
         self.submit_launch_with_wait(account, target, 0, effect)
     }
-    fn submit_launch_with_wait(
+    fn check_dispatch_authorization(
+        state: &State,
+        account: &Account,
+        is_shutdown: bool,
+        launch_allowed: bool,
+    ) -> Result<(), (&'static str, bool)> {
+        if is_shutdown {
+            Err(("shutdown", true))
+        } else if !launch_allowed {
+            Err(("launch_coordination_unavailable", false))
+        } else if state.network_suspended {
+            Err(("network_suspended", false))
+        } else if retired_blocks_launch(&state.database, &account.id) {
+            Err(("retired_launch_pending", false))
+        } else if let Ok(current) = account_mut(&mut state.clone(), &account.id) {
+            if current.generation != account.generation {
+                Err(("generation_changed", false))
+            } else if !current.desired_running {
+                Err(("superseded_or_stopped", false))
+            } else if current.tracker.is_some()
+                && current.tracker.as_deref() != account.tracker.as_deref()
+            {
+                Err(("tracker_mismatch", false))
+            } else if current.status == Status::Stopping
+                || current.status == Status::Stopped
+                || current.close_intent.as_ref().is_some_and(|i| {
+                    matches!(i.reason, CloseReason::UserStop | CloseReason::ManualRestart)
+                        && !i.denied
+                })
+            {
+                Err(("superseded_or_stopped", false))
+            } else {
+                Ok(())
+            }
+        } else {
+            Err(("account_not_found", false))
+        }
+    }
+
+    fn cleanup_unsubmitted_launch(&self, account_id: &str, generation: Uuid, tracker: &str) {
+        let mut state = self.0.state.lock().unwrap();
+        let mut changed = false;
+
+        let before_retired = state.database.retired_launches.len();
+        state.database.retired_launches.retain(|r| {
+            !(r.account_id == account_id
+                && r.generation == generation
+                && r.tracker == tracker
+                && r.process.is_none())
+        });
+        if state.database.retired_launches.len() != before_retired {
+            changed = true;
+        }
+
+        let has_other_retired = state
+            .database
+            .retired_launches
+            .iter()
+            .any(|r| r.account_id == account_id);
+
+        if let Some(slot) = state
+            .database
+            .accounts
+            .iter_mut()
+            .find(|s| s.account.id == account_id)
+        {
+            if (slot.account.generation == generation
+                || slot.account.tracker.as_deref() == Some(tracker))
+                && (slot.account.tracker.is_some() || slot.account.ownership_deadline.is_some())
+            {
+                slot.account.tracker = None;
+                slot.account.ownership_deadline = None;
+                changed = true;
+            }
+            if slot.account.process.is_none() && !has_other_retired && !slot.account.desired_running
+            {
+                slot.account.status = Status::Stopped;
+                slot.account.close_intent = None;
+                if let Some(op_id) = slot.account.operation_id
+                    && let Some(op) = state.operations.get_mut(&op_id)
+                    && op.state == "queued"
+                {
+                    op.state = "completed".into();
+                }
+                changed = true;
+            }
+        }
+
+        if changed {
+            let _ = self.0.store.save(&state.database);
+            self.0.journal.record(
+                "launch_reservation_cleaned",
+                serde_json::json!({
+                    "account_id": account_id.parse::<u64>().ok(),
+                    "generation": generation,
+                    "tracker": tracker.parse::<u64>().ok(),
+                    "reason": "unsubmitted_launch_cancelled",
+                }),
+            );
+            self.0.wake.notify_waiters();
+        }
+    }
+
+    fn handle_launch_cancellation(
         &self,
         account: &Account,
-        target: &Target,
         wait_ms: u128,
-        effect: impl FnOnce() -> Result<(), String>,
+        reason: &str,
+        is_shutdown: bool,
     ) -> Result<(), String> {
-        let _dispatch = self.0.dispatch_lock.lock().unwrap();
+        if let Some(tracker) = account.tracker.as_deref() {
+            self.cleanup_unsubmitted_launch(&account.id, account.generation, tracker);
+        } else {
+            let _ = self.update(&account.id, account.generation, |a| {
+                a.tracker = None;
+                a.ownership_deadline = None;
+            });
+        }
 
-        let auth = {
-            let state = self.0.state.lock().unwrap();
-            if self.is_shutdown() {
-                Err(("shutdown", true))
-            } else if !self.0.launch_allowed.load(Ordering::Acquire) {
-                Err(("launch_coordination_unavailable", false))
-            } else if state.network_suspended {
-                Err(("network_suspended", false))
-            } else if retired_blocks_launch(&state.database, &account.id) {
-                Err(("retired_launch_pending", false))
-            } else if let Ok(current) = account_mut(&mut state.clone(), &account.id) {
-                if current.generation != account.generation {
-                    Err(("generation_changed", false))
-                } else if !current.desired_running {
-                    Err(("superseded_or_stopped", false))
-                } else if current.tracker.is_some()
-                    && current.tracker.as_deref() != account.tracker.as_deref()
-                {
-                    Err(("tracker_mismatch", false))
-                } else if current.status == Status::Stopping
-                    || current.status == Status::Stopped
-                    || current.close_intent.as_ref().is_some_and(|i| {
-                        matches!(i.reason, CloseReason::UserStop | CloseReason::ManualRestart)
-                            && !i.denied
-                    })
-                {
-                    Err(("superseded_or_stopped", false))
-                } else {
-                    Ok(())
-                }
-            } else {
-                Err(("account_not_found", false))
-            }
-        };
-
-        if let Err((reason, is_shutdown)) = auth {
-            if reason == "launch_coordination_unavailable" {
-                self.0.journal.record(
-                    "launch_coordination_unavailable",
-                    serde_json::json!({
-                        "account": crate::diagnostics::account(account),
-                        "operation_id": account.operation_id,
-                        "generation": account.generation,
-                        "stage": "submitted",
-                        "wait_ms": wait_ms,
-                        "reason": reason,
-                    }),
-                );
-                let _ = self.update(&account.id, account.generation, |a| {
-                    a.tracker = None;
-                    a.ownership_deadline = None;
-                });
-                return Err(LAUNCH_COORDINATION_ERROR.into());
-            }
-
+        if reason == "launch_coordination_unavailable" {
             self.0.journal.record(
-                "launch_cancelled",
+                "launch_coordination_unavailable",
                 serde_json::json!({
                     "account": crate::diagnostics::account(account),
                     "operation_id": account.operation_id,
@@ -2360,21 +2429,85 @@ impl Engine {
                     "stage": "submitted",
                     "wait_ms": wait_ms,
                     "reason": reason,
-                    "shutdown": is_shutdown,
                 }),
             );
+            return Err(LAUNCH_COORDINATION_ERROR.into());
+        }
 
-            if is_shutdown {
-                let _ = self.update(&account.id, account.generation, |a| {
-                    a.tracker = None;
-                    a.ownership_deadline = None;
-                });
-            }
+        self.0.journal.record(
+            "launch_cancelled",
+            serde_json::json!({
+                "account": crate::diagnostics::account(account),
+                "operation_id": account.operation_id,
+                "generation": account.generation,
+                "stage": "submitted",
+                "wait_ms": wait_ms,
+                "reason": reason,
+                "shutdown": is_shutdown,
+            }),
+        );
 
-            return Err(format!("Launch cancelled before dispatch: {reason}"));
+        Err(format!("Launch cancelled before dispatch: {reason}"))
+    }
+
+    fn submit_launch_with_wait(
+        &self,
+        account: &Account,
+        target: &Target,
+        wait_ms: u128,
+        effect: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let auth = {
+            let state = self.0.state.lock().unwrap();
+            Self::check_dispatch_authorization(
+                &state,
+                account,
+                self.is_shutdown(),
+                self.0.launch_allowed.load(Ordering::Acquire),
+            )
+        };
+
+        if let Err((reason, is_shutdown)) = auth {
+            return self.handle_launch_cancellation(account, wait_ms, reason, is_shutdown);
         }
 
         let context = crate::diagnostics::account(account);
+        self.0.journal.record(
+            "launch_dispatch_authorized",
+            serde_json::json!({
+                "account": context,
+                "operation_id": account.operation_id,
+                "generation": account.generation,
+                "stage": "submitted",
+                "wait_ms": wait_ms,
+            }),
+        );
+
+        #[cfg(test)]
+        if let Some(hook) = &self.0.post_auth_hook {
+            hook(
+                &account.id,
+                account.generation,
+                account.tracker.as_deref().unwrap_or(""),
+            );
+        }
+
+        let _dispatch = self.0.dispatch_lock.lock().unwrap();
+
+        let final_check = {
+            let state = self.0.state.lock().unwrap();
+            Self::check_dispatch_authorization(
+                &state,
+                account,
+                self.is_shutdown(),
+                self.0.launch_allowed.load(Ordering::Acquire),
+            )
+        };
+
+        if let Err((reason, is_shutdown)) = final_check {
+            return self.handle_launch_cancellation(account, wait_ms, reason, is_shutdown);
+        }
+
         // No URI, cookie, ticket, private link or command line reaches the journal.
         self.0.journal.record(
             "launch_submitted",
@@ -2430,6 +2563,31 @@ impl Engine {
     }
     #[cfg(windows)]
     fn observe_players_logged(&self) -> Result<platform::ProcessScan, String> {
+        #[cfg(test)]
+        if let Some(hook) = &self.0.discovery_hook {
+            let started = Instant::now();
+            let scan = hook()?;
+            self.0.journal.record(
+                "process_observation",
+                serde_json::json!({
+                    "observed": scan.players.len(),
+                    "inaccessible": scan.inaccessible,
+                    "rejected_image": scan.rejected,
+                    "unowned": scan.unowned,
+                    "uninspected": scan.uninspected,
+                    "metadata_pending": scan.metadata_pending,
+                    "bootstrapper_active": scan.bootstrapper_active,
+                    "duration_ms": started.elapsed().as_millis(),
+                    "processes": scan
+                        .players
+                        .iter()
+                        .take(50)
+                        .map(|p| crate::diagnostics::process(&p.identity(Uuid::nil())))
+                        .collect::<Vec<_>>(),
+                }),
+            );
+            return Ok(scan);
+        }
         let started = Instant::now();
         let scan = platform::observe_players()?;
         self.0.journal.record(
@@ -2705,16 +2863,35 @@ impl Engine {
                 .accounts
                 .iter()
                 .any(|a| a.process.is_none() && a.tracker.is_some());
+            let has_waiting_launch = self.snapshot().accounts.iter().any(|a| {
+                a.desired_running
+                    && a.process.is_none()
+                    && a.status != Status::Stopped
+                    && a.status != Status::Stopping
+            });
+            let coord_needs_discovery = {
+                let coord = self.0.launch_coordinator.lock().unwrap();
+                (coord.unverified_processes > 0
+                    || coord.inaccessible_processes > 0
+                    || coord.bootstrapper_active
+                    || coord.last_dispatched.is_some())
+                    && (has_waiting_launch || has_unresolved_launch)
+            };
+            let should_discover = has_unresolved_launch
+                || !retired.is_empty()
+                || !pending_exits.is_empty()
+                || coord_needs_discovery
+                || metadata_pending;
             let discovery_interval = if metadata_pending {
                 Duration::from_millis(250)
-            } else if !pending_exits.is_empty() || has_unresolved_launch {
+            } else if !pending_exits.is_empty() || has_unresolved_launch || coord_needs_discovery {
                 Duration::from_secs(1)
             } else {
                 Duration::from_secs(5)
             };
             if discovery.is_none()
                 && last_discovery.elapsed() >= discovery_interval
-                && (has_unresolved_launch || !retired.is_empty() || !pending_exits.is_empty())
+                && should_discover
             {
                 #[cfg(windows)]
                 let engine = self.clone();

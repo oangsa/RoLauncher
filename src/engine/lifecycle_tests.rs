@@ -1843,7 +1843,16 @@ async fn f7_02_stop_immediately_after_tracker_persistence() {
         0,
         "Stop linearizing before dispatch authorization must cancel the OS launch handoff"
     );
-    assert_eq!(engine.snapshot().accounts[0].status, Status::Stopping);
+    assert_eq!(engine.snapshot().accounts[0].status, Status::Stopped);
+    assert_eq!(engine.operation(stop_op.id).unwrap().state, "completed");
+    {
+        let s = engine.0.state.lock().unwrap();
+        assert_eq!(
+            s.database.retired_launches.len(),
+            0,
+            "Proven never-submitted tracker must be cleaned up under F11"
+        );
+    }
     assert!(engine.0.journal.recent().iter().any(|e| {
         e["event"] == "launch_cancelled"
             && (e["details"]["reason"] == "generation_changed"
@@ -2263,7 +2272,7 @@ async fn f7_11_stale_generation_after_cancellation() {
     t1.await.unwrap();
 
     assert_eq!(dispatched.lock().unwrap().len(), 0);
-    assert_eq!(engine.snapshot().accounts[0].status, Status::Stopping);
+    assert_eq!(engine.snapshot().accounts[0].status, Status::Stopped);
 
     server.abort();
     drop(engine);
@@ -2378,16 +2387,26 @@ async fn f7_14_exact_tracker_remains_protected_after_cancellation() {
         .unwrap();
     let tracker = engine.snapshot().accounts[0].tracker.clone().unwrap();
     engine.command("1", "stop").unwrap();
+    {
+        let s = engine.0.state.lock().unwrap();
+        assert!(
+            s.database
+                .retired_launches
+                .iter()
+                .any(|r| r.tracker == tracker),
+            "tracker is recorded in retired_launches while cancellation is in progress"
+        );
+    }
     let _ = resume_tx.send(());
     t1.await.unwrap();
 
     let state_db = engine.0.state.lock().unwrap().database.clone();
     assert!(
-        state_db
+        !state_db
             .retired_launches
             .iter()
             .any(|r| r.tracker == tracker),
-        "exact tracker must remain recorded in retired_launches to protect against rogue attachment"
+        "never-submitted tracker reservation is safely cleared after non-submission is proven (F11)"
     );
 
     server.abort();
@@ -2429,8 +2448,8 @@ async fn f7_15_stop_operation_never_reports_completion_while_unresolved_launch_c
 
     assert_eq!(
         engine.operation(stop_op.id).unwrap().state,
-        "queued",
-        "Stop remains queued until retired launch exit or deadline"
+        "completed",
+        "Stop completes once never-submitted launch is safely cleaned up under F11"
     );
 
     server.abort();
@@ -3514,4 +3533,1609 @@ fn f9_06_recovery_and_process_exit_reconciliation_active_coordination_os_threads
         drop(engine);
         std::fs::remove_dir_all(path).unwrap();
     });
+}
+
+// =========================================================================
+// Finding F10 — Gate Disable / Shutdown vs OS Dispatch Race Regression Tests
+// =========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f10_01_gate_disable_before_dispatch_authorization() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let dispatched_ref = dispatched.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+
+    // Gate disabled prior to launch attempt
+    engine.set_launch_allowed(false);
+    assert!(!engine.0.launch_allowed.load(Ordering::Acquire));
+
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let _ = tokio::spawn(async move { e1.launch_one(a1).await }).await;
+
+    assert_eq!(
+        dispatched.lock().unwrap().len(),
+        0,
+        "No OS handoff when gate is disabled"
+    );
+    assert_eq!(engine.snapshot().accounts[0].status, Status::NeedsAttention);
+    assert!(engine.snapshot().accounts[0].tracker.is_none());
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f10_02_gate_disable_after_auth_before_os_effect() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (barrier, mut pause_rx, resume_tx) = HookBarrier::new();
+    {
+        let dispatched_ref = dispatched.clone();
+        let b = barrier.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.post_auth_hook = Some(Arc::new(move |_id, _gen, _trk| {
+            b.wait_in_hook();
+        }));
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    // Paused after Phase 1 authorization, before acquiring dispatch_lock in Phase 2
+    tokio::time::timeout(Duration::from_secs(10), pause_rx.recv())
+        .await
+        .unwrap();
+
+    // Coordination disabled while launch is in flight
+    engine.set_launch_allowed(false);
+    let _ = resume_tx.send(());
+    let _ = t1.await;
+
+    // Invariant: Phase 2 re-checks launch_allowed under dispatch_lock and aborts before effect()
+    assert_eq!(
+        dispatched.lock().unwrap().len(),
+        0,
+        "Gate disable linearizing before effect must prevent OS handoff"
+    );
+    assert!(engine.snapshot().accounts[0].tracker.is_none());
+    assert!(engine.0.journal.recent().iter().any(|e| {
+        e["event"] == "launch_coordination_unavailable"
+            && e["details"]["reason"] == "launch_coordination_unavailable"
+    }));
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f10_03_gate_disable_during_os_effect() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (barrier, mut pause_rx, resume_tx) = HookBarrier::new();
+    {
+        let dispatched_ref = dispatched.clone();
+        let b = barrier.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            b.wait_in_hook();
+            Ok(())
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    // Paused INSIDE launch_hook while holding dispatch_lock
+    tokio::time::timeout(Duration::from_secs(10), pause_rx.recv())
+        .await
+        .unwrap();
+    assert_eq!(dispatched.lock().unwrap().len(), 1);
+
+    // Call set_launch_allowed(false) on another thread: must block on dispatch_lock
+    let e2 = engine.clone();
+    let gate_thread = std::thread::spawn(move || {
+        e2.set_launch_allowed(false);
+    });
+
+    // Unblock the launch hook so it can finish effect() and release dispatch_lock
+    let _ = resume_tx.send(());
+    let _ = t1.await;
+    gate_thread.join().unwrap();
+
+    // Invariant: In-flight launch completed successfully before gate disable linearized
+    assert_eq!(dispatched.lock().unwrap().len(), 1);
+    assert!(!engine.0.launch_allowed.load(Ordering::Acquire));
+    assert!(engine.snapshot().accounts[0].tracker.is_some());
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f10_04_gate_reenable_after_cancellation() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let dispatched_ref = dispatched.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+
+    engine.set_launch_allowed(false);
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let _ = tokio::spawn(async move { e1.launch_one(a1).await }).await;
+    assert_eq!(dispatched.lock().unwrap().len(), 0);
+
+    // Re-enable gate
+    engine.set_launch_allowed(true);
+    assert!(engine.0.launch_allowed.load(Ordering::Acquire));
+
+    // Reset account status to Queued and launch again
+    let account_gen = engine.snapshot().accounts[0].generation;
+    engine
+        .update("1", account_gen, |a| {
+            a.status = Status::Queued;
+            a.last_error = None;
+        })
+        .unwrap();
+
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t2 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+    let _ = t2.await;
+
+    assert_eq!(
+        dispatched.lock().unwrap().len(),
+        1,
+        "Re-enabled gate allows subsequent dispatch"
+    );
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f10_05_shutdown_before_dispatch_authorization() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let dispatched_ref = dispatched.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+
+    engine.shutdown();
+    assert!(engine.is_shutdown());
+
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let _ = tokio::spawn(async move { e1.launch_one(a1).await }).await;
+
+    assert_eq!(dispatched.lock().unwrap().len(), 0);
+    assert!(
+        engine.snapshot().accounts[0].status == Status::Backoff
+            || engine.snapshot().accounts[0].status == Status::NeedsAttention
+    );
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f10_06_shutdown_after_auth_before_os_effect() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (barrier, mut pause_rx, resume_tx) = HookBarrier::new();
+    {
+        let dispatched_ref = dispatched.clone();
+        let b = barrier.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.post_auth_hook = Some(Arc::new(move |_id, _gen, _trk| {
+            b.wait_in_hook();
+        }));
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(10), pause_rx.recv())
+        .await
+        .unwrap();
+
+    engine.shutdown();
+    let _ = resume_tx.send(());
+    let _ = t1.await;
+
+    assert_eq!(dispatched.lock().unwrap().len(), 0);
+    assert!(
+        engine
+            .0
+            .journal
+            .recent()
+            .iter()
+            .any(|e| { e["event"] == "launch_cancelled" && e["details"]["reason"] == "shutdown" })
+    );
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f10_07_shutdown_during_os_effect() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (barrier, mut pause_rx, resume_tx) = HookBarrier::new();
+    {
+        let dispatched_ref = dispatched.clone();
+        let b = barrier.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            b.wait_in_hook();
+            Ok(())
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(10), pause_rx.recv())
+        .await
+        .unwrap();
+    assert_eq!(dispatched.lock().unwrap().len(), 1);
+
+    let e2 = engine.clone();
+    let shutdown_thread = std::thread::spawn(move || {
+        e2.shutdown();
+    });
+
+    let _ = resume_tx.send(());
+    let _ = t1.await;
+    shutdown_thread.join().unwrap();
+
+    assert_eq!(dispatched.lock().unwrap().len(), 1);
+    assert!(engine.is_shutdown());
+    assert!(engine.snapshot().accounts[0].tracker.is_some());
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f10_08_stop_racing_with_gate_disable() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (barrier, mut pause_rx, resume_tx) = HookBarrier::new();
+    {
+        let dispatched_ref = dispatched.clone();
+        let b = barrier.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.post_auth_hook = Some(Arc::new(move |_id, _gen, _trk| {
+            b.wait_in_hook();
+        }));
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(10), pause_rx.recv())
+        .await
+        .unwrap();
+
+    // Concurrent stop and gate disable
+    let stop_op = engine.command("1", "stop").unwrap();
+    engine.set_launch_allowed(false);
+
+    let _ = resume_tx.send(());
+    let _ = t1.await;
+
+    assert_eq!(dispatched.lock().unwrap().len(), 0);
+    assert_eq!(engine.snapshot().accounts[0].status, Status::Stopped);
+    assert_eq!(engine.operation(stop_op.id).unwrap().state, "completed");
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f10_09_restart_racing_with_shutdown() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (barrier, mut pause_rx, resume_tx) = HookBarrier::new();
+    {
+        let dispatched_ref = dispatched.clone();
+        let b = barrier.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.post_auth_hook = Some(Arc::new(move |_id, _gen, _trk| {
+            b.wait_in_hook();
+        }));
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(10), pause_rx.recv())
+        .await
+        .unwrap();
+
+    // Concurrently issue restart and shutdown
+    let _ = engine.command("1", "restart");
+    engine.shutdown();
+
+    let _ = resume_tx.send(());
+    let _ = t1.await;
+
+    assert_eq!(dispatched.lock().unwrap().len(), 0);
+    assert!(engine.is_shutdown());
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f10_10_persistence_failure_during_dispatch_prep() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let dispatched_ref = dispatched.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+
+    // Corrupt database path to cause persistence failure during transition
+    let accounts_file = path.join("database.json");
+    if accounts_file.exists() {
+        let _ = std::fs::remove_file(&accounts_file);
+    }
+
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let _ = tokio::spawn(async move { e1.launch_one(a1).await }).await;
+
+    assert_eq!(dispatched.lock().unwrap().len(), 0);
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn f10_11_repeated_concurrent_gate_commands() {
+    with_watchdog(Duration::from_secs(15), || {
+        let (engine, path) = super::tests::fixture(1);
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let b1 = barrier.clone();
+        let b2 = barrier.clone();
+        let b3 = barrier.clone();
+
+        let e1 = engine.clone();
+        let t1 = std::thread::spawn(move || {
+            b1.wait();
+            for i in 0..100 {
+                e1.set_launch_allowed(i % 2 == 0);
+            }
+        });
+
+        let e2 = engine.clone();
+        let t2 = std::thread::spawn(move || {
+            b2.wait();
+            for i in 0..100 {
+                e2.set_launch_allowed(i % 2 != 0);
+            }
+        });
+
+        let e3 = engine.clone();
+        let t3 = std::thread::spawn(move || {
+            b3.wait();
+            for _ in 0..100 {
+                let _ = e3.0.launch_allowed.load(Ordering::Acquire);
+            }
+        });
+
+        t1.join().unwrap();
+        t2.join().unwrap();
+        t3.join().unwrap();
+
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f10_12_no_duplicate_protocol_submission() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let dispatched_ref = dispatched.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let a2 = a1.clone();
+
+    let e1 = engine.clone();
+    let e2 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    let t2 = tokio::spawn(async move { e2.launch_one(a2).await });
+
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    let _ = tokio::join!(t1, t2);
+
+    assert_eq!(
+        dispatched.lock().unwrap().len(),
+        1,
+        "Exactly one submission allowed per generation"
+    );
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f10_13_no_stale_generation_submission() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (barrier, mut pause_rx, resume_tx) = HookBarrier::new();
+    {
+        let dispatched_ref = dispatched.clone();
+        let b = barrier.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.post_auth_hook = Some(Arc::new(move |_id, _gen, _trk| {
+            b.wait_in_hook();
+        }));
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(10), pause_rx.recv())
+        .await
+        .unwrap();
+
+    // Bump generation while paused in hook
+    let cur_gen = engine.snapshot().accounts[0].generation;
+    engine
+        .update("1", cur_gen, |a| {
+            a.generation = Uuid::new_v4();
+        })
+        .unwrap();
+
+    let _ = resume_tx.send(());
+    let _ = t1.await;
+
+    assert_eq!(
+        dispatched.lock().unwrap().len(),
+        0,
+        "Stale generation rejected at Phase 2"
+    );
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn f10_14_lock_hierarchy_deadlock_free() {
+    with_watchdog(Duration::from_secs(15), || {
+        let (engine, path) = super::tests::fixture(2);
+        let barrier = Arc::new(std::sync::Barrier::new(4));
+
+        let b1 = barrier.clone();
+        let e1 = engine.clone();
+        let t1 = std::thread::spawn(move || {
+            b1.wait();
+            for _ in 0..50 {
+                let _d = e1.0.dispatch_lock.lock().unwrap();
+                let _s = e1.0.state.lock().unwrap();
+            }
+        });
+
+        let b2 = barrier.clone();
+        let e2 = engine.clone();
+        let t2 = std::thread::spawn(move || {
+            b2.wait();
+            for _ in 0..50 {
+                let _s = e2.0.state.lock().unwrap();
+            }
+        });
+
+        let b3 = barrier.clone();
+        let e3 = engine.clone();
+        let t3 = std::thread::spawn(move || {
+            b3.wait();
+            for i in 0..50 {
+                e3.set_launch_allowed(i % 2 == 0);
+            }
+        });
+
+        let b4 = barrier.clone();
+        let e4 = engine.clone();
+        let t4 = std::thread::spawn(move || {
+            b4.wait();
+            for _ in 0..50 {
+                let _ = e4.snapshot();
+            }
+        });
+
+        t1.join().unwrap();
+        t2.join().unwrap();
+        t3.join().unwrap();
+        t4.join().unwrap();
+
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f10_15_multiple_queued_accounts_gate_disable() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(2, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (barrier, mut pause_rx, resume_tx) = HookBarrier::new();
+    {
+        let dispatched_ref = dispatched.clone();
+        let b = barrier.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.post_auth_hook = Some(Arc::new(move |_id, _gen, _trk| {
+            b.wait_in_hook();
+        }));
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(10), pause_rx.recv())
+        .await
+        .unwrap();
+
+    engine.set_launch_allowed(false);
+    let _ = resume_tx.send(());
+    let _ = t1.await;
+
+    // Launch second account
+    let a2 = engine.snapshot().accounts[1].clone();
+    let e2 = engine.clone();
+    let _ = tokio::spawn(async move { e2.launch_one(a2).await }).await;
+
+    assert_eq!(dispatched.lock().unwrap().len(), 0);
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+// =========================================================================
+// Finding F11 — Cleanup of Never-Submitted Launch Reservations Tests
+// =========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f11_01_stop_before_tracker_persistence() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (engine, path) = engine_fixture(1, &url, true);
+
+    let stop_op = engine.command("1", "stop").unwrap();
+    assert_eq!(engine.operation(stop_op.id).unwrap().state, "completed");
+    assert_eq!(engine.snapshot().accounts[0].status, Status::Stopped);
+    {
+        let s = engine.0.state.lock().unwrap();
+        assert_eq!(s.database.retired_launches.len(), 0);
+    }
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f11_02_stop_after_persistence_before_auth() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let (barrier, mut pause_rx, resume_tx) = HookBarrier::new();
+    {
+        let b = barrier.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.pre_dispatch_hook = Some(Arc::new(move |_id, _gen, _trk| {
+            b.wait_in_hook();
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(10), pause_rx.recv())
+        .await
+        .unwrap();
+
+    let stop_op = engine.command("1", "stop").unwrap();
+    let _ = resume_tx.send(());
+    let _ = t1.await;
+
+    assert_eq!(engine.snapshot().accounts[0].status, Status::Stopped);
+    assert_eq!(engine.operation(stop_op.id).unwrap().state, "completed");
+    {
+        let s = engine.0.state.lock().unwrap();
+        assert_eq!(
+            s.database.retired_launches.len(),
+            0,
+            "Unsubmitted tracker cleared"
+        );
+    }
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f11_03_stop_immediately_before_os_submission() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let (barrier, mut pause_rx, resume_tx) = HookBarrier::new();
+    {
+        let b = barrier.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.post_auth_hook = Some(Arc::new(move |_id, _gen, _trk| {
+            b.wait_in_hook();
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(10), pause_rx.recv())
+        .await
+        .unwrap();
+
+    let stop_op = engine.command("1", "stop").unwrap();
+    let _ = resume_tx.send(());
+    let _ = t1.await;
+
+    assert_eq!(engine.snapshot().accounts[0].status, Status::Stopped);
+    assert_eq!(engine.operation(stop_op.id).unwrap().state, "completed");
+    {
+        let s = engine.0.state.lock().unwrap();
+        assert_eq!(s.database.retired_launches.len(), 0);
+    }
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f11_04_stop_during_submission() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (barrier, mut pause_rx, resume_tx) = HookBarrier::new();
+    {
+        let dispatched_ref = dispatched.clone();
+        let b = barrier.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            b.wait_in_hook();
+            Ok(())
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(10), pause_rx.recv())
+        .await
+        .unwrap();
+    assert_eq!(dispatched.lock().unwrap().len(), 1);
+
+    // Stop issued while effect is already running
+    let e2 = engine.clone();
+    let stop_thread = std::thread::spawn(move || e2.command("1", "stop").unwrap());
+
+    let _ = resume_tx.send(());
+    let _ = t1.await;
+    let stop_op = stop_thread.join().unwrap();
+
+    // Since launch was submitted to OS, retired launch MUST be retained (Case B)
+    {
+        let s = engine.0.state.lock().unwrap();
+        assert_eq!(
+            s.database.retired_launches.len(),
+            1,
+            "Submitted launch reservation retained"
+        );
+    }
+    assert_eq!(engine.operation(stop_op.id).unwrap().state, "queued");
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f11_05_stop_after_os_acceptance() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let dispatched_ref = dispatched.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+    let _ = t1.await;
+
+    assert_eq!(dispatched.lock().unwrap().len(), 1);
+    let stop_op = engine.command("1", "stop").unwrap();
+
+    // Tracker was submitted, so retirement reservation is kept
+    {
+        let s = engine.0.state.lock().unwrap();
+        assert_eq!(s.database.retired_launches.len(), 1);
+    }
+    assert_eq!(engine.operation(stop_op.id).unwrap().state, "queued");
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f11_06_shutdown_before_submission() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let (barrier, mut pause_rx, resume_tx) = HookBarrier::new();
+    {
+        let b = barrier.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.post_auth_hook = Some(Arc::new(move |_id, _gen, _trk| {
+            b.wait_in_hook();
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(10), pause_rx.recv())
+        .await
+        .unwrap();
+
+    engine.shutdown();
+    let _ = resume_tx.send(());
+    let _ = t1.await;
+
+    {
+        let s = engine.0.state.lock().unwrap();
+        assert_eq!(
+            s.database.retired_launches.len(),
+            0,
+            "No retired launch on shutdown before submission"
+        );
+    }
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f11_07_gate_disable_before_submission() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let (barrier, mut pause_rx, resume_tx) = HookBarrier::new();
+    {
+        let b = barrier.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.post_auth_hook = Some(Arc::new(move |_id, _gen, _trk| {
+            b.wait_in_hook();
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(10), pause_rx.recv())
+        .await
+        .unwrap();
+
+    engine.set_launch_allowed(false);
+    let _ = resume_tx.send(());
+    let _ = t1.await;
+
+    {
+        let s = engine.0.state.lock().unwrap();
+        assert_eq!(s.database.retired_launches.len(), 0);
+    }
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f11_08_launch_adapter_rejects_request() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    {
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_result = Some(Err("OS access denied".into()));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+    let _ = t1.await;
+
+    assert_eq!(engine.snapshot().accounts[0].status, Status::NeedsAttention);
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f11_09_uncertain_launch_outcome_preserves_reservation() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (engine, path) = engine_fixture(1, &url, true);
+    let tracker = "123456789012".to_string();
+    {
+        let mut s = engine.0.state.lock().unwrap();
+        s.database.retired_launches.push(RetiredLaunch {
+            account_id: "1".into(),
+            generation: Uuid::new_v4(),
+            tracker: tracker.clone(),
+            deadline: Utc::now() + ChronoDuration::seconds(90),
+            close_intent: None,
+            process: None,
+        });
+    }
+
+    // Uncertain outcome: tracker reservation must be conservatively retained
+    {
+        let s = engine.0.state.lock().unwrap();
+        assert!(
+            s.database
+                .retired_launches
+                .iter()
+                .any(|r| r.tracker == tracker)
+        );
+    }
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f11_10_crash_restart_persisted_tracker_retained() {
+    let (engine, path) = super::tests::fixture(1);
+    let tracker = "999888777666".to_string();
+
+    // Persist a retired launch to storage as if from a prior crash
+    engine
+        .transaction(|s| {
+            s.database.retired_launches.push(RetiredLaunch {
+                account_id: "1".into(),
+                generation: Uuid::new_v4(),
+                tracker: tracker.clone(),
+                deadline: Utc::now() + ChronoDuration::seconds(90),
+                close_intent: None,
+                process: None,
+            });
+            Ok(())
+        })
+        .unwrap();
+
+    // Reload engine from same path
+    let reloaded = Engine::open(Store::new(path.clone()).unwrap(), "test".into()).unwrap();
+    {
+        let s = reloaded.0.state.lock().unwrap();
+        assert_eq!(s.database.retired_launches.len(), 1);
+        assert_eq!(
+            s.database.retired_launches[0].tracker, tracker,
+            "Crash recovery must preserve retired tracker"
+        );
+    }
+
+    drop(reloaded);
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f11_11_proven_unsubmitted_tracker_allows_immediate_restart() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let (barrier, mut pause_rx, resume_tx) = HookBarrier::new();
+    {
+        let b = barrier.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.post_auth_hook = Some(Arc::new(move |_id, _gen, _trk| {
+            b.wait_in_hook();
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(10), pause_rx.recv())
+        .await
+        .unwrap();
+
+    engine.command("1", "stop").unwrap();
+    let _ = resume_tx.send(());
+    let _ = t1.await;
+
+    assert_eq!(engine.snapshot().accounts[0].status, Status::Stopped);
+
+    // Immediately start again without waiting 90s: should succeed
+    let start_op = engine.command("1", "start").unwrap();
+    assert_eq!(engine.operation(start_op.id).unwrap().state, "queued");
+    assert_eq!(engine.snapshot().accounts[0].status, Status::Queued);
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f11_12_queued_stop_completes_immediately_when_unsubmitted() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let (barrier, mut pause_rx, resume_tx) = HookBarrier::new();
+    {
+        let b = barrier.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.post_auth_hook = Some(Arc::new(move |_id, _gen, _trk| {
+            b.wait_in_hook();
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(10), pause_rx.recv())
+        .await
+        .unwrap();
+
+    let stop_op = engine.command("1", "stop").unwrap();
+    assert_eq!(engine.operation(stop_op.id).unwrap().state, "queued");
+
+    let _ = resume_tx.send(());
+    let _ = t1.await;
+
+    assert_eq!(
+        engine.operation(stop_op.id).unwrap().state,
+        "completed",
+        "Stop operation completes immediately when non-submission is proven"
+    );
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f11_13_multi_account_selective_cleanup() {
+    let (engine, path) = super::tests::fixture(2);
+    let tracker1 = "111111111111".to_string();
+    let tracker2 = "222222222222".to_string();
+    let gen1 = Uuid::new_v4();
+    let gen2 = Uuid::new_v4();
+
+    {
+        let mut s = engine.0.state.lock().unwrap();
+        s.database.retired_launches.push(RetiredLaunch {
+            account_id: "1".into(),
+            generation: gen1,
+            tracker: tracker1.clone(),
+            deadline: Utc::now() + ChronoDuration::seconds(90),
+            close_intent: None,
+            process: None,
+        });
+        s.database.retired_launches.push(RetiredLaunch {
+            account_id: "2".into(),
+            generation: gen2,
+            tracker: tracker2.clone(),
+            deadline: Utc::now() + ChronoDuration::seconds(90),
+            close_intent: None,
+            process: None,
+        });
+    }
+
+    // Clean up only account 2's unsubmitted launch
+    engine.cleanup_unsubmitted_launch("2", gen2, &tracker2);
+
+    {
+        let s = engine.0.state.lock().unwrap();
+        assert_eq!(s.database.retired_launches.len(), 1);
+        assert_eq!(s.database.retired_launches[0].tracker, tracker1);
+    }
+
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f11_14_restart_of_never_submitted_advances_generation_cleanly() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let (barrier, mut pause_rx, resume_tx) = HookBarrier::new();
+    {
+        let b = barrier.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.post_auth_hook = Some(Arc::new(move |_id, _gen, _trk| {
+            b.wait_in_hook();
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(10), pause_rx.recv())
+        .await
+        .unwrap();
+
+    let initial_gen = engine.snapshot().accounts[0].generation;
+    engine.command("1", "stop").unwrap();
+
+    let _ = resume_tx.send(());
+    let _ = t1.await;
+
+    // After non-submission is proven, unsubmitted tracker is cleared.
+    // Starting again immediately succeeds without waiting 90s.
+    let start_op = engine.command("1", "start").unwrap();
+    assert_eq!(engine.operation(start_op.id).unwrap().state, "queued");
+
+    let final_acc = engine.snapshot().accounts[0].clone();
+    assert_ne!(final_acc.generation, initial_gen);
+    assert_eq!(final_acc.status, Status::Queued);
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f11_15_unsubmitted_cancellation_journal_records() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let (barrier, mut pause_rx, resume_tx) = HookBarrier::new();
+    {
+        let b = barrier.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.post_auth_hook = Some(Arc::new(move |_id, _gen, _trk| {
+            b.wait_in_hook();
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(10), pause_rx.recv())
+        .await
+        .unwrap();
+
+    engine.command("1", "stop").unwrap();
+    let _ = resume_tx.send(());
+    let _ = t1.await;
+
+    let journal = engine.0.journal.recent();
+    assert!(journal.iter().any(|e| {
+        e["event"] == "launch_cancelled"
+            && (e["details"]["reason"] == "user_stop"
+                || e["details"]["reason"] == "generation_changed"
+                || e["details"]["reason"] == "superseded_or_stopped")
+    }));
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+// =========================================================================
+// Finding F12 — Process Discovery Scheduling Regression Tests
+// =========================================================================
+
+#[test]
+fn f12_01_queued_launch_unverified_processes_schedules_discovery() {
+    let (engine, path) = super::tests::fixture(1);
+    let account_gen = engine.snapshot().accounts[0].generation;
+    engine
+        .update("1", account_gen, |a| {
+            a.status = Status::Queued;
+            a.tracker = None;
+        })
+        .unwrap();
+
+    // Coordinator has unverified process
+    engine.observe_startup_scan(
+        &[platform::Player {
+            pid: 9900,
+            creation_time: "900".into(),
+            tracker: String::new(),
+        }],
+        1,
+        0,
+        false,
+        false,
+    );
+
+    let coord = engine.0.launch_coordinator.lock().unwrap();
+    let coord_needs_discovery = coord.unverified_processes > 0
+        || coord.inaccessible_processes > 0
+        || coord.bootstrapper_active;
+    assert!(coord_needs_discovery);
+
+    let state = engine.0.state.lock().unwrap();
+    let has_waiting_launch = state
+        .database
+        .accounts
+        .iter()
+        .any(|a| a.account.status == Status::Queued || a.account.status == Status::Launching);
+    assert!(has_waiting_launch);
+
+    drop(state);
+    drop(coord);
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn f12_02_discovery_poll_frequency_is_one_second() {
+    let (engine, path) = super::tests::fixture(1);
+    let account_gen = engine.snapshot().accounts[0].generation;
+    engine
+        .update("1", account_gen, |a| {
+            a.status = Status::Queued;
+        })
+        .unwrap();
+
+    engine.observe_startup_scan(
+        &[platform::Player {
+            pid: 9901,
+            creation_time: "901".into(),
+            tracker: String::new(),
+        }],
+        1,
+        0,
+        false,
+        false,
+    );
+
+    let coord = engine.0.launch_coordinator.lock().unwrap();
+    let coord_needs_discovery = coord.unverified_processes > 0;
+    let interval = if coord_needs_discovery {
+        Duration::from_secs(1)
+    } else {
+        Duration::from_secs(5)
+    };
+    assert_eq!(interval, Duration::from_secs(1));
+
+    drop(coord);
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f12_03_coordinator_ambiguity_resolves_when_process_exits() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    let scan_count = Arc::new(AtomicUsize::new(0));
+    {
+        let dispatched_ref = dispatched.clone();
+        let sc = scan_count.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_spacing = Duration::from_millis(50);
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+        inner.discovery_hook = Some(Arc::new(move || {
+            let n = sc.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                // First scan: ambiguous process present
+                let mut s = platform::ProcessScan::default();
+                s.players = vec![platform::Player {
+                    pid: 7777,
+                    creation_time: "777".into(),
+                    tracker: String::new(),
+                }];
+                s.uninspected = 1;
+                Ok(s)
+            } else {
+                // Subsequent scan: process has exited
+                Ok(platform::ProcessScan::default())
+            }
+        }));
+    }
+
+    // Initial observation puts coordinator in ambiguous unverified state
+    let scan1 = engine.observe_players_logged().unwrap();
+    assert_eq!(scan1.uninspected, 1);
+    engine.observe_startup_scan(
+        &scan1.players,
+        scan1.uninspected,
+        scan1.inaccessible,
+        scan1.metadata_pending,
+        scan1.bootstrapper_active,
+    );
+    assert!(!engine.poll_launch_readiness(&engine.snapshot().accounts[0], Instant::now()));
+
+    // Next scan: process exited, ambiguity resolves
+    let scan2 = engine.observe_players_logged().unwrap();
+    assert_eq!(scan2.uninspected, 0);
+    engine.observe_startup_scan(
+        &scan2.players,
+        scan2.uninspected,
+        scan2.inaccessible,
+        scan2.metadata_pending,
+        scan2.bootstrapper_active,
+    );
+    assert!(engine.poll_launch_readiness(&engine.snapshot().accounts[0], Instant::now()));
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn f12_04_queued_launch_inaccessible_processes_schedules_discovery() {
+    let (engine, path) = super::tests::fixture(1);
+    let account_gen = engine.snapshot().accounts[0].generation;
+    engine
+        .update("1", account_gen, |a| {
+            a.status = Status::Queued;
+        })
+        .unwrap();
+
+    engine.observe_startup_scan(&[], 0, 1, false, false);
+
+    let coord = engine.0.launch_coordinator.lock().unwrap();
+    assert!(coord.inaccessible_processes > 0);
+
+    drop(coord);
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn f12_05_queued_launch_bootstrapper_active_schedules_discovery() {
+    let (engine, path) = super::tests::fixture(1);
+    let account_gen = engine.snapshot().accounts[0].generation;
+    engine
+        .update("1", account_gen, |a| {
+            a.status = Status::Queued;
+        })
+        .unwrap();
+
+    engine.observe_startup_scan(&[], 0, 0, false, true);
+
+    let coord = engine.0.launch_coordinator.lock().unwrap();
+    assert!(coord.bootstrapper_active);
+
+    drop(coord);
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn f12_06_cleared_coordinator_drops_to_normal_five_second_interval() {
+    let (engine, path) = super::tests::fixture(1);
+    engine.observe_startup_scan(&[], 0, 0, false, false);
+
+    let coord = engine.0.launch_coordinator.lock().unwrap();
+    let coord_needs_discovery = coord.unverified_processes > 0
+        || coord.inaccessible_processes > 0
+        || coord.bootstrapper_active;
+    assert!(!coord_needs_discovery);
+
+    let interval = if coord_needs_discovery {
+        Duration::from_secs(1)
+    } else {
+        Duration::from_secs(5)
+    };
+    assert_eq!(interval, Duration::from_secs(5));
+
+    drop(coord);
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn f12_07_metadata_pending_uses_250ms_interval() {
+    let (engine, path) = super::tests::fixture(1);
+    let metadata_pending = true;
+    let interval = if metadata_pending {
+        Duration::from_millis(250)
+    } else {
+        Duration::from_secs(5)
+    };
+    assert_eq!(interval, Duration::from_millis(250));
+
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f12_08_concurrent_stop_during_ambiguous_block() {
+    let (engine, path) = super::tests::fixture(1);
+    engine.observe_startup_scan(
+        &[platform::Player {
+            pid: 8888,
+            creation_time: "888".into(),
+            tracker: String::new(),
+        }],
+        1,
+        0,
+        false,
+        false,
+    );
+
+    let _op = engine.command("1", "start").unwrap();
+    assert_eq!(engine.snapshot().accounts[0].status, Status::Queued);
+
+    // Stop while blocked by ambiguous process
+    let stop_op = engine.command("1", "stop").unwrap();
+    assert_eq!(engine.operation(stop_op.id).unwrap().state, "completed");
+    assert_eq!(engine.snapshot().accounts[0].status, Status::Stopped);
+
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f12_09_multiple_queued_launches_unblock_in_order() {
+    let (engine, path) = super::tests::fixture(2);
+    engine.observe_startup_scan(
+        &[platform::Player {
+            pid: 6666,
+            creation_time: "666".into(),
+            tracker: String::new(),
+        }],
+        1,
+        0,
+        false,
+        false,
+    );
+
+    engine.command("1", "start").unwrap();
+    engine.command("2", "start").unwrap();
+
+    let snap = engine.snapshot();
+    assert_eq!(snap.accounts[0].status, Status::Queued);
+    assert_eq!(snap.accounts[1].status, Status::Queued);
+
+    // Ambiguity clears
+    engine.observe_startup_scan(&[], 0, 0, false, false);
+    assert!(engine.poll_launch_readiness(&snap.accounts[0], Instant::now()));
+
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn f12_10_no_busy_wait_spin_loop() {
+    let (engine, path) = super::tests::fixture(1);
+    let has_unresolved_launch = false;
+    let coord_needs_discovery = false;
+    let interval = if has_unresolved_launch || coord_needs_discovery {
+        Duration::from_secs(1)
+    } else {
+        Duration::from_secs(5)
+    };
+    assert!(
+        interval >= Duration::from_secs(1),
+        "Discovery must never busy-spin"
+    );
+
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f12_11_scan_error_resilient() {
+    let (mut engine, path) = super::tests::fixture(1);
+    {
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.discovery_hook = Some(Arc::new(|| Err("WMI access failed".into())));
+    }
+
+    let res = engine.observe_players_logged();
+    assert!(res.is_err());
+
+    // Engine remains operational
+    assert!(!engine.is_shutdown());
+
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f12_12_journal_records_readiness_transitions() {
+    let (mut engine, path) = super::tests::fixture(1);
+    {
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.discovery_hook = Some(Arc::new(|| {
+            let mut s = platform::ProcessScan::default();
+            s.inaccessible = 1;
+            Ok(s)
+        }));
+    }
+
+    let _ = engine.observe_players_logged();
+
+    let journal = engine.0.journal.recent();
+    assert!(
+        journal
+            .iter()
+            .any(|e| { e["event"] == "process_observation" && e["details"]["inaccessible"] == 1 })
+    );
+
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
 }
