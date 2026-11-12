@@ -193,7 +193,7 @@ def check_branch_flow(event, call):
     base, head = pr['base'], pr['head']
     branch = head['ref']
     if base['ref'] == 'dev':
-        require(branch.startswith(('feature/', 'codex/')), 'Feature/codex branches target dev')
+        require(branch.startswith(('feature/', 'fix/', 'codex/')), 'Feature/fix/codex branches target dev')
         return 'development'
     require(base['ref'] == 'main' and head['repo']['full_name'] == REPO, 'Official main PR required')
     if branch == 'dev':

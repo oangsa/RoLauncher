@@ -2175,7 +2175,7 @@ impl Engine {
                     #[cfg(not(windows))]
                     {
                         let players = platform::players()?;
-                        Ok::<_, String>((players.clone(), 0usize, false, Ok(players)))
+                        Ok::<_, String>((players.clone(), 0usize, false, Ok::<_, String>(players)))
                     }
                 }));
                 last_discovery = Instant::now();

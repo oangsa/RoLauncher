@@ -297,6 +297,8 @@ class HotfixTests(unittest.TestCase):
 
     def test_branch_names_grant_admission_only_after_scope_evidence(self):
         from hotfix_policy import check_branch_flow
+        for prefix in ('feature/test', 'fix/test', 'codex/test'):
+            self.assertEqual(check_branch_flow(dict(pull_request=dict(head=dict(ref=prefix), base=dict(ref='dev'))), None), 'development')
         for fault in ('fork', 'branch', 'application', 'intent', 'version'):
             with self.subTest(fault=fault):
                 api = HotfixFixture()
