@@ -1,3 +1,10 @@
+1.9.2 — Upcoming release
+
+- Keep multiple accounts launching and attaching reliably without dropping into stuck Reconnecting states.
+- Allow managed account close, restart, and recovery to proceed even when external Roblox processes are running.
+- Free unsubmitted launch cancellations immediately so accounts can restart without waiting 90 seconds.
+- Speed up queued launch dispatch by checking client discovery every second while waiting for process ambiguity to clear.
+
 1.9.1 — 2026-11-10
 
 - Close a verified Windows Home or tray client after a game ends, respecting the account’s Auto Rejoin setting.

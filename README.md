@@ -1,4 +1,4 @@
-# RoLauncher 1.9.1
+# RoLauncher 1.9.2
 
 Manage Roblox accounts, save destinations, and rejoin disconnected sessions.
 RoLauncher is a native WinUI 3 desktop application for Windows.
