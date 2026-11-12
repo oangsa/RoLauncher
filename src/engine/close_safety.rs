@@ -269,9 +269,27 @@ impl Engine {
                 let current = account_mut(state, &expected.id)?;
                 current.status = Status::NeedsAttention;
                 current.last_error = Some("Launch ownership is ambiguous; client preserved".into());
+                let opid = current.operation_id;
+                let error = current.last_error.clone();
+                if let Some(op) = opid.and_then(|id| state.operations.get_mut(&id)) {
+                    op.state = "failed".into();
+                    op.error = error;
+                }
                 return Ok(());
             }
-            attach_verified_player(account_mut(state, &expected.id)?, identity);
+            let current = account_mut(state, &expected.id)?;
+            attach_verified_player(current, identity.clone());
+            self.0.journal.record(
+                "launch_ownership_verified",
+                serde_json::json!({
+                    "account": crate::diagnostics::account(current),
+                    "operation_id": current.operation_id,
+                    "generation": current.generation,
+                    "tracker": identity.tracker.parse::<u64>().ok(),
+                    "process": crate::diagnostics::process(&identity),
+                    "stage": "ownership_verified",
+                }),
+            );
             Ok(())
         })
     }
