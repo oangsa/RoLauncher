@@ -178,6 +178,7 @@ async fn accepted_protocol_without_a_process_retains_tracking_and_blocks_duplica
     let running = engine.clone();
     let task = tokio::spawn(async move { running.launch_one(account).await });
     wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
     state.release.notify_waiters();
     task.await.unwrap();
     let a = engine.snapshot().accounts[0].clone();
@@ -799,6 +800,7 @@ async fn protocol_handoff_failure_marks_operation_failed_and_partial_profile_rep
     let running = engine.clone();
     let task = tokio::spawn(async move { running.launch_one(first).await });
     wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
     state.release.notify_waiters();
     task.await.unwrap();
     let snap = engine.snapshot();
@@ -1218,6 +1220,7 @@ async fn unverified_process_exits_before_verification_and_ambiguous_handoff_bloc
     let a1 = accounts[0].clone();
     let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
     wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
     state.release.notify_waiters();
     t1.await.unwrap();
 
@@ -1355,6 +1358,7 @@ async fn cancel_first_launch_restart_unresolved_and_engine_shutdown_during_readi
     let a1 = accounts[0].clone();
     let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
     wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
     state.release.notify_waiters();
     t1.await.unwrap();
 
@@ -1431,6 +1435,7 @@ async fn concurrent_poll_launch_readiness_and_attach_player_no_deadlock() {
     let a1 = accounts[0].clone();
     let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
     wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
     state.release.notify_waiters();
     t1.await.unwrap();
 
@@ -1517,6 +1522,7 @@ async fn inaccessible_process_defers_launch_and_blocks_ambiguous_handoff() {
     let a1 = accounts[0].clone();
     let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
     wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
     state.release.notify_waiters();
     t1.await.unwrap();
 
@@ -1618,6 +1624,7 @@ async fn ambiguous_unverified_process_recovers_after_timeout() {
     let a1 = accounts[0].clone();
     let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
     wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
     state.release.notify_waiters();
     tokio::time::sleep(Duration::from_millis(25)).await;
 
@@ -1627,15 +1634,914 @@ async fn ambiguous_unverified_process_recovers_after_timeout() {
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert_eq!(dispatched.lock().unwrap().len(), 0);
 
-    // At 36s (past 35s startup_verification_timeout), the stale ambiguous process must timeout,
-    // allowing Account 1 to dispatch rather than starving the queue indefinitely.
+    // At 36s (past 35s startup_verification_timeout), the readiness timeout expires.
+    // Time elapsed MUST NOT grant launch authority while the process remains ambiguous.
+    // Instead, the waiting account transitions to Status::NeedsAttention with an explicit timeout error.
     *now_cell.lock().unwrap() = base_instant + Duration::from_secs(36);
     engine.0.wake.notify_waiters();
     tokio::time::timeout(Duration::from_secs(2), t1)
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(
+        dispatched.lock().unwrap().len(),
+        0,
+        "ambiguous uninspected process must never grant launch authority on timeout"
+    );
+    let snap = engine.snapshot();
+    assert_eq!(snap.accounts[0].status, Status::NeedsAttention);
+    assert_eq!(
+        snap.accounts[0].last_error.as_deref(),
+        Some(STARTUP_AMBIGUOUS_TIMEOUT_ERROR)
+    );
+    assert!(engine.0.journal.recent().iter().any(|e| {
+        e["event"] == "launch_ambiguous_process_timeout"
+            && e["details"]["reason"] == "unverified_roblox_process_timeout_exceeded"
+    }));
+
+    // Fresh sufficient evidence arrives: clean scan confirms the ambiguous process exited.
+    engine.observe_startup_scan(&[], 0, 0, false, false);
+
+    // Account 1 can now safely be retried via Start, dispatching without conflict.
+    let retry_op = engine.command("1", "start").unwrap();
+    assert_eq!(engine.operation(retry_op.id).unwrap().state, "queued");
+    let a1_retry = engine.snapshot().accounts[0].clone();
+    let e1_retry = engine.clone();
+    let t1_retry = tokio::spawn(async move { e1_retry.launch_one(a1_retry).await });
+    wait_for(&state.tickets, 2, &state.entered).await;
+    state.release.notify_waiters();
+    tokio::time::timeout(Duration::from_secs(2), t1_retry)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        dispatched.lock().unwrap().len(),
+        1,
+        "dispatches cleanly only after fresh complete discovery evidence resolves ambiguity"
+    );
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+fn with_watchdog<F, T>(timeout: Duration, f: F) -> T
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let res = f();
+        let _ = tx.send(res);
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(res) => {
+            let _ = worker.join();
+            res
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!(
+                "Test timed out after {:?}: potential deadlock detected across OS threads",
+                timeout
+            );
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("Worker thread panicked or disconnected");
+        }
+    }
+}
+
+// =========================================================================
+// Finding F7 — Stop/Shutdown vs OS Launch Race Regression Tests
+// =========================================================================
+
+#[derive(Clone)]
+struct HookBarrier {
+    pause_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    resume_rx: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
+}
+
+impl HookBarrier {
+    fn new() -> (
+        Self,
+        tokio::sync::mpsc::UnboundedReceiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (pause_tx, pause_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        (
+            Self {
+                pause_tx,
+                resume_rx: Arc::new(Mutex::new(resume_rx)),
+            },
+            pause_rx,
+            resume_tx,
+        )
+    }
+
+    fn wait_in_hook(&self) {
+        let _ = self.pause_tx.send(());
+        let _ = self
+            .resume_rx
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(10));
+    }
+}
+
+#[tokio::test]
+async fn f7_01_stop_immediately_before_tracker_persistence() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let dispatched_ref = dispatched.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+
+    // User Stop executed before ticket response and before tracker persistence
+    let stop_op = engine.command("1", "stop").unwrap();
+    assert_eq!(engine.operation(stop_op.id).unwrap().state, "completed");
+    assert_eq!(engine.snapshot().accounts[0].status, Status::Stopped);
+
+    state.release.notify_waiters();
+    t1.await.unwrap();
+
+    assert_eq!(
+        dispatched.lock().unwrap().len(),
+        0,
+        "Stop before tracker persistence must result in exactly 0 OS launch dispatches"
+    );
+    assert_eq!(engine.snapshot().accounts[0].status, Status::Stopped);
+    assert!(engine.snapshot().accounts[0].tracker.is_none());
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f7_02_stop_immediately_after_tracker_persistence() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (barrier, mut pause_rx, resume_tx) = HookBarrier::new();
+    {
+        let dispatched_ref = dispatched.clone();
+        let b = barrier.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.pre_dispatch_hook = Some(Arc::new(move |_id, _gen, _trk| {
+            b.wait_in_hook();
+        }));
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    // Paused exactly after tracker persistence, before protocol submission
+    tokio::time::timeout(Duration::from_secs(10), pause_rx.recv())
+        .await
+        .unwrap();
+    let tracker_before_stop = engine.snapshot().accounts[0].tracker.clone().unwrap();
+    assert_eq!(engine.snapshot().accounts[0].status, Status::Launching);
+
+    // Stop accepted while paused at dispatch boundary
+    let stop_op = engine.command("1", "stop").unwrap();
+    assert_eq!(engine.operation(stop_op.id).unwrap().state, "queued");
+    assert_eq!(engine.snapshot().accounts[0].status, Status::Stopping);
+    {
+        let s = engine.0.state.lock().unwrap();
+        assert_eq!(s.database.retired_launches.len(), 1);
+        assert_eq!(s.database.retired_launches[0].tracker, tracker_before_stop);
+    }
+
+    // Unblock the launch thread to attempt protocol submission
+    let _ = resume_tx.send(());
+    t1.await.unwrap();
+
+    // Invariant: Order A applied. Old generation dispatch authorization is denied. 0 OS launches.
+    assert_eq!(
+        dispatched.lock().unwrap().len(),
+        0,
+        "Stop linearizing before dispatch authorization must cancel the OS launch handoff"
+    );
+    assert_eq!(engine.snapshot().accounts[0].status, Status::Stopping);
+    assert!(engine.0.journal.recent().iter().any(|e| {
+        e["event"] == "launch_cancelled"
+            && (e["details"]["reason"] == "generation_changed"
+                || e["details"]["reason"] == "superseded_or_stopped"
+                || e["details"]["reason"] == "retired_launch_pending"
+                || e["details"]["reason"] == "user_stop")
+    }));
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f7_03_stop_immediately_before_protocol_submission() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (barrier, mut pause_rx, resume_tx) = HookBarrier::new();
+    {
+        let dispatched_ref = dispatched.clone();
+        let b = barrier.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.pre_dispatch_hook = Some(Arc::new(move |_id, _gen, _trk| {
+            b.wait_in_hook();
+        }));
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(10), pause_rx.recv())
+        .await
+        .unwrap();
+    engine.command("1", "stop").unwrap();
+    let _ = resume_tx.send(());
+    t1.await.unwrap();
+
+    assert_eq!(dispatched.lock().unwrap().len(), 0);
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f7_04_stop_during_protocol_submission() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (barrier, mut in_effect_rx, release_effect_tx) = HookBarrier::new();
+    {
+        let dispatched_ref = dispatched.clone();
+        let b = barrier.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            b.wait_in_hook();
+            Ok(())
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    // Wait until launch is inside the OS submission effect
+    tokio::time::timeout(Duration::from_secs(10), in_effect_rx.recv())
+        .await
+        .unwrap();
     assert_eq!(dispatched.lock().unwrap().len(), 1);
+
+    // Concurrently trigger Stop on a separate task while launch submission is in flight
+    let e_stop = engine.clone();
+    let stop_handle = tokio::spawn(async move { e_stop.command("1", "stop").unwrap() });
+
+    // Release the submission effect
+    let _ = release_effect_tx.send(());
+    t1.await.unwrap();
+    let stop_op = stop_handle.await.unwrap();
+
+    // Invariant: Order B applied. Protocol handoff linearized before Stop.
+    // The launch occurred (1 OS dispatch), Stop recognized the in-flight/submitted launch,
+    // operation remains queued waiting for process exit/retirement, status is Stopping.
+    assert_eq!(dispatched.lock().unwrap().len(), 1);
+    assert_eq!(engine.operation(stop_op.id).unwrap().state, "queued");
+    assert_eq!(engine.snapshot().accounts[0].status, Status::Stopping);
+    let retired = engine
+        .0
+        .state
+        .lock()
+        .unwrap()
+        .database
+        .retired_launches
+        .clone();
+    assert_eq!(retired.len(), 1);
+    assert_eq!(
+        retired[0].close_intent.as_ref().unwrap().reason,
+        CloseReason::UserStop
+    );
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn f7_05_stop_after_successful_os_acceptance() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let dispatched_ref = dispatched.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+    t1.await.unwrap();
+
+    assert_eq!(dispatched.lock().unwrap().len(), 1);
+    let stop_op = engine.command("1", "stop").unwrap();
+    assert_eq!(engine.operation(stop_op.id).unwrap().state, "queued");
+    assert_eq!(engine.snapshot().accounts[0].status, Status::Stopping);
+    assert_eq!(
+        engine
+            .0
+            .state
+            .lock()
+            .unwrap()
+            .database
+            .retired_launches
+            .len(),
+        1
+    );
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f7_06_restart_during_dispatch_boundary() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (barrier, mut pause_rx, resume_tx) = HookBarrier::new();
+    {
+        let dispatched_ref = dispatched.clone();
+        let b = barrier.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.pre_dispatch_hook = Some(Arc::new(move |_id, _gen, _trk| {
+            b.wait_in_hook();
+        }));
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(10), pause_rx.recv())
+        .await
+        .unwrap();
+    // Account 1 is stopped and restarted
+    engine.command("1", "stop").unwrap();
+    let gen_after_stop = engine.snapshot().accounts[0].generation;
+
+    // Unblock the old launch task
+    let _ = resume_tx.send(());
+    t1.await.unwrap();
+
+    // Old launch was cancelled. 0 OS launches for old generation.
+    assert_eq!(dispatched.lock().unwrap().len(), 0);
+    assert_eq!(engine.snapshot().accounts[0].generation, gen_after_stop);
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f7_07_shutdown_during_dispatch_boundary() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (barrier, mut pause_rx, resume_tx) = HookBarrier::new();
+    {
+        let dispatched_ref = dispatched.clone();
+        let b = barrier.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.pre_dispatch_hook = Some(Arc::new(move |_id, _gen, _trk| {
+            b.wait_in_hook();
+        }));
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(10), pause_rx.recv())
+        .await
+        .unwrap();
+    engine.shutdown();
+    let _ = resume_tx.send(());
+    t1.await.unwrap();
+
+    assert_eq!(dispatched.lock().unwrap().len(), 0);
+    assert!(engine.snapshot().accounts[0].tracker.is_none());
+    assert!(engine.0.journal.recent().iter().any(|e| {
+        e["event"] == "launch_cancelled"
+            && e["details"]["reason"] == "shutdown"
+            && e["details"]["shutdown"] == true
+    }));
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f7_08_launch_coordination_disabled_during_dispatch() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (barrier, mut pause_rx, resume_tx) = HookBarrier::new();
+    {
+        let dispatched_ref = dispatched.clone();
+        let b = barrier.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.pre_dispatch_hook = Some(Arc::new(move |_id, _gen, _trk| {
+            b.wait_in_hook();
+        }));
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(10), pause_rx.recv())
+        .await
+        .unwrap();
+    engine.set_launch_allowed(false);
+    let _ = resume_tx.send(());
+    t1.await.unwrap();
+
+    assert_eq!(dispatched.lock().unwrap().len(), 0);
+    assert!(engine.snapshot().accounts[0].tracker.is_none());
+    assert!(engine.0.journal.recent().iter().any(|e| {
+        e["event"] == "launch_coordination_unavailable"
+            && e["details"]["reason"] == "launch_coordination_unavailable"
+    }));
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn f7_09_persistence_failure_before_os_submission() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let dispatched_ref = dispatched.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+
+    // Create conflicting directory preventing store atomic rename during tracker persistence
+    std::fs::create_dir(path.join("accounts.json.tmp")).unwrap();
+
+    state.release.notify_waiters();
+    t1.await.unwrap();
+
+    assert_eq!(dispatched.lock().unwrap().len(), 0);
+    assert!(engine.snapshot().accounts[0].tracker.is_none());
+    assert!(engine.0.journal.recent().iter().any(|e| {
+        e["event"] == "launch_cancelled" && e["details"]["reason"] == "tracker_save_failed"
+    }));
+
+    server.abort();
+    drop(engine);
+    let _ = std::fs::remove_dir(path.join("accounts.json.tmp"));
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f7_10_duplicate_start_while_launch_in_flight() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (barrier, mut pause_rx, resume_tx) = HookBarrier::new();
+    {
+        let dispatched_ref = dispatched.clone();
+        let b = barrier.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.pre_dispatch_hook = Some(Arc::new(move |_id, _gen, _trk| {
+            b.wait_in_hook();
+        }));
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(10), pause_rx.recv())
+        .await
+        .unwrap();
+    // Duplicate start returns existing operation, does not duplicate or bump generation
+    let duplicate_op = engine.command("1", "start").unwrap();
+    assert_eq!(
+        duplicate_op.id,
+        engine.snapshot().accounts[0].operation_id.unwrap()
+    );
+
+    let _ = resume_tx.send(());
+    t1.await.unwrap();
+
+    assert_eq!(
+        dispatched.lock().unwrap().len(),
+        1,
+        "exactly one OS launch submitted"
+    );
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f7_11_stale_generation_after_cancellation() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (barrier, mut pause_rx, resume_tx) = HookBarrier::new();
+    {
+        let dispatched_ref = dispatched.clone();
+        let b = barrier.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.pre_dispatch_hook = Some(Arc::new(move |_id, _gen, _trk| {
+            b.wait_in_hook();
+        }));
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(10), pause_rx.recv())
+        .await
+        .unwrap();
+    engine.command("1", "stop").unwrap();
+    let _ = resume_tx.send(());
+    t1.await.unwrap();
+
+    assert_eq!(dispatched.lock().unwrap().len(), 0);
+    assert_eq!(engine.snapshot().accounts[0].status, Status::Stopping);
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn f7_12_late_process_appears_after_stop() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let dispatched_ref = dispatched.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+    t1.await.unwrap();
+
+    let tracker = engine.snapshot().accounts[0].tracker.clone().unwrap();
+    let stop_op = engine.command("1", "stop").unwrap();
+    assert_eq!(engine.operation(stop_op.id).unwrap().state, "queued");
+
+    // Late client appears matching the retired launch
+    let retired_before = engine
+        .0
+        .state
+        .lock()
+        .unwrap()
+        .database
+        .retired_launches
+        .clone();
+    assert_eq!(retired_before.len(), 1);
+    assert_eq!(retired_before[0].tracker, tracker);
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn f7_13_late_process_appears_after_restart() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let dispatched_ref = dispatched.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+    t1.await.unwrap();
+
+    let tracker = engine.snapshot().accounts[0].tracker.clone().unwrap();
+    engine.command("1", "stop").unwrap();
+    let retired = engine
+        .0
+        .state
+        .lock()
+        .unwrap()
+        .database
+        .retired_launches
+        .clone();
+    assert_eq!(retired.len(), 1);
+    assert_eq!(retired[0].tracker, tracker);
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f7_14_exact_tracker_remains_protected_after_cancellation() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let (barrier, mut pause_rx, resume_tx) = HookBarrier::new();
+    {
+        let b = barrier.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.pre_dispatch_hook = Some(Arc::new(move |_id, _gen, _trk| {
+            b.wait_in_hook();
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(10), pause_rx.recv())
+        .await
+        .unwrap();
+    let tracker = engine.snapshot().accounts[0].tracker.clone().unwrap();
+    engine.command("1", "stop").unwrap();
+    let _ = resume_tx.send(());
+    t1.await.unwrap();
+
+    let state_db = engine.0.state.lock().unwrap().database.clone();
+    assert!(
+        state_db
+            .retired_launches
+            .iter()
+            .any(|r| r.tracker == tracker),
+        "exact tracker must remain recorded in retired_launches to protect against rogue attachment"
+    );
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f7_15_stop_operation_never_reports_completion_while_unresolved_launch_can_emerge() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let (barrier, mut pause_rx, resume_tx) = HookBarrier::new();
+    {
+        let b = barrier.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.pre_dispatch_hook = Some(Arc::new(move |_id, _gen, _trk| {
+            b.wait_in_hook();
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(10), pause_rx.recv())
+        .await
+        .unwrap();
+    let stop_op = engine.command("1", "stop").unwrap();
+    assert_eq!(
+        engine.operation(stop_op.id).unwrap().state,
+        "queued",
+        "Stop must not report completed while an unresolved tracker exists"
+    );
+    let _ = resume_tx.send(());
+    t1.await.unwrap();
+
+    assert_eq!(
+        engine.operation(stop_op.id).unwrap().state,
+        "queued",
+        "Stop remains queued until retired launch exit or deadline"
+    );
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn f7_16_launch_stop_racing_across_separate_os_threads() {
+    with_watchdog(Duration::from_secs(15), || {
+        for _ in 0..5 {
+            let (engine, path) = super::tests::fixture(1);
+            let e1 = engine.clone();
+            let e2 = engine.clone();
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let b1 = barrier.clone();
+            let b2 = barrier.clone();
+
+            let t_launch = std::thread::spawn(move || {
+                b1.wait();
+                let _ = e1.command("1", "start");
+            });
+            let t_stop = std::thread::spawn(move || {
+                b2.wait();
+                let _ = e2.command("1", "stop");
+            });
+
+            t_launch.join().unwrap();
+            t_stop.join().unwrap();
+
+            let snap = engine.snapshot();
+            let a = &snap.accounts[0];
+            // Valid linearized outcomes: either Stopped or queued Start
+            assert!(
+                a.status == Status::Stopped
+                    || a.status == Status::Stopping
+                    || a.status == Status::Queued
+                    || a.status == Status::Launching
+            );
+
+            drop(engine);
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    });
+}
+
+// =========================================================================
+// Finding F8 — Ambiguous Process Timeout Must Not Grant Launch Authority
+// =========================================================================
+
+#[tokio::test]
+async fn f8_01_ambiguous_process_persists_beyond_35_seconds() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let base_instant = Instant::now();
+    let now_cell = Arc::new(Mutex::new(base_instant));
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let clock_ref = now_cell.clone();
+        let dispatched_ref = dispatched.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_spacing = Duration::from_secs(5);
+        inner.launch_readiness_timeout = Duration::from_secs(8);
+        inner.startup_verification_timeout = Duration::from_secs(35);
+        inner.clock = Some(Arc::new(move || *clock_ref.lock().unwrap()));
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    // Ambiguous uninspected process PID 8800 present
+    assert!(!engine.observe_startup_scan(
+        &[platform::Player {
+            pid: 8800,
+            creation_time: "800".into(),
+            tracker: String::new(),
+        }],
+        1,
+        0,
+        true,
+        false,
+    ));
+
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+    tokio::time::sleep(Duration::from_millis(25)).await;
+
+    // Check at 8s, 20s, 35s, 36s, 60s
+    for secs in [8, 20, 35, 36, 60] {
+        *now_cell.lock().unwrap() = base_instant + Duration::from_secs(secs);
+        engine.0.wake.notify_waiters();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            dispatched.lock().unwrap().len(),
+            0,
+            "must never dispatch while ambiguous process remains present at {secs}s"
+        );
+    }
+
+    t1.await.unwrap();
+    let snap = engine.snapshot();
+    assert_eq!(snap.accounts[0].status, Status::NeedsAttention);
+    assert_eq!(
+        snap.accounts[0].last_error.as_deref(),
+        Some(STARTUP_AMBIGUOUS_TIMEOUT_ERROR)
+    );
     assert!(engine.0.journal.recent().iter().any(|e| {
         e["event"] == "launch_ambiguous_process_timeout"
             && e["details"]["reason"] == "unverified_roblox_process_timeout_exceeded"
@@ -1644,4 +2550,968 @@ async fn ambiguous_unverified_process_recovers_after_timeout() {
     server.abort();
     drop(engine);
     std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn f8_02_inaccessible_process_persists_beyond_35_seconds() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let base_instant = Instant::now();
+    let now_cell = Arc::new(Mutex::new(base_instant));
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let clock_ref = now_cell.clone();
+        let dispatched_ref = dispatched.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_spacing = Duration::from_secs(5);
+        inner.launch_readiness_timeout = Duration::from_secs(8);
+        inner.startup_verification_timeout = Duration::from_secs(35);
+        inner.clock = Some(Arc::new(move || *clock_ref.lock().unwrap()));
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    // Inaccessible process present
+    assert!(!engine.observe_startup_scan(&[], 0, 1, false, false));
+
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    *now_cell.lock().unwrap() = base_instant + Duration::from_secs(36);
+    engine.0.wake.notify_waiters();
+    t1.await.unwrap();
+
+    assert_eq!(dispatched.lock().unwrap().len(), 0);
+    assert_eq!(engine.snapshot().accounts[0].status, Status::NeedsAttention);
+    assert!(engine.0.journal.recent().iter().any(|e| {
+        e["event"] == "launch_ambiguous_process_timeout"
+            && e["details"]["reason"] == "inaccessible_process_timeout_exceeded"
+    }));
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn f8_03_active_bootstrapper_persists_beyond_35_seconds() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let base_instant = Instant::now();
+    let now_cell = Arc::new(Mutex::new(base_instant));
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let clock_ref = now_cell.clone();
+        let dispatched_ref = dispatched.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_spacing = Duration::from_secs(5);
+        inner.launch_readiness_timeout = Duration::from_secs(8);
+        inner.startup_verification_timeout = Duration::from_secs(35);
+        inner.clock = Some(Arc::new(move || *clock_ref.lock().unwrap()));
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    // Bootstrapper active
+    assert!(!engine.observe_startup_scan(&[], 0, 0, false, true));
+
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    *now_cell.lock().unwrap() = base_instant + Duration::from_secs(36);
+    engine.0.wake.notify_waiters();
+    t1.await.unwrap();
+
+    assert_eq!(dispatched.lock().unwrap().len(), 0);
+    assert_eq!(engine.snapshot().accounts[0].status, Status::NeedsAttention);
+    assert!(engine.0.journal.recent().iter().any(|e| {
+        e["event"] == "launch_ambiguous_process_timeout"
+            && e["details"]["reason"] == "bootstrapper_active_timeout_exceeded"
+    }));
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn f8_04_wmi_failure_persists_beyond_35_seconds() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let base_instant = Instant::now();
+    let now_cell = Arc::new(Mutex::new(base_instant));
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let clock_ref = now_cell.clone();
+        let dispatched_ref = dispatched.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_spacing = Duration::from_secs(5);
+        inner.launch_readiness_timeout = Duration::from_secs(8);
+        inner.startup_verification_timeout = Duration::from_secs(35);
+        inner.clock = Some(Arc::new(move || *clock_ref.lock().unwrap()));
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    // Discovery failure records inaccessible = 1
+    engine.observe_startup_scan(&[], 0, 1, false, false);
+
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    *now_cell.lock().unwrap() = base_instant + Duration::from_secs(36);
+    engine.0.wake.notify_waiters();
+    t1.await.unwrap();
+
+    assert_eq!(dispatched.lock().unwrap().len(), 0);
+    assert_eq!(engine.snapshot().accounts[0].status, Status::NeedsAttention);
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn f8_05_ambiguous_process_becomes_verified_at_34_seconds() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let base_instant = Instant::now();
+    let now_cell = Arc::new(Mutex::new(base_instant));
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let clock_ref = now_cell.clone();
+        let dispatched_ref = dispatched.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_spacing = Duration::from_secs(5);
+        inner.launch_readiness_timeout = Duration::from_secs(8);
+        inner.startup_verification_timeout = Duration::from_secs(35);
+        inner.clock = Some(Arc::new(move || *clock_ref.lock().unwrap()));
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    // Ambiguous process present initially
+    engine.observe_startup_scan(
+        &[platform::Player {
+            pid: 8800,
+            creation_time: "800".into(),
+            tracker: String::new(),
+        }],
+        1,
+        0,
+        true,
+        false,
+    );
+
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    // At 34s, process is confirmed external unowned (uninspected = 0, inaccessible = 0)
+    *now_cell.lock().unwrap() = base_instant + Duration::from_secs(34);
+    engine.observe_startup_scan(
+        &[platform::Player {
+            pid: 8800,
+            creation_time: "800".into(),
+            tracker: String::new(),
+        }],
+        0,
+        0,
+        false,
+        false,
+    );
+    engine.0.wake.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(2), t1)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(dispatched.lock().unwrap().len(), 1);
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn f8_06_ambiguous_process_becomes_verified_at_36_seconds() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let base_instant = Instant::now();
+    let now_cell = Arc::new(Mutex::new(base_instant));
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let clock_ref = now_cell.clone();
+        let dispatched_ref = dispatched.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_spacing = Duration::from_secs(5);
+        inner.launch_readiness_timeout = Duration::from_secs(8);
+        inner.startup_verification_timeout = Duration::from_secs(35);
+        inner.clock = Some(Arc::new(move || *clock_ref.lock().unwrap()));
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    engine.observe_startup_scan(&[], 1, 0, true, false);
+
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    // Times out at 35s
+    *now_cell.lock().unwrap() = base_instant + Duration::from_secs(36);
+    engine.0.wake.notify_waiters();
+    t1.await.unwrap();
+    assert_eq!(dispatched.lock().unwrap().len(), 0);
+    assert_eq!(engine.snapshot().accounts[0].status, Status::NeedsAttention);
+
+    // Verified at 36s (uninspected = 0, inaccessible = 0)
+    engine.observe_startup_scan(&[], 0, 0, false, false);
+
+    // Retried via start -> dispatches cleanly
+    let retry_op = engine.command("1", "start").unwrap();
+    assert_eq!(engine.operation(retry_op.id).unwrap().state, "queued");
+    let a1_retry = engine.snapshot().accounts[0].clone();
+    let e1_retry = engine.clone();
+    let t1_retry = tokio::spawn(async move { e1_retry.launch_one(a1_retry).await });
+    wait_for(&state.tickets, 2, &state.entered).await;
+    state.release.notify_waiters();
+    tokio::time::timeout(Duration::from_secs(2), t1_retry)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(dispatched.lock().unwrap().len(), 1);
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn f8_07_fresh_complete_scan_shows_process_exited() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let dispatched_ref = dispatched.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    // Ambiguous process
+    engine.observe_startup_scan(&[], 1, 0, true, false);
+
+    // Process exits: fresh complete scan confirms 0 players and 0 uninspected
+    engine.observe_startup_scan(&[], 0, 0, false, false);
+
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+    tokio::time::timeout(Duration::from_secs(2), t1)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(dispatched.lock().unwrap().len(), 1);
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn f8_08_fresh_complete_scan_identifies_unrelated_external_process() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let dispatched_ref = dispatched.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    // Confirmed unowned external process (uninspected = 0, inaccessible = 0)
+    engine.observe_startup_scan(
+        &[platform::Player {
+            pid: 7777,
+            creation_time: "777".into(),
+            tracker: String::new(),
+        }],
+        0,
+        0,
+        false,
+        false,
+    );
+
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+    tokio::time::timeout(Duration::from_secs(2), t1)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        dispatched.lock().unwrap().len(),
+        1,
+        "Confirmed unrelated external process must not block launch dispatch"
+    );
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn f8_09_previously_verified_client_remains_owned_during_scan_failures() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let dispatched_ref = dispatched.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+    t1.await.unwrap();
+
+    let tracker = engine.snapshot().accounts[0].tracker.clone().unwrap();
+    let account_gen = engine.snapshot().accounts[0].generation;
+    let identity = ProcessIdentity {
+        pid: 6543,
+        creation_time: "654".into(),
+        generation: account_gen,
+        tracker: tracker.clone(),
+    };
+    let players = vec![platform::Player {
+        pid: 6543,
+        creation_time: "654".into(),
+        tracker,
+    }];
+    engine
+        .attach_player(&engine.snapshot().accounts[0], identity, &players)
+        .unwrap();
+    assert!(engine.snapshot().accounts[0].process.is_some());
+
+    // Discovery failure occurs (inaccessible = 1)
+    engine.observe_startup_scan(&[], 0, 1, false, false);
+
+    // Verified account remains owned and unaffected
+    assert!(
+        engine.snapshot().accounts[0].process.is_some(),
+        "Previously verified client must remain owned during scan failures"
+    );
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn f8_10_waiting_account_is_cancelled_after_timeout() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let base_instant = Instant::now();
+    let now_cell = Arc::new(Mutex::new(base_instant));
+    {
+        let clock_ref = now_cell.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_spacing = Duration::from_secs(5);
+        inner.launch_readiness_timeout = Duration::from_secs(8);
+        inner.startup_verification_timeout = Duration::from_secs(35);
+        inner.clock = Some(Arc::new(move || *clock_ref.lock().unwrap()));
+    }
+    engine.observe_startup_scan(&[], 1, 0, true, false);
+
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    *now_cell.lock().unwrap() = base_instant + Duration::from_secs(36);
+    engine.0.wake.notify_waiters();
+    t1.await.unwrap();
+
+    assert_eq!(engine.snapshot().accounts[0].status, Status::NeedsAttention);
+
+    // User cancels the timed-out account via Stop
+    let stop_op = engine.command("1", "stop").unwrap();
+    assert_eq!(engine.operation(stop_op.id).unwrap().state, "completed");
+    assert_eq!(engine.snapshot().accounts[0].status, Status::Stopped);
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn f8_11_waiting_account_is_manually_retried() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let base_instant = Instant::now();
+    let now_cell = Arc::new(Mutex::new(base_instant));
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let clock_ref = now_cell.clone();
+        let dispatched_ref = dispatched.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_spacing = Duration::from_secs(5);
+        inner.launch_readiness_timeout = Duration::from_secs(8);
+        inner.startup_verification_timeout = Duration::from_secs(35);
+        inner.clock = Some(Arc::new(move || *clock_ref.lock().unwrap()));
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    engine.observe_startup_scan(&[], 1, 0, true, false);
+
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    *now_cell.lock().unwrap() = base_instant + Duration::from_secs(36);
+    engine.0.wake.notify_waiters();
+    t1.await.unwrap();
+    assert_eq!(engine.snapshot().accounts[0].status, Status::NeedsAttention);
+
+    // Clear ambiguous condition
+    engine.observe_startup_scan(&[], 0, 0, false, false);
+
+    // User restarts the account manually
+    let start_op = engine.command("1", "start").unwrap();
+    assert_eq!(engine.operation(start_op.id).unwrap().state, "queued");
+    let a1_retry = engine.snapshot().accounts[0].clone();
+    let e1_retry = engine.clone();
+    let t1_retry = tokio::spawn(async move { e1_retry.launch_one(a1_retry).await });
+    wait_for(&state.tickets, 2, &state.entered).await;
+    state.release.notify_waiters();
+    tokio::time::timeout(Duration::from_secs(2), t1_retry)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(dispatched.lock().unwrap().len(), 1);
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn f8_12_multiple_queued_accounts_share_same_ambiguous_condition() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(2, &url, true);
+    let base_instant = Instant::now();
+    let now_cell = Arc::new(Mutex::new(base_instant));
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let clock_ref = now_cell.clone();
+        let dispatched_ref = dispatched.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_spacing = Duration::from_secs(5);
+        inner.launch_readiness_timeout = Duration::from_secs(8);
+        inner.startup_verification_timeout = Duration::from_secs(35);
+        inner.clock = Some(Arc::new(move || *clock_ref.lock().unwrap()));
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    // Ambiguous condition persists
+    engine.observe_startup_scan(&[], 1, 0, true, false);
+
+    let accounts = engine.snapshot().accounts;
+    let e1 = engine.clone();
+    let a1 = accounts[0].clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    let e2 = engine.clone();
+    let a2 = accounts[1].clone();
+    let t2 = tokio::spawn(async move { e2.launch_one(a2).await });
+    wait_for(&state.tickets, 2, &state.entered).await;
+    state.release.notify_waiters();
+
+    *now_cell.lock().unwrap() = base_instant + Duration::from_secs(36);
+    engine.0.wake.notify_waiters();
+    t1.await.unwrap();
+
+    // Neither account can dispatch while the ambiguous condition remains globally unresolved
+    assert_eq!(
+        dispatched.lock().unwrap().len(),
+        0,
+        "Neither account should dispatch under ambiguous condition"
+    );
+    t2.abort();
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn f8_13_late_first_client_appears_after_unresolved_startup() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(2, &url, true);
+    let base_instant = Instant::now();
+    let now_cell = Arc::new(Mutex::new(base_instant));
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let clock_ref = now_cell.clone();
+        let dispatched_ref = dispatched.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_spacing = Duration::from_secs(5);
+        inner.launch_readiness_timeout = Duration::from_secs(8);
+        inner.startup_verification_timeout = Duration::from_secs(35);
+        inner.clock = Some(Arc::new(move || *clock_ref.lock().unwrap()));
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    let accounts = engine.snapshot().accounts;
+    let e1 = engine.clone();
+    let a1 = accounts[0].clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+    t1.await.unwrap();
+    assert_eq!(dispatched.lock().unwrap().len(), 1);
+
+    let tracker1 = engine.snapshot().accounts[0].tracker.clone().unwrap();
+
+    // At 9s without observation: readiness window expires, Account 1 marked NeedsAttention
+    *now_cell.lock().unwrap() = base_instant + Duration::from_secs(9);
+    assert!(engine.poll_launch_readiness(&accounts[1], *now_cell.lock().unwrap()));
+    assert_eq!(engine.snapshot().accounts[0].status, Status::NeedsAttention);
+    assert!(engine.snapshot().accounts[0].tracker.is_some());
+
+    // At 15s: late client appears with matching tracker
+    let identity = ProcessIdentity {
+        pid: 5432,
+        creation_time: "543".into(),
+        generation: engine.snapshot().accounts[0].generation,
+        tracker: tracker1.clone(),
+    };
+    let players = vec![platform::Player {
+        pid: 5432,
+        creation_time: "543".into(),
+        tracker: tracker1,
+    }];
+    assert!(
+        engine
+            .attach_player(&engine.snapshot().accounts[0], identity, &players)
+            .is_ok()
+    );
+    assert_eq!(engine.snapshot().accounts[0].status, Status::Unknown);
+    assert!(engine.snapshot().accounts[0].process.is_some());
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn f8_14_recovery_occurs_without_duplicate_protocol_dispatch() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let base_instant = Instant::now();
+    let now_cell = Arc::new(Mutex::new(base_instant));
+    let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let clock_ref = now_cell.clone();
+        let dispatched_ref = dispatched.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_spacing = Duration::from_secs(5);
+        inner.launch_readiness_timeout = Duration::from_secs(8);
+        inner.startup_verification_timeout = Duration::from_secs(35);
+        inner.clock = Some(Arc::new(move || *clock_ref.lock().unwrap()));
+        inner.launch_hook = Some(Arc::new(move |_uri, id| {
+            dispatched_ref.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }));
+    }
+    engine.observe_startup_scan(&[], 1, 0, true, false);
+
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    *now_cell.lock().unwrap() = base_instant + Duration::from_secs(36);
+    engine.0.wake.notify_waiters();
+    t1.await.unwrap();
+
+    engine.observe_startup_scan(&[], 0, 0, false, false);
+    let start_op = engine.command("1", "start").unwrap();
+    assert_eq!(engine.operation(start_op.id).unwrap().state, "queued");
+    let a1_retry = engine.snapshot().accounts[0].clone();
+    let e1_retry = engine.clone();
+    let t1_retry = tokio::spawn(async move { e1_retry.launch_one(a1_retry).await });
+    wait_for(&state.tickets, 2, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+    tokio::time::timeout(Duration::from_secs(2), t1_retry)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        dispatched.lock().unwrap().len(),
+        1,
+        "Exactly one protocol dispatch must occur across the recovery cycle"
+    );
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn f8_15_diagnostics_contain_clear_reason_without_secrets() {
+    let state = Preparation::default();
+    let (url, server) = http_fixture(state.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, true);
+    let base_instant = Instant::now();
+    let now_cell = Arc::new(Mutex::new(base_instant));
+    {
+        let clock_ref = now_cell.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.startup_verification_timeout = Duration::from_secs(35);
+        inner.clock = Some(Arc::new(move || *clock_ref.lock().unwrap()));
+    }
+    engine.observe_startup_scan(&[], 1, 0, true, false);
+
+    let a1 = engine.snapshot().accounts[0].clone();
+    let e1 = engine.clone();
+    let t1 = tokio::spawn(async move { e1.launch_one(a1).await });
+    wait_for(&state.tickets, 1, &state.entered).await;
+    state.release.notify_one();
+    state.release.notify_waiters();
+
+    *now_cell.lock().unwrap() = base_instant + Duration::from_secs(36);
+    engine.0.wake.notify_waiters();
+    t1.await.unwrap();
+
+    let journal_records = engine.0.journal.recent();
+    let timeout_event = journal_records
+        .iter()
+        .find(|e| e["event"] == "launch_ambiguous_process_timeout")
+        .expect("must record launch_ambiguous_process_timeout");
+
+    assert_eq!(
+        timeout_event["details"]["reason"],
+        "unverified_roblox_process_timeout_exceeded"
+    );
+
+    // Verify diagnostic privacy: zero secrets, tickets, or private URLs in journal
+    let serialized = serde_json::to_string(&journal_records).unwrap();
+    assert!(!serialized.contains("DISPOSABLE_FIXTURE_TICKET"));
+    assert!(!serialized.contains("DISPOSABLE_FIXTURE_SESSION"));
+
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+// =========================================================================
+// Finding F9 — Strengthen Multi-Threaded Concurrency Regression Tests
+// =========================================================================
+
+#[test]
+fn f9_01_concurrent_readiness_polling_and_player_attachment_os_threads() {
+    with_watchdog(Duration::from_secs(15), || {
+        let (engine, path) = super::tests::fixture(2);
+        let waiting_account = engine.snapshot().accounts[1].clone();
+        let acc_for_attach = engine.snapshot().accounts[0].clone();
+        let tracker = "123456789012".to_string();
+
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let b1 = barrier.clone();
+        let b2 = barrier.clone();
+
+        let e_poll = engine.clone();
+        let poll_thread = std::thread::spawn(move || {
+            b1.wait();
+            for _ in 0..50 {
+                let _ = e_poll.poll_launch_readiness(&waiting_account, Instant::now());
+            }
+        });
+
+        let e_attach = engine.clone();
+        let attach_thread = std::thread::spawn(move || {
+            b2.wait();
+            let identity = ProcessIdentity {
+                pid: 8888,
+                creation_time: "888".into(),
+                generation: acc_for_attach.generation,
+                tracker: tracker.clone(),
+            };
+            let players = vec![platform::Player {
+                pid: 8888,
+                creation_time: "888".into(),
+                tracker,
+            }];
+            let _ = e_attach.attach_player(&acc_for_attach, identity, &players);
+        });
+
+        poll_thread.join().unwrap();
+        attach_thread.join().unwrap();
+
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+    });
+}
+
+#[test]
+fn f9_02_state_mutation_while_readiness_state_changes_os_threads() {
+    with_watchdog(Duration::from_secs(15), || {
+        let (engine, path) = super::tests::fixture(2);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let b1 = barrier.clone();
+        let b2 = barrier.clone();
+
+        let e1 = engine.clone();
+        let mutate_thread = std::thread::spawn(move || {
+            b1.wait();
+            for _ in 0..20 {
+                let _ = e1.transaction(|s| {
+                    s.database.multi_instance_enabled = !s.database.multi_instance_enabled;
+                    Ok(())
+                });
+            }
+        });
+
+        let e2 = engine.clone();
+        let waiting = engine.snapshot().accounts[1].clone();
+        let observe_thread = std::thread::spawn(move || {
+            b2.wait();
+            for i in 0..20 {
+                let _ = e2.observe_startup_scan(&[], i % 2, 0, false, false);
+                let _ = e2.poll_launch_readiness(&waiting, Instant::now());
+            }
+        });
+
+        mutate_thread.join().unwrap();
+        observe_thread.join().unwrap();
+
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+    });
+}
+
+#[test]
+fn f9_03_concurrent_stop_and_launch_dispatch_os_threads() {
+    with_watchdog(Duration::from_secs(15), || {
+        let (engine, path) = super::tests::fixture(1);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let b1 = barrier.clone();
+        let b2 = barrier.clone();
+
+        let e1 = engine.clone();
+        let target = Target {
+            place_id: 1818,
+            job_id: None,
+            private_server_link: None,
+        };
+        let acc = engine.snapshot().accounts[0].clone();
+
+        let launch_thread = std::thread::spawn(move || {
+            b1.wait();
+            let _ = e1.submit_launch(&acc, &target, || Ok(()));
+        });
+
+        let e2 = engine.clone();
+        let stop_thread = std::thread::spawn(move || {
+            b2.wait();
+            let _ = e2.command("1", "stop");
+        });
+
+        launch_thread.join().unwrap();
+        stop_thread.join().unwrap();
+
+        let snap = engine.snapshot();
+        assert!(
+            snap.accounts[0].status == Status::Stopped
+                || snap.accounts[0].status == Status::Stopping
+                || snap.accounts[0].status == Status::Queued
+        );
+
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+    });
+}
+
+#[test]
+fn f9_04_concurrent_restart_and_launch_dispatch_os_threads() {
+    with_watchdog(Duration::from_secs(15), || {
+        let (engine, path) = super::tests::fixture(1);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let b1 = barrier.clone();
+        let b2 = barrier.clone();
+
+        let e1 = engine.clone();
+        let target = Target {
+            place_id: 1818,
+            job_id: None,
+            private_server_link: None,
+        };
+        let acc = engine.snapshot().accounts[0].clone();
+
+        let launch_thread = std::thread::spawn(move || {
+            b1.wait();
+            let _ = e1.submit_launch(&acc, &target, || Ok(()));
+        });
+
+        let e2 = engine.clone();
+        let restart_thread = std::thread::spawn(move || {
+            b2.wait();
+            let _ = e2.command("1", "restart");
+        });
+
+        launch_thread.join().unwrap();
+        restart_thread.join().unwrap();
+
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+    });
+}
+
+#[test]
+fn f9_05_shutdown_while_dispatch_in_flight_os_threads() {
+    with_watchdog(Duration::from_secs(15), || {
+        let (engine, path) = super::tests::fixture(1);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let b1 = barrier.clone();
+        let b2 = barrier.clone();
+
+        let e1 = engine.clone();
+        let target = Target {
+            place_id: 1818,
+            job_id: None,
+            private_server_link: None,
+        };
+        let acc = engine.snapshot().accounts[0].clone();
+
+        let launch_thread = std::thread::spawn(move || {
+            b1.wait();
+            let _ = e1.submit_launch(&acc, &target, || {
+                std::thread::sleep(Duration::from_millis(10));
+                Ok(())
+            });
+        });
+
+        let e2 = engine.clone();
+        let shutdown_thread = std::thread::spawn(move || {
+            b2.wait();
+            e2.shutdown();
+        });
+
+        launch_thread.join().unwrap();
+        shutdown_thread.join().unwrap();
+
+        assert!(engine.is_shutdown());
+
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+    });
+}
+
+#[test]
+fn f9_06_recovery_and_process_exit_reconciliation_active_coordination_os_threads() {
+    with_watchdog(Duration::from_secs(15), || {
+        let (engine, path) = super::tests::fixture(2);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let b1 = barrier.clone();
+        let b2 = barrier.clone();
+
+        let e1 = engine.clone();
+        let waiting = engine.snapshot().accounts[1].clone();
+        let poll_thread = std::thread::spawn(move || {
+            b1.wait();
+            for _ in 0..20 {
+                let _ = e1.poll_launch_readiness(&waiting, Instant::now());
+            }
+        });
+
+        let e2 = engine.clone();
+        let expire_thread = std::thread::spawn(move || {
+            b2.wait();
+            for _ in 0..20 {
+                e2.expire_unowned_launches(Utc::now() + ChronoDuration::seconds(100));
+            }
+        });
+
+        poll_thread.join().unwrap();
+        expire_thread.join().unwrap();
+
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+    });
 }
