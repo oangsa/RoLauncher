@@ -474,6 +474,7 @@ impl Engine {
                 Ok(())
             },
             true,
+            |_| true,
         )
     }
 }

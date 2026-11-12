@@ -4451,6 +4451,11 @@ async fn f11_06_shutdown_before_submission() {
         );
     }
 
+    assert!(engine.snapshot().accounts[0].tracker.is_none());
+    let saved = engine.0.store.load().unwrap();
+    assert!(saved.retired_launches.is_empty());
+    assert!(saved.accounts[0].account.tracker.is_none());
+
     server.abort();
     drop(engine);
     std::fs::remove_dir_all(path).unwrap();
@@ -4488,6 +4493,11 @@ async fn f11_07_gate_disable_before_submission() {
         let s = engine.0.state.lock().unwrap();
         assert_eq!(s.database.retired_launches.len(), 0);
     }
+
+    assert!(engine.snapshot().accounts[0].tracker.is_none());
+    let saved = engine.0.store.load().unwrap();
+    assert!(saved.retired_launches.is_empty());
+    assert!(saved.accounts[0].account.tracker.is_none());
 
     server.abort();
     drop(engine);
@@ -4677,33 +4687,53 @@ async fn f11_13_multi_account_selective_cleanup() {
     let gen1 = Uuid::new_v4();
     let gen2 = Uuid::new_v4();
 
-    {
-        let mut s = engine.0.state.lock().unwrap();
-        s.database.retired_launches.push(RetiredLaunch {
-            account_id: "1".into(),
-            generation: gen1,
-            tracker: tracker1.clone(),
-            deadline: Utc::now() + ChronoDuration::seconds(90),
-            close_intent: None,
-            process: None,
-        });
-        s.database.retired_launches.push(RetiredLaunch {
-            account_id: "2".into(),
-            generation: gen2,
-            tracker: tracker2.clone(),
-            deadline: Utc::now() + ChronoDuration::seconds(90),
-            close_intent: None,
-            process: None,
-        });
-    }
+    engine
+        .transaction(|s| {
+            s.database.retired_launches.push(RetiredLaunch {
+                account_id: "1".into(),
+                generation: gen1,
+                tracker: tracker1.clone(),
+                deadline: Utc::now() + ChronoDuration::seconds(90),
+                close_intent: None,
+                process: None,
+            });
+            s.database.retired_launches.push(RetiredLaunch {
+                account_id: "2".into(),
+                generation: gen2,
+                tracker: tracker2.clone(),
+                deadline: Utc::now() + ChronoDuration::seconds(90),
+                close_intent: None,
+                process: None,
+            });
+            let reservation = s.database.retired_launches[1].clone();
+            s.database.retired_launches.push(RetiredLaunch {
+                generation: gen1,
+                ..reservation.clone()
+            });
+            s.database.retired_launches.push(RetiredLaunch {
+                tracker: tracker1.clone(),
+                ..reservation
+            });
+            Ok(())
+        })
+        .unwrap();
 
     // Clean up only account 2's unsubmitted launch
-    engine.cleanup_unsubmitted_launch("2", gen2, &tracker2);
+    engine
+        .cleanup_unsubmitted_launch("2", gen2, &tracker2, None)
+        .unwrap();
 
     {
         let s = engine.0.state.lock().unwrap();
-        assert_eq!(s.database.retired_launches.len(), 1);
-        assert_eq!(s.database.retired_launches[0].tracker, tracker1);
+        let retired = &s.database.retired_launches;
+        assert_eq!(retired.len(), 3);
+        assert_eq!(retired[0].account_id, "1");
+        assert_eq!(retired[1].generation, gen1);
+        assert_eq!(retired[2].tracker, tracker1);
+        assert_eq!(
+            serde_json::to_value(&s.database).unwrap(),
+            serde_json::to_value(engine.0.store.load().unwrap()).unwrap(),
+        );
     }
 
     drop(engine);

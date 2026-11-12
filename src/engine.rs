@@ -738,17 +738,21 @@ impl Engine {
         &self,
         edit: impl FnOnce(&mut State) -> Result<T, String>,
     ) -> Result<T, String> {
-        self.transaction_inner(edit, false)
+        self.transaction_inner(edit, false, |_| true)
     }
     fn transaction_inner<T>(
         &self,
         edit: impl FnOnce(&mut State) -> Result<T, String>,
         reset_discord: bool,
+        should_commit: impl FnOnce(&T) -> bool,
     ) -> Result<T, String> {
         let mut current = self.0.state.lock().unwrap();
-        current.launch_allowed = self.0.launch_allowed.load(Ordering::Acquire);
         let mut next = current.clone();
+        next.launch_allowed = self.0.launch_allowed.load(Ordering::Acquire);
         let result = edit(&mut next)?;
+        if !should_commit(&result) {
+            return Ok(result);
+        }
         next.launch_allowed = self.0.launch_allowed.load(Ordering::Acquire);
         normalize_accounts(&mut next);
         management::record_activity(&current, &mut next);
@@ -975,6 +979,7 @@ impl Engine {
                 Ok(())
             },
             true,
+            |_| true,
         )?;
         if patch.bot.is_some() && !self.bot_settings().enabled {
             self.bot_control("stop")?;
@@ -2339,67 +2344,98 @@ impl Engine {
         }
     }
 
-    fn cleanup_unsubmitted_launch(&self, account_id: &str, generation: Uuid, tracker: &str) {
-        let mut state = self.0.state.lock().unwrap();
-        let mut changed = false;
-
-        let before_retired = state.database.retired_launches.len();
-        state.database.retired_launches.retain(|r| {
-            !(r.account_id == account_id
-                && r.generation == generation
-                && r.tracker == tracker
-                && r.process.is_none())
+    // Only call after dispatch authorization rejected this reservation before the OS effect.
+    fn cleanup_unsubmitted_launch(
+        &self,
+        account_id: &str,
+        generation: Uuid,
+        tracker: &str,
+        operation_id: Option<Uuid>,
+    ) -> Result<(), String> {
+        let context = serde_json::json!({
+            "account_id": account_id.parse::<u64>().ok(),
+            "generation": generation,
+            "tracker": tracker.parse::<u64>().ok(),
+            "operation_id": operation_id,
+            "reason": "unsubmitted_launch_cancelled",
         });
-        if state.database.retired_launches.len() != before_retired {
-            changed = true;
-        }
-
-        let has_other_retired = state
-            .database
-            .retired_launches
-            .iter()
-            .any(|r| r.account_id == account_id);
-
-        if let Some(slot) = state
-            .database
-            .accounts
-            .iter_mut()
-            .find(|s| s.account.id == account_id)
-        {
-            if (slot.account.generation == generation
-                || slot.account.tracker.as_deref() == Some(tracker))
-                && (slot.account.tracker.is_some() || slot.account.ownership_deadline.is_some())
-            {
-                slot.account.tracker = None;
-                slot.account.ownership_deadline = None;
-                changed = true;
-            }
-            if slot.account.process.is_none() && !has_other_retired && !slot.account.desired_running
-            {
-                slot.account.status = Status::Stopped;
-                slot.account.close_intent = None;
-                if let Some(op_id) = slot.account.operation_id
-                    && let Some(op) = state.operations.get_mut(&op_id)
-                    && op.state == "queued"
-                {
-                    op.state = "completed".into();
+        let result = self.transaction_inner(
+            |state| {
+                let mut removed = false;
+                let mut stop_intent = None;
+                state.database.retired_launches.retain(|r| {
+                    if r.account_id == account_id
+                        && r.generation == generation
+                        && r.tracker == tracker
+                        && r.process.is_none()
+                    {
+                        removed = true;
+                        stop_intent = r.close_intent.clone();
+                        false
+                    } else {
+                        true
+                    }
+                });
+                let has_other_retired = state
+                    .database
+                    .retired_launches
+                    .iter()
+                    .any(|r| r.account_id == account_id);
+                let Some(slot) = state
+                    .database
+                    .accounts
+                    .iter_mut()
+                    .find(|s| s.account.id == account_id)
+                else {
+                    return Ok(removed);
+                };
+                let account = &mut slot.account;
+                let clear_tracker = account.generation == generation
+                    && account.tracker.as_deref() == Some(tracker)
+                    && account.operation_id == operation_id
+                    && account.process.is_none()
+                    && !has_other_retired;
+                if clear_tracker {
+                    account.tracker = None;
+                    account.ownership_deadline = None;
                 }
-                changed = true;
+                if removed
+                    && !has_other_retired
+                    && account.process.is_none()
+                    && account.tracker.is_none()
+                    && !account.desired_running
+                    && account.status == Status::Stopping
+                    && let Some(intent) = stop_intent
+                    && intent.reason == CloseReason::UserStop
+                    && account
+                        .close_intent
+                        .as_ref()
+                        .is_some_and(|i| i.id == intent.id)
+                    && account.generation == intent.generation
+                    && account.operation_id == intent.operation_id
+                {
+                    // The transaction normalizes Stopping and completes the current Stop.
+                    account.close_intent = None;
+                }
+                Ok(removed || clear_tracker)
+            },
+            false,
+            |changed| *changed,
+        );
+        match result {
+            Ok(changed) => {
+                if changed {
+                    self.0.journal.record("launch_reservation_cleaned", context);
+                    self.0.wake.notify_waiters();
+                }
+                Ok(())
             }
-        }
-
-        if changed {
-            let _ = self.0.store.save(&state.database);
-            self.0.journal.record(
-                "launch_reservation_cleaned",
-                serde_json::json!({
-                    "account_id": account_id.parse::<u64>().ok(),
-                    "generation": generation,
-                    "tracker": tracker.parse::<u64>().ok(),
-                    "reason": "unsubmitted_launch_cancelled",
-                }),
-            );
-            self.0.wake.notify_waiters();
+            Err(error) => {
+                self.0
+                    .journal
+                    .record("launch_reservation_cleanup_failed", context);
+                Err(error)
+            }
         }
     }
 
@@ -2411,12 +2447,15 @@ impl Engine {
         is_shutdown: bool,
     ) -> Result<(), String> {
         if let Some(tracker) = account.tracker.as_deref() {
-            self.cleanup_unsubmitted_launch(&account.id, account.generation, tracker);
-        } else {
-            let _ = self.update(&account.id, account.generation, |a| {
-                a.tracker = None;
-                a.ownership_deadline = None;
-            });
+            self.cleanup_unsubmitted_launch(
+                &account.id,
+                account.generation,
+                tracker,
+                account.operation_id,
+            )
+            .map_err(|error| {
+                format!("Launch cancelled before dispatch: reservation cleanup failed: {error}")
+            })?;
         }
 
         if reason == "launch_coordination_unavailable" {
