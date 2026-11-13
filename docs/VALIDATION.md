@@ -3,6 +3,13 @@
 Recorded checks below are historical results, not guarantees of live Roblox compatibility.
 Fixtures use isolated data and simulated accounts unless stated otherwise.
 
+## Upcoming 2.0.0 Phase 1 Resource Monitor — 2026-11-13
+
+- Validated the read-only Resource Monitor subsystem (`src/resources.rs`, `src/platform_resources.rs`, `/v1/resources*` HTTP/SSE routes, Discord `/resources` and `/resources-register`, and temporary WinUI `Resources` page) on native Windows x64 (`2.0.0-dev.1c5f27a17cc4`).
+- Passed on native Windows x64: `315` Rust library tests (`10` ignored), `49` `windows-device-identity` example tests, separate Rust/WinUI bootstrap pipe test, `109` desktop model/UI checks, WinUI interaction smoke (`Resources` tab rendering inspected), Python policy/versioning/packaging suites, `test-security.py` (`18` passed, `3` skipped), `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`, isolated installer fixture tests, and packaged shell smoke (`verify-package.py --smoke-shell`).
+- Explicit Windows 0/10/50 real-process benchmark (`native_benchmark_0_10_50_real_fixture_processes`, `--ignored`): `64.42 ms` average tick at 0 targets (`15.45 MiB` WS), `16.57 ms` at 10 targets (`16.50 MiB` WS), and `31.22 ms` at 50 targets (`16.51 MiB` WS).
+- Best-effort PDH GPU Engine sampling (`\\GPU Engine(*)\\Utilization Percentage`) falls back explicitly to `Unavailable` when counters are absent or warming up; live multi-client Roblox GPU counters, Linux/Uno runtime execution, and interactive Discord gateway roundtrips remain `NOT VERIFIED` locally.
+
 ## Upcoming 1.9.1 multi-instance launch reliability — 2026-11-12
 
 - Reproduced and fixed multi-instance launch and lifecycle defects:

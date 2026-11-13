@@ -108,6 +108,7 @@ struct Inner {
     launch_allowed: Arc<AtomicBool>,
     bot_generation: AtomicU64,
     discord: crate::discord::Discord,
+    resources: crate::resources::ResourceMonitor,
     journal: crate::diagnostics::Journal,
     launch_slot: tokio::sync::Mutex<()>,
     dispatch_lock: Mutex<()>,
@@ -675,6 +676,7 @@ impl Engine {
             bot_generation: AtomicU64::new(u64::from(bot_running)),
             launch_allowed,
             discord,
+            resources: crate::resources::ResourceMonitor::new(),
             journal,
         })))
     }
@@ -701,6 +703,7 @@ impl Engine {
             .record("shutdown_requested", serde_json::json!({}));
         self.0.shutdown.store(true, Ordering::Release);
         self.0.discord.stop();
+        self.0.resources.shutdown();
         self.0.wake.notify_waiters();
         let _dispatch = self.0.dispatch_lock.lock().unwrap();
         self.0
@@ -859,6 +862,7 @@ impl Engine {
     pub(crate) fn bot_settings(&self) -> crate::discord_bot::SavedBot {
         let mut saved = self.0.state.lock().unwrap().database.discord.bot.clone();
         saved.registration = None;
+        saved.resources_registration = None;
         saved
     }
     pub(crate) fn bot_generation(&self) -> u64 {
@@ -936,12 +940,97 @@ impl Engine {
         self.transaction(|s| {
             let mut current = s.database.discord.bot.clone();
             current.registration = None;
+            current.resources_registration = None;
             if &current != settings {
                 return Err("Bot settings changed".into());
             }
             s.database.discord.bot.registration = Some(registration);
             Ok(())
         })
+    }
+    pub(crate) fn bot_resources_registration(
+        &self,
+    ) -> Option<crate::discord_bot::StatusRegistration> {
+        self.0
+            .state
+            .lock()
+            .unwrap()
+            .database
+            .discord
+            .bot
+            .resources_registration
+            .clone()
+    }
+    pub(crate) fn set_bot_resources_registration(
+        &self,
+        settings: &crate::discord_bot::SavedBot,
+        registration: Option<crate::discord_bot::StatusRegistration>,
+    ) -> Result<(), String> {
+        self.transaction(|s| {
+            let mut current = s.database.discord.bot.clone();
+            current.registration = None;
+            current.resources_registration = None;
+            if &current != settings {
+                return Err("Bot settings changed".into());
+            }
+            s.database.discord.bot.resources_registration = registration;
+            Ok(())
+        })
+    }
+    pub fn subscribe_resources(
+        &self,
+    ) -> (
+        crate::resources::SamplingLease,
+        broadcast::Receiver<crate::resources::ResourceSnapshot>,
+    ) {
+        self.0.resources.subscribe()
+    }
+    pub fn latest_resources(
+        &self,
+        sustain_demand: bool,
+    ) -> Option<crate::resources::ResourceSnapshot> {
+        self.0.resources.latest(sustain_demand)
+    }
+    pub async fn resources_snapshot(
+        &self,
+        include_history: bool,
+        history_seconds: usize,
+        sustain_demand: bool,
+        collect_gpu: bool,
+        warmup_cold_delta: bool,
+    ) -> crate::resources::ResourceSnapshotResponse {
+        let accounts = self.snapshot().accounts;
+        let snapshot = self
+            .0
+            .resources
+            .snapshot_or_refresh(&accounts, sustain_demand, collect_gpu, warmup_cold_delta)
+            .await;
+        crate::resources::ResourceSnapshotResponse {
+            snapshot,
+            history: include_history.then(|| self.0.resources.history(history_seconds)),
+        }
+    }
+    pub async fn account_resources(
+        &self,
+        account_id: &str,
+        include_history: bool,
+        history_seconds: usize,
+        sustain_demand: bool,
+        collect_gpu: bool,
+        warmup_cold_delta: bool,
+    ) -> Option<crate::resources::AccountResourceResponse> {
+        let accounts = self.snapshot().accounts;
+        let account = accounts.iter().find(|a| a.id == account_id)?.clone();
+        let snapshot = self
+            .0
+            .resources
+            .snapshot_or_refresh(&accounts, sustain_demand, collect_gpu, warmup_cold_delta)
+            .await;
+        Some(
+            self.0
+                .resources
+                .account_view(&account, &snapshot, include_history, history_seconds),
+        )
     }
     pub fn set_discord(
         &self,
@@ -1399,6 +1488,7 @@ impl Engine {
         tokio::spawn(async move {
             engine.monitor_loop().await;
         });
+        self.0.resources.spawn(self.clone());
     }
     async fn launch_loop(&self) {
         let mut pending: HashMap<String, (Uuid, tokio::task::JoinHandle<()>)> = HashMap::new();

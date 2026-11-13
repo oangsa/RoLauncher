@@ -235,3 +235,155 @@ async fn instance_preference_works_through_game_settings_and_existing_alias() {
     drop(reopened);
     std::fs::remove_dir_all(path).unwrap();
 }
+
+#[tokio::test]
+async fn resources_endpoints_enforce_auth_redact_secrets_and_serve_concurrent_readers() {
+    let path = std::env::temp_dir().join(format!("rbx-api-resources-{}", uuid::Uuid::new_v4()));
+    let store = Store::new(path.clone()).unwrap();
+    let mut database = crate::model::Database {
+        version: 2,
+        ..Default::default()
+    };
+    let mut account = crate::model::Account::new("acc-1".into(), "resource_user".into());
+    account.alias = "Farm One".into();
+    let secret_job = uuid::Uuid::new_v4();
+    account.target = Some(crate::model::Target {
+        place_id: 1818,
+        job_id: Some(secret_job),
+        private_server_link: Some(
+            "https://www.roblox.com/games/1818?privateServerLinkCode=SECRET_LINK".into(),
+        ),
+    });
+    database.accounts.push(crate::model::SavedAccount {
+        account,
+        encrypted_session: "SECRET_ENCRYPTED_COOKIE".into(),
+    });
+    store.save(&database).unwrap();
+
+    let engine = Engine::open(store, "fixture".into()).unwrap();
+    let app = api::router(engine.clone());
+
+    for uri in [
+        "/v1/resources",
+        "/v1/resources/accounts/acc-1",
+        "/v1/resources/events",
+    ] {
+        let unauth = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED, "{uri}");
+
+        let cross_origin = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("authorization", format!("Bearer {}", engine.token()))
+                    .header("origin", "https://evil.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cross_origin.status(), StatusCode::FORBIDDEN, "{uri}");
+    }
+
+    // Concurrent readers safely share one snapshot without corrupting or panicking.
+    let req_a = app.clone().oneshot(
+        Request::builder()
+            .uri("/v1/resources?history=true&seconds=15")
+            .header("authorization", format!("Bearer {}", engine.token()))
+            .body(Body::empty())
+            .unwrap(),
+    );
+    let req_b = app.clone().oneshot(
+        Request::builder()
+            .uri("/v1/resources?history=true&seconds=5")
+            .header("authorization", format!("Bearer {}", engine.token()))
+            .body(Body::empty())
+            .unwrap(),
+    );
+    let (res_a, res_b) = tokio::join!(req_a, req_b);
+    let res_a = res_a.unwrap();
+    let res_b = res_b.unwrap();
+    assert_eq!(res_a.status(), StatusCode::OK);
+    assert_eq!(res_b.status(), StatusCode::OK);
+    let bytes_a = axum::body::to_bytes(res_a.into_body(), 256 * 1024)
+        .await
+        .unwrap();
+    let text_a = String::from_utf8(bytes_a.to_vec()).unwrap();
+    assert!(!text_a.contains("SECRET_ENCRYPTED_COOKIE"));
+    assert!(!text_a.contains("SECRET_LINK"));
+    assert!(!text_a.contains(&secret_job.to_string()));
+    assert!(!text_a.contains(engine.token()));
+
+    let json_a: serde_json::Value = serde_json::from_str(&text_a).unwrap();
+    assert_eq!(json_a["metadata"]["cpu_normalization"], "machine_percent");
+    assert_eq!(json_a["metadata"]["memory_units"], "bytes");
+    assert!(json_a["timestamp"].as_str().is_some());
+    assert!(json_a["sample_age_ms"].as_u64().is_some());
+    assert_eq!(json_a["aggregates"]["running_instances"], 0);
+    assert_eq!(json_a["aggregates"]["total_accounts"], 1);
+    assert!(json_a["history"].as_array().is_some_and(|h| !h.is_empty()));
+
+    // Account endpoint returns known account & 404 on missing account.
+    let acc_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resources/accounts/acc-1?history=true")
+                .header("authorization", format!("Bearer {}", engine.token()))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(acc_res.status(), StatusCode::OK);
+    let acc_body = axum::body::to_bytes(acc_res.into_body(), 128 * 1024)
+        .await
+        .unwrap();
+    let acc_text = String::from_utf8(acc_body.to_vec()).unwrap();
+    assert!(!acc_text.contains("SECRET"));
+    let acc_json: serde_json::Value = serde_json::from_str(&acc_text).unwrap();
+    assert_eq!(acc_json["account"]["account_id"], "acc-1");
+    assert_eq!(acc_json["account"]["display_name"], "Farm One");
+    assert_eq!(acc_json["account"]["availability"], "exited");
+    assert!(acc_json["history"].as_array().is_some());
+
+    let missing_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resources/accounts/nonexistent")
+                .header("authorization", format!("Bearer {}", engine.token()))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_res.status(), StatusCode::NOT_FOUND);
+
+    // SSE endpoint returns OK text/event-stream and emits an initial `resources` event.
+    let sse_res = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resources/events")
+                .header("authorization", format!("Bearer {}", engine.token()))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sse_res.status(), StatusCode::OK);
+    use futures_util::StreamExt;
+    let mut stream = sse_res.into_body().into_data_stream();
+    let first_chunk = stream.next().await.unwrap().unwrap();
+    let frame_text = String::from_utf8_lossy(&first_chunk);
+    assert!(frame_text.contains("event: resources"), "{frame_text}");
+    assert!(frame_text.contains("machine_percent"), "{frame_text}");
+
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}

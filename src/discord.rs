@@ -11,7 +11,9 @@ pub(crate) fn escape(value: &str, limit: usize) -> String {
         .filter(|c| !c.is_control())
         .take(limit)
         .flat_map(|c| {
-            if "\\`*_~|<>[]()".contains(c) {
+            if c == '@' {
+                vec!['@', '\u{200B}']
+            } else if "\\`*_~|<>[]()".contains(c) {
                 vec!['\\', c]
             } else {
                 vec![c]

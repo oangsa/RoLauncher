@@ -593,6 +593,78 @@ fn supports_input_device(version: &str) -> bool {
     matches!(parts.as_slice(), [Ok(major), Ok(minor), Ok(patch)] if (*major, *minor, *patch) >= (1, 15, 6))
 }
 
+pub fn sample_native_resources(
+    targets: &[ProcessIdentity],
+    _collect_gpu: bool,
+) -> super::NativeResourceScan {
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(1);
+    let (mut total_ram_bytes, mut available_ram_bytes) = (None, None);
+    if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
+        for line in meminfo.lines() {
+            if let Some(rest) = line.strip_prefix("MemTotal:") {
+                total_ram_bytes = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .map(|kb| kb * 1024);
+            } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
+                available_ram_bytes = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .map(|kb| kb * 1024);
+            }
+        }
+    }
+    let processes = targets
+        .iter()
+        .map(|identity| match creation_time(identity.pid) {
+            Ok(Some(actual)) if actual == identity.creation_time => super::NativeProcessCounters {
+                status: super::NativeProcessStatus::Alive,
+                cpu_100ns: None,
+                working_set_bytes: None,
+                private_memory_bytes: None,
+                uptime_seconds: None,
+            },
+            Ok(Some(_)) => super::NativeProcessCounters {
+                status: super::NativeProcessStatus::OwnershipMismatch,
+                cpu_100ns: None,
+                working_set_bytes: None,
+                private_memory_bytes: None,
+                uptime_seconds: None,
+            },
+            Ok(None) => super::NativeProcessCounters {
+                status: super::NativeProcessStatus::Exited,
+                cpu_100ns: None,
+                working_set_bytes: None,
+                private_memory_bytes: None,
+                uptime_seconds: None,
+            },
+            Err(_) => super::NativeProcessCounters {
+                status: super::NativeProcessStatus::Inaccessible,
+                cpu_100ns: None,
+                working_set_bytes: None,
+                private_memory_bytes: None,
+                uptime_seconds: None,
+            },
+        })
+        .collect();
+    super::NativeResourceScan {
+        system: super::NativeSystemCounters {
+            logical_processors: cpus,
+            cpu_times: None,
+            total_ram_bytes,
+            available_ram_bytes,
+        },
+        processes,
+        gpu: super::NativeGpuReading::Unavailable,
+        unmanaged_processes: None,
+        inaccessible_processes: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

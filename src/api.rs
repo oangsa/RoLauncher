@@ -66,6 +66,12 @@ pub fn router(engine: Engine) -> Router {
         .route("/v1/accounts/{id}/{action}", post(command))
         .route("/v1/operations/{id}", get(operation))
         .route("/v1/events", get(events))
+        .route("/v1/resources", get(resources))
+        .route(
+            "/v1/resources/accounts/{account_id}",
+            get(account_resources),
+        )
+        .route("/v1/resources/events", get(resources_events))
         .route(
             "/v1/settings/discord",
             get(discord_settings).patch(discord_update),
@@ -475,6 +481,76 @@ async fn events(
             .event("snapshot")
             .json_data(snapshot)
             .unwrap())
+    }));
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+#[derive(Deserialize)]
+struct ResourceQuery {
+    history: Option<bool>,
+    seconds: Option<usize>,
+}
+async fn resources(
+    State(engine): State<Engine>,
+    Query(query): Query<ResourceQuery>,
+) -> Json<crate::resources::ResourceSnapshotResponse> {
+    let include_history = query.history.unwrap_or(false);
+    let seconds = query
+        .seconds
+        .unwrap_or(crate::resources::HISTORY_CAPACITY)
+        .clamp(1, crate::resources::HISTORY_CAPACITY);
+    Json(
+        engine
+            .resources_snapshot(include_history, seconds, true, true, true)
+            .await,
+    )
+}
+async fn account_resources(
+    State(engine): State<Engine>,
+    Path(account_id): Path<String>,
+    Query(query): Query<ResourceQuery>,
+) -> Result<Json<crate::resources::AccountResourceResponse>, ApiError> {
+    let include_history = query.history.unwrap_or(false);
+    let seconds = query
+        .seconds
+        .unwrap_or(crate::resources::HISTORY_CAPACITY)
+        .clamp(1, crate::resources::HISTORY_CAPACITY);
+    engine
+        .account_resources(&account_id, include_history, seconds, true, true, true)
+        .await
+        .map(Json)
+        .ok_or_else(|| error("Account not found".into()))
+}
+async fn resources_events(
+    State(engine): State<Engine>,
+) -> Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>> {
+    let (lease, receiver) = engine.subscribe_resources();
+    let initial = engine
+        .resources_snapshot(true, crate::resources::HISTORY_CAPACITY, true, true, true)
+        .await;
+    let recover = engine.clone();
+    let stream = futures_util::stream::once(async move {
+        Ok(Event::default()
+            .event("resources")
+            .json_data(initial)
+            .unwrap())
+    })
+    .chain(BroadcastStream::new(receiver).filter_map(move |item| {
+        // Hold `lease` inside this stream closure so SSE disconnect releases active sampling.
+        let _keep = &lease;
+        let snapshot = match item {
+            Ok(snap) => Some(snap),
+            Err(_) => recover.latest_resources(true),
+        };
+        let event = snapshot.map(|snap| {
+            Ok(Event::default()
+                .event("resources")
+                .json_data(crate::resources::ResourceSnapshotResponse {
+                    snapshot: snap,
+                    history: None,
+                })
+                .unwrap())
+        });
+        std::future::ready(event)
     }));
     Sse::new(stream).keep_alive(KeepAlive::default())
 }

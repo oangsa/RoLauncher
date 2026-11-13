@@ -19,6 +19,38 @@ accounts = [dict(id=str(i), username=name, alias=name.title(), group="Fixture", 
             for i, name, status in ((1, "alpha", "running"), (2, "beta", "stopped"), (3, "gamma", "backoff"))]
 
 
+def _linux_resources_snapshot():
+    now = "2026-11-13T00:00:00Z"
+    return dict(
+        timestamp=now,
+        sample_age_ms=50,
+        stale=False,
+        availability="available",
+        system=dict(
+            logical_processors=4, cpu_percent=18.5, cpu_availability="available",
+            total_ram_bytes=8 * 1024 * 1024 * 1024, available_ram_bytes=4 * 1024 * 1024 * 1024,
+            used_ram_bytes=4 * 1024 * 1024 * 1024, ram_utilization_percent=50.0, ram_availability="available",
+            gpu_percent=None, gpu_availability="unavailable",
+        ),
+        aggregates=dict(
+            running_instances=1, total_accounts=3, cpu_percent=5.2, cpu_availability="available",
+            working_set_bytes=320 * 1024 * 1024, private_memory_bytes=240 * 1024 * 1024,
+            gpu_percent=None, gpu_availability="unavailable",
+            unmanaged_roblox_processes=0, inaccessible_roblox_processes=0, exited_or_stale_instances=0,
+        ),
+        accounts=[],
+        metadata=dict(
+            cpu_normalization="machine_percent",
+            cpu_formula="delta_cpu_time / (elapsed_wall_time * logical_processors) * 100",
+            memory_units="bytes",
+            gpu_normalization="gpu_engine_percent_sum_capped_100",
+            sample_interval_ms=1000, history_capacity=60, stale_threshold_ms=5000,
+            sampling_mode="active", last_sample_duration_ms=2,
+        ),
+        history=[],
+    )
+
+
 class Fixture(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
@@ -57,6 +89,19 @@ class Fixture(BaseHTTPRequestHandler):
         requests.append(self.path)
         if self.path == "/v1/status":
             body = dict(accounts=accounts, profiles=[], network_suspended=False, compatibility="Linux smoke fixture")
+        elif self.path.startswith("/v1/resources/events"):
+            payload = ("event: resources\ndata: " + json.dumps(_linux_resources_snapshot()) + "\n\n").encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(payload)
+            self.wfile.flush()
+            import time
+            time.sleep(1.5)
+            return
+        elif self.path.startswith("/v1/resources"):
+            body = _linux_resources_snapshot()
         elif self.path == "/v1/settings/discord":
             body = dict(enabled=False, configured=False, notify_recovery=True, delivery_status="Fixture", recent=[])
         elif self.path in ("/v1/activity", "/v1/backups"):

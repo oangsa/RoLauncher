@@ -14,6 +14,7 @@ pub mod login;
 pub mod logs;
 pub mod model;
 pub mod platform;
+pub mod resources;
 pub mod roblox;
 pub mod store;
 #[cfg(windows)]

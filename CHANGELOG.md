@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.0] — Unreleased
+
+- Added read-only host and verified per-account CPU, RAM, and best-effort GPU resource monitoring.
+- Added authenticated `/v1/resources`, `/v1/resources/accounts/{account_id}`, and SSE `/v1/resources/events` endpoints.
+- Added a Resources page with 60-second history charts and sortable instance metrics.
+- Added Discord `/resources` and `/resources-register` commands with independent 30-second channel updates.
+
 ## [1.9.2] — Unreleased
 
 - Keep multiple accounts launching and attaching reliably without dropping into stuck Reconnecting states.

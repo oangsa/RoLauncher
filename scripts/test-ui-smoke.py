@@ -29,6 +29,115 @@ include_beta_updates = False
 bot = dict(enabled=True, configured=True, guild_id="42", allowed_users=["123"], status="Bot stopped. Use Start to connect.", connection_state="offline")
 activity = [dict(timestamp="2026-10-05T09:20:00+07:00", account_id="1", place_id=1818, status="backoff", failures=1, message="Retry scheduled; inspect the next retry time")]
 
+
+def _fixture_resources_snapshot():
+    now = datetime.now(timezone.utc)
+    hist = []
+    for idx in range(12):
+        ts = (now - timedelta(seconds=11 - idx)).isoformat()
+        hist.append(dict(
+            timestamp=ts,
+            system_cpu_percent=round(18.0 + (idx % 5) * 2.1, 2),
+            ram_utilization_percent=round(48.0 + (idx % 4) * 0.8, 2),
+            managed_cpu_percent=round(6.0 + (idx % 4) * 1.1, 2),
+            managed_ram_bytes=(460 + idx * 8) * 1024 * 1024,
+            managed_gpu_percent=None,
+            running_instances=1,
+        ))
+    return dict(
+        timestamp=now.isoformat(),
+        sample_age_ms=80,
+        stale=False,
+        availability="partial",
+        system=dict(
+            logical_processors=8,
+            cpu_percent=24.5,
+            cpu_availability="available",
+            total_ram_bytes=16 * 1024 * 1024 * 1024,
+            available_ram_bytes=8 * 1024 * 1024 * 1024,
+            used_ram_bytes=8 * 1024 * 1024 * 1024,
+            ram_utilization_percent=50.0,
+            ram_availability="available",
+            gpu_percent=None,
+            gpu_availability="unavailable",
+        ),
+        aggregates=dict(
+            running_instances=1,
+            total_accounts=len(accounts),
+            cpu_percent=8.5,
+            cpu_availability="available",
+            working_set_bytes=520 * 1024 * 1024,
+            private_memory_bytes=410 * 1024 * 1024,
+            gpu_percent=None,
+            gpu_availability="unavailable",
+            unmanaged_roblox_processes=0,
+            inaccessible_roblox_processes=0,
+            exited_or_stale_instances=1,
+        ),
+        accounts=[
+            dict(
+                account_id="0",
+                display_name="Main account",
+                username="sample_0",
+                account_status="running",
+                pid=12000,
+                creation_time="100",
+                cpu_percent=8.5,
+                working_set_bytes=520 * 1024 * 1024,
+                private_memory_bytes=410 * 1024 * 1024,
+                gpu_percent=None,
+                gpu_availability="unavailable",
+                uptime_seconds=5400,
+                sampled_at=now.isoformat(),
+                availability="available",
+            ),
+            dict(
+                account_id="1",
+                display_name="Test account",
+                username="sample_1",
+                account_status="backoff",
+                pid=12001,
+                creation_time="101",
+                cpu_percent=None,
+                working_set_bytes=None,
+                private_memory_bytes=None,
+                gpu_percent=None,
+                gpu_availability="unavailable",
+                uptime_seconds=None,
+                sampled_at=now.isoformat(),
+                availability="exited",
+            ),
+            dict(
+                account_id="2",
+                display_name="Build account",
+                username="sample_2",
+                account_status="needs_attention",
+                pid=None,
+                creation_time=None,
+                cpu_percent=None,
+                working_set_bytes=None,
+                private_memory_bytes=None,
+                gpu_percent=None,
+                gpu_availability="unavailable",
+                uptime_seconds=None,
+                sampled_at=now.isoformat(),
+                availability="unavailable",
+            ),
+        ],
+        metadata=dict(
+            cpu_normalization="machine_percent",
+            cpu_formula="delta_cpu_time / (elapsed_wall_time * logical_processors) * 100",
+            memory_units="bytes",
+            gpu_normalization="gpu_engine_percent_sum_capped_100",
+            sample_interval_ms=1000,
+            history_capacity=60,
+            stale_threshold_ms=5000,
+            sampling_mode="active",
+            last_sample_duration_ms=3,
+        ),
+        history=hist,
+    )
+
 class Fixture(BaseHTTPRequestHandler):
     def log_message(self, *args): pass
     def reply(self, body, code=200):
@@ -41,6 +150,19 @@ class Fixture(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/v1/status":
             self.reply(dict(accounts=accounts, profiles=profiles, game_profiles=game_profiles, close_to_tray=close_to_tray, update_repository="", include_beta_updates=include_beta_updates, network_suspended=False, compatibility="UI fixture · real-client validation remains outstanding", **game_settings))
+        elif self.path.startswith("/v1/resources/events"):
+            snap = _fixture_resources_snapshot()
+            payload = ("event: resources\ndata: " + json.dumps(snap) + "\n\n").encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(payload)
+            self.wfile.flush()
+            import time
+            time.sleep(1.5)
+        elif self.path.startswith("/v1/resources"):
+            self.reply(_fixture_resources_snapshot())
         elif self.path.startswith("/v1/games/"): self.reply(dict(name="Fixture game", thumbnail_url=None))
         elif self.path == "/v1/profiles": self.reply(profiles)
         elif self.path == "/v1/backups": self.reply(backups)

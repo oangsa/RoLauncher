@@ -117,6 +117,10 @@ public sealed partial class MainWindow
             Tab_Click(RecoveryTab, new RoutedEventArgs());
             await Task.Delay(150);
             await CaptureLinuxAsync(directory, "recovery.png");
+            Tab_Click(ResourcesTab, new RoutedEventArgs());
+            await WaitLinuxAsync(() => _resourceSnapshot is not null, "Linux resource monitor loads initial sample.");
+            Check(RunningInstancesMetric.Text == "1" && SystemCpuMetric.Text == "18.5%", "Linux resource monitor displays system and managed metrics.");
+            await CaptureLinuxAsync(directory, "resources.png");
             var changelog = ShowChangelogAsync();
             await WaitLinuxAsync(() => _changelogDialog is { ActualWidth: > 0, ActualHeight: > 0 }, "The changelog dialog opens.");
             var changelogDialog = _changelogDialog!;
