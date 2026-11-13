@@ -92,6 +92,137 @@ var retrying = new AccountRow(account with { Status = "backoff", NextRetry = Dat
 Check(retrying.CanRetry && retrying.Retry.Contains("Retry in"), "Scheduled retries expose a countdown and Retry now.");
 retrying.Update(retrying.Account with { RecoveryReason = "RateLimit" });
 Check(!retrying.CanRetry, "Rate-limit cooldown disables Retry now.");
+
+var resourceJson = """
+{
+  "timestamp": "2026-11-13T00:00:00Z",
+  "sample_age_ms": 250,
+  "stale": false,
+  "availability": "partial",
+  "system": {
+    "logical_processors": 8,
+    "cpu_percent": 31.25,
+    "cpu_availability": "available",
+    "total_ram_bytes": 17179869184,
+    "available_ram_bytes": 8589934592,
+    "used_ram_bytes": 8589934592,
+    "ram_utilization_percent": 50.0,
+    "ram_availability": "available",
+    "gpu_percent": null,
+    "gpu_availability": "unavailable"
+  },
+  "aggregates": {
+    "running_instances": 1,
+    "total_accounts": 3,
+    "cpu_percent": 12.5,
+    "cpu_availability": "available",
+    "working_set_bytes": 536870912,
+    "private_memory_bytes": 419430400,
+    "gpu_percent": null,
+    "gpu_availability": "unavailable",
+    "unmanaged_roblox_processes": 1,
+    "inaccessible_roblox_processes": 0,
+    "exited_or_stale_instances": 1
+  },
+  "accounts": [
+    {
+      "account_id": "1",
+      "display_name": "Alpha",
+      "username": "alpha",
+      "account_status": "running",
+      "pid": 1001,
+      "creation_time": "100",
+      "cpu_percent": 12.5,
+      "working_set_bytes": 536870912,
+      "private_memory_bytes": 419430400,
+      "gpu_percent": null,
+      "gpu_availability": "unavailable",
+      "uptime_seconds": 3665,
+      "sampled_at": "2026-11-13T00:00:00Z",
+      "availability": "available"
+    },
+    {
+      "account_id": "2",
+      "display_name": "Beta",
+      "username": "beta",
+      "account_status": "stopped",
+      "pid": null,
+      "creation_time": null,
+      "cpu_percent": null,
+      "working_set_bytes": null,
+      "private_memory_bytes": null,
+      "gpu_percent": null,
+      "gpu_availability": "unavailable",
+      "uptime_seconds": null,
+      "sampled_at": "2026-11-13T00:00:00Z",
+      "availability": "exited"
+    },
+    {
+      "account_id": "3",
+      "display_name": "Gamma",
+      "username": "gamma",
+      "account_status": "running",
+      "pid": 3003,
+      "creation_time": "200",
+      "cpu_percent": 18.0,
+      "working_set_bytes": 268435456,
+      "private_memory_bytes": null,
+      "gpu_percent": 9.5,
+      "gpu_availability": "available",
+      "uptime_seconds": 60,
+      "sampled_at": "2026-11-13T00:00:00Z",
+      "availability": "available"
+    }
+  ],
+  "metadata": {
+    "cpu_normalization": "machine_percent",
+    "cpu_formula": "delta_cpu_time / (elapsed_wall_time * logical_processors) * 100",
+    "memory_units": "bytes",
+    "gpu_normalization": "gpu_engine_percent_sum_capped_100",
+    "sample_interval_ms": 1000,
+    "history_capacity": 60,
+    "stale_threshold_ms": 5000,
+    "sampling_mode": "active",
+    "last_sample_duration_ms": 4
+  },
+  "history": [
+    {
+      "timestamp": "2026-11-13T00:00:00Z",
+      "system_cpu_percent": 31.25,
+      "ram_utilization_percent": 50.0,
+      "managed_cpu_percent": 12.5,
+      "managed_ram_bytes": 536870912,
+      "managed_gpu_percent": null,
+      "running_instances": 1
+    }
+  ]
+}
+""";
+var parsedResources = JsonSerializer.Deserialize<ResourceSnapshotResponse>(resourceJson, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower, PropertyNameCaseInsensitive = true })!;
+Check(parsedResources.Metadata.CpuNormalization == "machine_percent" && parsedResources.Aggregates.RunningInstances == 1, "Resource snapshot deserializes normalized CPU and aggregate counts.");
+Check(ResourceFormatting.FormatBytes(536870912) == "512.0 MB" && ResourceFormatting.FormatBytes(16UL * 1024 * 1024 * 1024) == "16.00 GB", "IEC memory formatting renders MB and GB consistently.");
+Check(ResourceFormatting.FormatPercentMetric(null, "unavailable") == "Unavailable" && ResourceFormatting.FormatPercentMetric(null, "pending") == "Sampling…", "Unavailable and pending resource metrics render explicit states.");
+var byCpuDesc = ResourceFormatting.SortInstances(parsedResources.Accounts, "cpu", true);
+Check(byCpuDesc.Select(a => a.AccountId).SequenceEqual(["3", "1", "2"]), "Sorting by CPU descending puts highest live instance first and nulls last.");
+var byRamAsc = ResourceFormatting.SortInstances(parsedResources.Accounts, "ram", false);
+Check(byRamAsc.Select(a => a.AccountId).SequenceEqual(["3", "1", "2"]), "Sorting by RAM ascending keeps non-null rows before exited/null rows.");
+var alphaRow = new ResourceInstanceRow(parsedResources.Accounts[0]);
+var betaRow = new ResourceInstanceRow(parsedResources.Accounts[1]);
+var gammaRow = new ResourceInstanceRow(parsedResources.Accounts[2]);
+Check(alphaRow.Cpu == "12.5%" && alphaRow.Gpu == "Unavailable" && alphaRow.Uptime == "1h 1m 5s", "Available instance row formats CPU, unavailable GPU, and uptime.");
+Check(betaRow.Cpu == "—" && betaRow.Status.Contains("Exited"), "Exited instance row shows exited availability and placeholder metrics.");
+Check(gammaRow.Gpu == "9.5%", "Optional GPU utilization formats when supported.");
+var history = ResourceFormatting.MergeHistory([], parsedResources, 60);
+var nextPoint = parsedResources with { Timestamp = parsedResources.Timestamp.AddSeconds(1), History = null };
+for (var s = 1; s <= 65; s++)
+    history = ResourceFormatting.MergeHistory(history, parsedResources with { Timestamp = parsedResources.Timestamp.AddSeconds(s), History = null }, 60);
+Check(history.Length == 60 && history[0].Timestamp == parsedResources.Timestamp.AddSeconds(6), "Client history buffer stays bounded at 60 samples.");
+var noSaved = ResourceFormatting.EmptyStateCopy(0, 0);
+var noneRunning = ResourceFormatting.EmptyStateCopy(0, 3);
+var exitedRowPresent = ResourceFormatting.EmptyStateCopy(1, 3);
+Check(noSaved.Visible && noSaved.Title == "No saved accounts" && noneRunning.Visible && noneRunning.Title == "No running managed Roblox instances" && !exitedRowPresent.Visible,
+    "Resource empty-state overlay distinguishes empty rosters from stopped rosters and never covers exited rows.");
+
 await UpdateDownloadTests.RunAsync(Check);
 await ImportTests.RunAsync(Check);
 Console.WriteLine($"{passed} desktop model/editor/update checks passed.");

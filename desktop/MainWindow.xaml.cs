@@ -620,7 +620,7 @@ public sealed partial class MainWindow : Window
     }
     private void DisposeResources()
     {
-        _disposed = true; _timer.Stop(); _feedbackTimer.Stop(); _tray.Dispose(); _api.Dispose();
+        _disposed = true; _timer.Stop(); _feedbackTimer.Stop(); StopResourcesMonitoring(); _tray.Dispose(); _api.Dispose();
         DisposeUpdateResources();
     }
 }

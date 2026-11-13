@@ -32,6 +32,9 @@
 | POST | `/v1/accounts/USER_ID/restart` | Replace the current verified client |
 | GET | `/v1/operations/UUID` | Queued/completed/failed/cancelled operation |
 | GET | `/v1/events` | SSE snapshots; reconnect receives current snapshot |
+| GET | `/v1/resources` | Host and verified managed-instance resource snapshot; optional `?history=true&seconds=N` (`1..60`) |
+| GET | `/v1/resources/accounts/USER_ID` | Single-account resource metrics and optional `?history=true&seconds=N`; `404` if missing |
+| GET | `/v1/resources/events` | SSE `resources` snapshots; keeps ~1s active sampling while connected |
 | PATCH | `/v1/accounts/bulk` | `account_ids` (1–50 distinct IDs), `patch`; atomic settings update, alias patterns |
 | POST | `/v1/accounts/USER_ID/retry` | Advance an eligible retry; retain failure count and respect cooldowns |
 | POST | `/v1/accounts/USER_ID/repair` | Queue isolated sign-in requiring the same account ID |
@@ -72,6 +75,14 @@ Invoke-RestMethod 'http://127.0.0.1:38471/v1/accounts/USER_ID' -Method Patch -He
 Invoke-RestMethod 'http://127.0.0.1:38471/v1/accounts/USER_ID/start' -Method Post -Headers $headers
 ```
 
+### Resource monitor
+
+- CPU percentages use `machine_percent`: process CPU time divided by elapsed wall time and logical processors (`0.0–100.0`).
+- Memory fields report bytes (`working_set_bytes`, optional `private_memory_bytes`, host `used_ram_bytes`/`total_ram_bytes`).
+- GPU utilization is best-effort via Windows PDH engine counters and reports `unavailable` when unsupported.
+- Per-instance metrics require verified `ProcessIdentity` (PID and creation time); exited, inaccessible, or mismatched processes report explicit availability states and never grant close authority.
+- Endpoints omit cookies, launch tickets, targets, private links, and tokens.
+
 ### Discord bot settings
 
 - `PATCH /v1/settings/discord` accepts `bot`: `enabled`, `token`, `guild_id`, `allowed_users` (user ID strings).
@@ -79,7 +90,8 @@ Invoke-RestMethod 'http://127.0.0.1:38471/v1/accounts/USER_ID/start' -Method Pos
 - GET returns configuration flags, guild/users, status, and `connection_state` (`online`, `starting`, `offline`); never the token.
 - Save does not start a stopped bot. POST `/v1/settings/discord/bot/start`, `/stop`, or `/restart` controls its saved connection.
 - Start/Restart persist startup intent. Stop retains credentials but clears that intent; disabling/removing also clears it.
-- `/status-register channel` saves channel/message/page and refreshes changed data every 15 seconds.
+- `/status-register channel` saves channel/message/page and refreshes changed data every 15 seconds; `/resources-register channel` saves an independent resource monitor refreshed about every 30 seconds.
+- `/resources` replies ephemerally with host/managed overview or one account via `/resources account:NAME`.
 - Re-registering reuses the message or replaces a deleted one. Commands are opt-in and use supervised Stop/Restart.
 - The same loopback authentication and origin protections apply.
 

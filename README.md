@@ -1,4 +1,4 @@
-# RoLauncher 1.9.2
+# RoLauncher 2.0.0-dev.1c5f27a17cc4
 
 Manage Roblox accounts, save destinations, and rejoin disconnected sessions.
 RoLauncher is a native WinUI 3 desktop application for Windows.
@@ -23,8 +23,8 @@ Keep cookies private; never include them in bug reports.
 ## Features
 
 - Saved games, account groups, presets, and bulk edits.
-- Automatic rejoin, fallback policies, and activity Dashboard.
-- Encrypted backups, optional Discord alerts and bot controls.
+- Automatic rejoin, fallback policies, activity Dashboard, and read-only Resource Monitor.
+- Encrypted backups, optional Discord alerts, and bot commands (`/action`, `/status-register`, `/resources`, `/resources-register`).
 - System/light/dark themes, tray controls, and **Download → Relaunch** updates.
 - Optional beta updates under **Settings → Updates**.
 

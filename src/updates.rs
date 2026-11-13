@@ -236,16 +236,27 @@ mod tests {
             .collect(),
         }
     }
+    fn next_major_version() -> String {
+        let base = env!("CARGO_PKG_VERSION")
+            .split_once("-dev.")
+            .map(|(b, _)| b)
+            .unwrap_or(env!("CARGO_PKG_VERSION"));
+        let (major, _, _) = version(base).unwrap();
+        format!("{}.10.0", major + 1)
+    }
     #[test]
     fn beta_updates_require_opt_in_and_exact_beta_asset_links() {
-        assert!(parse_release("owner/repo", fixture("beta-v1.10.0", true), false).is_err());
-        let beta = parse_release("owner/repo", fixture("beta-v1.10.0", true), true).unwrap();
+        let ver = next_major_version();
+        let beta_tag = format!("beta-v{ver}");
+        let stable_tag = format!("v{ver}");
+        assert!(parse_release("owner/repo", fixture(&beta_tag, true), false).is_err());
+        let beta = parse_release("owner/repo", fixture(&beta_tag, true), true).unwrap();
         assert!(beta.prerelease && beta.available);
-        assert_eq!(beta.version, "1.10.0");
-        assert!(beta.checksums_url.contains("/beta-v1.10.0/"));
-        assert!(parse_release("owner/repo", fixture("beta-v1.10.0", false), true).is_err());
-        assert!(parse_release("owner/repo", fixture("v1.10.0", true), true).is_err());
-        let mut wrong = fixture("beta-v1.10.0", true);
+        assert_eq!(beta.version, ver);
+        assert!(beta.checksums_url.contains(&format!("/{beta_tag}/")));
+        assert!(parse_release("owner/repo", fixture(&beta_tag, false), true).is_err());
+        assert!(parse_release("owner/repo", fixture(&stable_tag, true), true).is_err());
+        let mut wrong = fixture(&beta_tag, true);
         wrong.assets[0].browser_download_url = wrong.assets[0]
             .browser_download_url
             .replace("/beta-v", "/v");
@@ -297,16 +308,16 @@ mod tests {
     }
     #[test]
     fn updates_compare_numeric_versions_and_require_matching_package_links() {
-        let make = || {
-            Release { tag_name: "v1.10.0".into(), draft: false, prerelease: false, assets: ["windows-x64.zip", "linux-x64.tar.gz", "setup-x64.exe", "SHA256SUMS.txt"].iter().map(|suffix| Asset { name: format!("rolauncher-v1.10.0-{suffix}"), browser_download_url: format!("https://github.com/owner/repo/releases/download/v1.10.0/rolauncher-v1.10.0-{suffix}") }).collect() }
-        };
+        let ver = next_major_version();
+        let tag = format!("v{ver}");
+        let make = || fixture(&tag, false);
         let view = parse_release("owner/repo", make(), false).unwrap();
         assert!(view.available);
-        assert_eq!(view.version, "1.10.0");
+        assert_eq!(view.version, ver);
         #[cfg(not(target_os = "linux"))]
         assert!(
             view.installer_url
-                .ends_with("rolauncher-v1.10.0-setup-x64.exe")
+                .ends_with(&format!("rolauncher-v{ver}-setup-x64.exe"))
         );
         assert!(view.download_url.ends_with(package_suffix()));
         #[cfg(target_os = "linux")]
