@@ -1,13 +1,13 @@
 # Changelog
 
-## [2.0.0] — Unreleased
+## [2.0.0] — 2026-11-13
 
-- Added read-only host and verified per-account CPU, RAM, and best-effort GPU resource monitoring.
-- Added authenticated `/v1/resources`, `/v1/resources/accounts/{account_id}`, and SSE `/v1/resources/events` endpoints.
-- Added a Resources page with 60-second history charts and sortable instance metrics.
-- Added Discord `/resources` and `/resources-register` commands with independent 30-second channel updates.
+- Replaced the WinUI 3 desktop with a native Rust GPUI interface for faster startup and lower memory use.
+- Added live system and per-account CPU, RAM, and optional GPU monitoring in **Workspace -> Resources**.
+- Added Discord `/resources` snapshots and `/resources-register` live-updating monitor embeds.
+- Added dark, light, and system themes, and keyboard shortcuts while preserving full feature parity.
 
-## [1.9.2] — Unreleased
+## [1.9.2] — 2026-11-13
 
 - Keep multiple accounts launching and attaching reliably without dropping into stuck Reconnecting states.
 - Allow managed account close, restart, and recovery to proceed even when external Roblox processes are running.

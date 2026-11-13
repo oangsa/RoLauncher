@@ -13,9 +13,9 @@ WebView2Loader.dll is Microsoft's WebView2 SDK loader, redistributed from webvie
 
 GNU builds may include GCC runtime and winpthreads DLLs. These carry their upstream GPL/LGPL licenses and applicable runtime exceptions, included with the release package. Source and license references: https://gcc.gnu.org/onlinedocs/libstdc++/manual/license.html and https://www.mingw-w64.org/.
 
-The WinUI 3 desktop uses Microsoft's Windows App SDK, Windows SDK projections/build tools and .NET runtime. Versions and package integrity hashes are pinned in desktop/packages.lock.json. The self-contained desktop includes the relevant package license files, nuspec metadata and runtime third-party notices in desktop/licenses. These components retain their respective Microsoft/MIT and other upstream terms; see the included notices.
+The native Windows desktop UI uses Zed Industries' `gpui` and `gpui_windows` crates (Apache-2.0), pinned in `Cargo.toml` and `Cargo.lock`. Runtime dependency metadata and notice files are collected from `cargo metadata` into `licenses/` and `desktop/licenses/`. Microsoft Edge WebView2 (`WebView2Loader.dll`) is used only during interactive Roblox sign-in.
 
-Distribute the complete Rust and XAML/C# application source, Cargo.lock and desktop package lock files with any binary redistribution under GPL-3.0. Do not redistribute build tool archives or unrelated personal credentials.
+Distribute the complete Rust supervisor and GPUI desktop source, `Cargo.toml`, `Cargo.lock`, and third-party license notices with any binary redistribution under GPL-3.0. Do not redistribute build tool archives or unrelated personal credentials.
 
 The Windows executable installer is built with Inno Setup by Jordan Russell and Martijn Laan (https://jrsoftware.org/). Its unchanged license and copyright notice are included in licenses/inno-setup.txt. Inno Setup is a separate build tool and retains its own license.
 
