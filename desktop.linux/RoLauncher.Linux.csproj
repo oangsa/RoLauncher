@@ -23,7 +23,7 @@
     <!-- Windows remains a native WinUI project. These are the same views and handlers. -->
     <ApplicationDefinition Include="../desktop/App.xaml" Link="App.xaml" />
     <Page Include="../desktop/MainWindow.xaml" Link="MainWindow.xaml" />
-    <Compile Include="../desktop/Usings.cs;../desktop/Bootstrap.cs;../desktop/ApiClient.cs;../desktop/Models.cs;../desktop/StatusConverter.cs;../desktop/AccountFilter.cs;../desktop/EditorDraft.cs;../desktop/BulkDraft.cs;../desktop/MainWindow.xaml.cs;../desktop/MainWindow.Management.cs;../desktop/MainWindow.Updates.cs;../desktop/UpdateDownloader.cs" Link="%(Filename)%(Extension)" />
+    <Compile Include="../desktop/Usings.cs;../desktop/Bootstrap.cs;../desktop/ApiClient.cs;../desktop/Models.cs;../desktop/StatusConverter.cs;../desktop/AccountFilter.cs;../desktop/EditorDraft.cs;../desktop/BulkDraft.cs;../desktop/MainWindow.xaml.cs;../desktop/MainWindow.Management.cs;../desktop/MainWindow.Updates.cs;../desktop/MainWindow.Resources.cs;../desktop/UpdateDownloader.cs" Link="%(Filename)%(Extension)" />
     <Content Include="../desktop/CHANGELOG.txt" Link="CHANGELOG.txt" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../assets/RoLauncher.ico" Link="RoLauncher.ico" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../assets/RoLauncher.png" Link="RoLauncher.png" CopyToOutputDirectory="PreserveNewest" />

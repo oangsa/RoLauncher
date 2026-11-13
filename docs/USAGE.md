@@ -67,6 +67,13 @@ Dashboard shows status, rejoin coverage, connectivity, destinations, and account
 Its 24-hour chart follows history filters; retention is capped at 1,000 events, so busy days can be incomplete.
 History identifies accounts by alias and username.
 
+## Resource monitor
+
+- Open **Workspace → Resources** for live host CPU/RAM, aggregated managed Roblox usage, 60-second charts, and sortable instance metrics.
+- Active 1-second sampling runs while viewing **Resources** or streaming `/v1/resources/events`, and suspends automatically afterward.
+- CPU utilization is normalized across all logical processors (`0–100%`). GPU utilization appears when Windows counters support it and shows `Unavailable` otherwise.
+- Process metrics remain read-only and never alter client memory or account lifecycle states.
+
 **Stop** closes the managed client. **Settings → General → Window** chooses tray minimization or full exit.
 Full exit leaves Roblox open and ends supervision; Linux uses taskbar minimization without a tray host.
 The icon beside the version opens the latest two changelog entries.
@@ -111,7 +118,7 @@ Use `--data-dir FOLDER` for a custom folder.
 - **Include beta updates** defaults off. Versions 1.0.0/1.1.0 must first install a later stable version to gain this option.
 - For alerts, save a text-channel webhook in **Settings → Discord**, enable notifications, then **Send test**.
 - Saved webhooks show dots: untouched keeps the URL, a new URL replaces it, and **Remove webhook** clears it.
-- Delivery is best effort; **Recent activity** also shows alerts locally. Bot setup: [1.5.0 notes](RELEASE-1.5.0.md#bot-setup).
+- Delivery is best effort; **Recent activity** also shows alerts locally. Bot commands include `/action`, `/status-register`, `/resources`, and `/resources-register` ([1.5.0 notes](RELEASE-1.5.0.md#bot-setup)).
 
 ## Troubleshooting
 

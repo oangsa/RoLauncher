@@ -1,5 +1,6 @@
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 
@@ -61,6 +62,38 @@ public sealed class ApiClient : IDisposable
             return result;
         }
         catch (JsonException) { throw new ApiException("RoLauncher returned an invalid response. Try again."); }
+    }
+    public async IAsyncEnumerable<ResourceSnapshotResponse> StreamResourcesAsync(
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, "resources/events");
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
+        using var response = await _client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+            throw new ApiException($"Resource stream unavailable (HTTP {(int)response.StatusCode}).");
+        using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var reader = new StreamReader(stream);
+        var data = new StringBuilder();
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            var line = await reader.ReadLineAsync(cancellationToken);
+            if (line is null) yield break;
+            if (line.Length == 0)
+            {
+                if (data.Length == 0) continue;
+                var json = data.ToString().TrimEnd();
+                data.Clear();
+                ResourceSnapshotResponse? parsed = null;
+                try { parsed = JsonSerializer.Deserialize<ResourceSnapshotResponse>(json, JsonOptions); }
+                catch (JsonException) { }
+                if (parsed is not null) yield return parsed;
+            }
+            else if (line.StartsWith("data:", StringComparison.Ordinal))
+            {
+                if (data.Length > 0) data.Append('\n');
+                data.Append(line[5..].TrimStart());
+            }
+        }
     }
     public void Dispose() => _client.Dispose();
 }

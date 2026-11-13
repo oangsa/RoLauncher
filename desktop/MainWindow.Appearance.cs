@@ -16,7 +16,7 @@ public sealed partial class MainWindow
     private (ToggleButton Tab, FrameworkElement Page, int Id)[] Destinations =>
     [
         (AccountsTab, AccountsPage, 0), (GamesTab, GamesPage, 4),
-        (RecoveryTab, RecoveryPage, 3), (PresetsTab, PresetsPage, 6),
+        (RecoveryTab, RecoveryPage, 3), (ResourcesTab, ResourcesPage, 12), (PresetsTab, PresetsPage, 6),
         (SettingsTab, SettingsPage, 1), (GameJoiningTab, GameJoiningPage, 11), (DiscordTab, DiscordPage, 7),
         (BackupsTab, BackupsPage, 8), (UpdatesTab, UpdatesPage, 9),
         (SupportTab, SupportPage, 10)
@@ -61,6 +61,7 @@ public sealed partial class MainWindow
         AnimatePage(direction, animate);
         if (page == 3) _ = GuardAsync(RefreshHistoryAsync);
         if (page == 8) _ = GuardAsync(RefreshBackupsAsync);
+        if (page == 12) StartResourcesMonitoring(); else StopResourcesMonitoring();
     }
 
     private void UpdateNavigationSelection(ToggleButton tab, bool animate)

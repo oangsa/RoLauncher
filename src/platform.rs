@@ -20,6 +20,50 @@ impl Player {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct NativeSystemCounters {
+    pub logical_processors: u32,
+    pub cpu_times: Option<(u64, u64, u64)>,
+    pub total_ram_bytes: Option<u64>,
+    pub available_ram_bytes: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeProcessStatus {
+    Alive,
+    Exited,
+    Inaccessible,
+    OwnershipMismatch,
+}
+
+#[derive(Clone, Debug)]
+pub struct NativeProcessCounters {
+    pub status: NativeProcessStatus,
+    pub cpu_100ns: Option<u64>,
+    pub working_set_bytes: Option<u64>,
+    pub private_memory_bytes: Option<u64>,
+    pub uptime_seconds: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
+pub enum NativeGpuReading {
+    Available {
+        system_percent: Option<f64>,
+        per_pid_percent: std::collections::HashMap<u32, f64>,
+    },
+    Pending,
+    Unavailable,
+}
+
+#[derive(Clone, Debug)]
+pub struct NativeResourceScan {
+    pub system: NativeSystemCounters,
+    pub processes: Vec<NativeProcessCounters>,
+    pub gpu: NativeGpuReading,
+    pub unmanaged_processes: Option<usize>,
+    pub inaccessible_processes: Option<usize>,
+}
+
 /// Windows uses the installed protocol; Linux isolates Sober by saved account.
 #[cfg(not(target_os = "linux"))]
 pub fn launch_for(uri: &str, _account_id: &str) -> Result<(), String> {
@@ -117,7 +161,8 @@ mod imp {
         Security::Cryptography::*,
         Storage::FileSystem::*,
         System::{
-            Diagnostics::ToolHelp::*, RemoteDesktop::ProcessIdToSessionId, RestartManager::*,
+            Diagnostics::ToolHelp::*, Performance::*, ProcessStatus::*,
+            RemoteDesktop::ProcessIdToSessionId, RestartManager::*, SystemInformation::*,
             Threading::*,
         },
         UI::{Shell::ShellExecuteW, WindowsAndMessaging::*},
@@ -164,6 +209,7 @@ mod imp {
     }
     include!("platform_image.rs");
     include!("platform_discovery.rs");
+    include!("platform_resources.rs");
     #[cfg(test)]
     mod discovery_tests {
         include!("platform_discovery_tests.rs");
@@ -1331,6 +1377,35 @@ mod imp {
     pub fn replace_file(temp: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
         std::fs::rename(temp, dest).map_err(|_| "Unable to save database".into())
     }
+    pub fn sample_native_resources(
+        targets: &[ProcessIdentity],
+        _collect_gpu: bool,
+    ) -> super::NativeResourceScan {
+        super::NativeResourceScan {
+            system: super::NativeSystemCounters {
+                logical_processors: std::thread::available_parallelism()
+                    .map(|n| n.get() as u32)
+                    .unwrap_or(1),
+                cpu_times: None,
+                total_ram_bytes: None,
+                available_ram_bytes: None,
+            },
+            processes: vec![
+                super::NativeProcessCounters {
+                    status: super::NativeProcessStatus::Inaccessible,
+                    cpu_100ns: None,
+                    working_set_bytes: None,
+                    private_memory_bytes: None,
+                    uptime_seconds: None,
+                };
+                targets.len()
+            ],
+            gpu: super::NativeGpuReading::Unavailable,
+            unmanaged_processes: None,
+            inaccessible_processes: None,
+        }
+    }
+    pub fn reset_native_resources() {}
 }
 #[cfg(not(any(windows, target_os = "linux")))]
 pub use imp::*;

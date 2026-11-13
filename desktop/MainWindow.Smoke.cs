@@ -128,6 +128,15 @@ public sealed partial class MainWindow
             VisualStateManager.GoToState(PresetsTab, "Normal", false);
             VisualStateManager.GoToState(RecoveryTab, "Checked", false);
             await CaptureAsync(directory, "dashboard.png");
+            Tab_Click(ResourcesTab, new RoutedEventArgs());
+            for (var i = 0; i < 60 && _resourceSnapshot is null; i++) await Task.Delay(50);
+            Assert(_resourceSnapshot is not null && RunningInstancesMetric.Text == "1" && SystemCpuMetric.Text == "24.5%" &&
+                SystemRamMetric.Text == "50.0%" && ManagedUsageMetric.Text == "8.5%" &&
+                CpuHistoryBars.Children.Count == 12 && RamHistoryBars.Children.Count == 12 &&
+                ResourceInstanceList.ItemsSource is ResourceInstanceRow[] { Length: 3 } resRows && resRows[0].Pid == "12000",
+                "Resource Monitor loads normalized overview metrics, history charts, and sorted instance rows.");
+            await CaptureAsync(directory, "resources.png");
+            Tab_Click(RecoveryTab, new RoutedEventArgs());
             UpdateWorkspace(new Snapshot([], true, "fixture"));
             Assert(TotalMetric.Text == "0" && CoverageMetric.Text == "—" && CoverageBar.Value == 0 && AttentionEmpty.Visibility == Visibility.Visible && NetworkSummary.Text.Contains("unavailable"), "Empty dashboard and suspended network have explicit states.");
             Assert(meters.All(m => m.Value == 0 && m.Maximum == 1), "Existing meters update for an empty snapshot.");
@@ -636,7 +645,7 @@ public sealed partial class MainWindow
             AssertChangelogLayout();
             await CaptureAsync(directory, "changelog-small.png", OpenDialog());
             InvokeDialogButton("CloseButton"); await changelog;
-            foreach (var tab in new[] { AccountsTab, GamesTab, RecoveryTab, PresetsTab, SettingsTab, GameJoiningTab, DiscordTab, BackupsTab, UpdatesTab, SupportTab })
+            foreach (var tab in new[] { AccountsTab, GamesTab, RecoveryTab, ResourcesTab, PresetsTab, SettingsTab, GameJoiningTab, DiscordTab, BackupsTab, UpdatesTab, SupportTab })
             {
                 Tab_Click(tab, new RoutedEventArgs()); await Task.Delay(80); Root.UpdateLayout();
                 var available = PageScroll.ActualWidth - PageScroll.Padding.Left - PageScroll.Padding.Right;

@@ -73,6 +73,11 @@
               <FontIcon Glyph="&#xE9D9;" FontSize="16"/><TextBlock Grid.Column="1" Text="Dashboard" FontSize="13" VerticalAlignment="Center" TextWrapping="Wrap"/>
             </Grid>
           </ToggleButton>
+          <ToggleButton x:Name="ResourcesTab" Tag="12" Click="Tab_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="10,11" BorderThickness="3,0,0,0" CornerRadius="12" AutomationProperties.Name="Resources">
+            <Grid ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="20"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+              <FontIcon Glyph="&#xE9D2;" FontSize="16"/><TextBlock Grid.Column="1" Text="Resources" FontSize="13" VerticalAlignment="Center" TextWrapping="Wrap"/>
+            </Grid>
+          </ToggleButton>
           <TextBlock Text="ACCOUNTS" Style="{StaticResource Caption}" FontWeight="SemiBold" Margin="12,16,0,8"/>
           <ToggleButton x:Name="PresetsTab" Tag="6" Click="Tab_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="10,11" BorderThickness="3,0,0,0" CornerRadius="12" AutomationProperties.Name="Account presets">
             <Grid ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="20"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
@@ -227,6 +232,92 @@
             </StackPanel>
           </Border>
         </StackPanel>
+        <StackPanel x:Name="ResourcesPage" Spacing="16" Visibility="Collapsed">
+          <Grid ColumnSpacing="12">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <StackPanel Spacing="4">
+              <TextBlock Text="Resources" FontSize="26" FontWeight="SemiBold"/>
+              <TextBlock x:Name="ResourceSamplerStatus" Text="Waiting for resource sampler…" Style="{StaticResource Caption}" TextWrapping="Wrap"/>
+            </StackPanel>
+            <Button x:Name="ResourceRefreshButton" Grid.Column="1" Content="Refresh" Click="ResourceRefresh_Click" VerticalAlignment="Center"/>
+          </Grid>
+          <InfoBar x:Name="ResourceBanner" IsOpen="False" IsClosable="False"/>
+          <Grid ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+            <Border Grid.Column="0" Style="{StaticResource Card}"><StackPanel Spacing="8"><TextBlock Text="Running instances" Style="{StaticResource Caption}"/><TextBlock x:Name="RunningInstancesMetric" Text="—" FontSize="32" FontWeight="SemiBold"/><TextBlock x:Name="RunningInstancesHint" Style="{StaticResource Caption}" TextWrapping="Wrap"/></StackPanel></Border>
+            <Border Grid.Column="1" Style="{StaticResource Card}"><StackPanel Spacing="8"><TextBlock Text="System CPU" Style="{StaticResource Caption}"/><TextBlock x:Name="SystemCpuMetric" Text="—" FontSize="32" FontWeight="SemiBold"/><TextBlock x:Name="SystemCpuHint" Style="{StaticResource Caption}" TextWrapping="Wrap"/></StackPanel></Border>
+            <Border Grid.Column="2" Style="{StaticResource Card}"><StackPanel Spacing="8"><TextBlock Text="System RAM" Style="{StaticResource Caption}"/><TextBlock x:Name="SystemRamMetric" Text="—" FontSize="32" FontWeight="SemiBold"/><TextBlock x:Name="SystemRamHint" Style="{StaticResource Caption}" TextWrapping="Wrap"/></StackPanel></Border>
+            <Border Grid.Column="3" Style="{StaticResource Card}"><StackPanel Spacing="8"><TextBlock Text="Managed Roblox" Style="{StaticResource Caption}"/><TextBlock x:Name="ManagedUsageMetric" Text="—" FontSize="32" FontWeight="SemiBold"/><TextBlock x:Name="ManagedUsageHint" Style="{StaticResource Caption}" TextWrapping="Wrap"/></StackPanel></Border>
+          </Grid>
+          <Grid ColumnSpacing="16"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+            <Border Grid.Column="0" Style="{StaticResource Card}"><StackPanel Spacing="10">
+              <TextBlock Text="CPU history · last 60s" Style="{StaticResource SectionTitle}"/>
+              <Grid x:Name="CpuHistoryBars" ColumnSpacing="2" Height="100"/>
+              <TextBlock x:Name="CpuHistoryCaption" Text="System (muted) · Managed Roblox (accent)" Style="{StaticResource Caption}" TextWrapping="Wrap"/>
+            </StackPanel></Border>
+            <Border Grid.Column="1" Style="{StaticResource Card}"><StackPanel Spacing="10">
+              <TextBlock Text="RAM history · last 60s" Style="{StaticResource SectionTitle}"/>
+              <Grid x:Name="RamHistoryBars" ColumnSpacing="2" Height="100"/>
+              <TextBlock x:Name="RamHistoryCaption" Text="Host RAM % (muted) · Managed Working Set (accent)" Style="{StaticResource Caption}" TextWrapping="Wrap"/>
+            </StackPanel></Border>
+          </Grid>
+          <Border Style="{StaticResource Card}"><StackPanel Spacing="12">
+            <Grid ColumnSpacing="12">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <StackPanel Spacing="2">
+                <TextBlock Text="Managed Roblox instances" Style="{StaticResource SectionTitle}"/>
+                <TextBlock Text="Read-only metrics bound to verified PID and creation identity. CPU % normalized across logical processors." Style="{StaticResource Caption}" TextWrapping="Wrap"/>
+              </StackPanel>
+              <ComboBox x:Name="ResourceSortBy" Grid.Column="1" SelectedIndex="1" MinWidth="150" VerticalAlignment="Center" SelectionChanged="ResourceSort_Changed" AutomationProperties.Name="Sort managed instances">
+                <ComboBoxItem Content="Sort: Account" Tag="name"/>
+                <ComboBoxItem Content="Sort: CPU %" Tag="cpu"/>
+                <ComboBoxItem Content="Sort: Physical RAM" Tag="ram"/>
+                <ComboBoxItem Content="Sort: Uptime" Tag="uptime"/>
+                <ComboBoxItem Content="Sort: PID" Tag="pid"/>
+                <ComboBoxItem Content="Sort: Status" Tag="status"/>
+              </ComboBox>
+              <Button x:Name="ResourceSortDirectionButton" Grid.Column="2" Content="High → Low" Click="ResourceSortDirection_Click" VerticalAlignment="Center"/>
+            </Grid>
+            <ScrollViewer HorizontalScrollBarVisibility="Auto" HorizontalScrollMode="Enabled" VerticalScrollBarVisibility="Disabled" VerticalScrollMode="Disabled" HorizontalContentAlignment="Stretch">
+              <StackPanel MinWidth="740" HorizontalAlignment="Stretch" Spacing="6">
+                <Grid Background="{ThemeResource TableHeaderBrush}" Padding="12,10" CornerRadius="6" ColumnSpacing="10">
+                  <Grid.ColumnDefinitions><ColumnDefinition Width="1.4*" MinWidth="120"/><ColumnDefinition Width="1.3*" MinWidth="120"/><ColumnDefinition Width="60"/><ColumnDefinition Width="65"/><ColumnDefinition Width="80"/><ColumnDefinition Width="80"/><ColumnDefinition Width="75"/><ColumnDefinition Width="75"/></Grid.ColumnDefinitions>
+                  <TextBlock Text="Account" Style="{StaticResource Caption}"/>
+                  <TextBlock Grid.Column="1" Text="Status" Style="{StaticResource Caption}"/>
+                  <TextBlock Grid.Column="2" Text="PID" Style="{StaticResource Caption}"/>
+                  <TextBlock Grid.Column="3" Text="CPU %" Style="{StaticResource Caption}"/>
+                  <TextBlock Grid.Column="4" Text="RAM" Style="{StaticResource Caption}"/>
+                  <TextBlock Grid.Column="5" Text="Private" Style="{StaticResource Caption}"/>
+                  <TextBlock Grid.Column="6" Text="GPU" Style="{StaticResource Caption}"/>
+                  <TextBlock Grid.Column="7" Text="Uptime" Style="{StaticResource Caption}"/>
+                </Grid>
+                <Grid>
+                  <ListView x:Name="ResourceInstanceList" MinHeight="140" MaxHeight="360" SelectionMode="None" AutomationProperties.Name="Managed instance resources">
+                    <ListView.ItemContainerStyle><Style TargetType="ListViewItem"><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="0"/><Setter Property="Margin" Value="0,1"/></Style></ListView.ItemContainerStyle>
+                    <ListView.ItemTemplate>
+                      <DataTemplate>
+                        <Grid Padding="12,10" ColumnSpacing="10" BorderBrush="{ThemeResource LineBrush}" BorderThickness="0,0,0,1">
+                          <Grid.ColumnDefinitions><ColumnDefinition Width="1.4*" MinWidth="120"/><ColumnDefinition Width="1.3*" MinWidth="120"/><ColumnDefinition Width="60"/><ColumnDefinition Width="65"/><ColumnDefinition Width="80"/><ColumnDefinition Width="80"/><ColumnDefinition Width="75"/><ColumnDefinition Width="75"/></Grid.ColumnDefinitions>
+                          <StackPanel Spacing="2" VerticalAlignment="Center"><TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/><TextBlock Text="{Binding Username}" Style="{StaticResource Caption}" TextTrimming="CharacterEllipsis"/></StackPanel>
+                          <TextBlock Grid.Column="1" Text="{Binding Status}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                          <TextBlock Grid.Column="2" Text="{Binding Pid}" VerticalAlignment="Center" Foreground="{ThemeResource MutedBrush}"/>
+                          <TextBlock Grid.Column="3" Text="{Binding Cpu}" VerticalAlignment="Center"/>
+                          <TextBlock Grid.Column="4" Text="{Binding Ram}" VerticalAlignment="Center"/>
+                          <TextBlock Grid.Column="5" Text="{Binding PrivateRam}" VerticalAlignment="Center" Foreground="{ThemeResource MutedBrush}"/>
+                          <TextBlock Grid.Column="6" Text="{Binding Gpu}" VerticalAlignment="Center" Foreground="{ThemeResource MutedBrush}"/>
+                          <TextBlock Grid.Column="7" Text="{Binding Uptime}" VerticalAlignment="Center" Foreground="{ThemeResource MutedBrush}"/>
+                        </Grid>
+                      </DataTemplate>
+                    </ListView.ItemTemplate>
+                  </ListView>
+                  <StackPanel x:Name="ResourceEmptyState" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="6" Margin="12">
+                    <TextBlock x:Name="ResourceEmptyTitle" Text="No running managed Roblox instances" FontWeight="SemiBold" HorizontalAlignment="Center"/>
+                    <TextBlock x:Name="ResourceEmptyHint" Text="Stopped accounts or active telemetry will appear here." Style="{StaticResource Caption}" HorizontalAlignment="Center"/>
+                  </StackPanel>
+                </Grid>
+              </StackPanel>
+            </ScrollViewer>
+          </StackPanel></Border>
+        </StackPanel>
         <StackPanel x:Name="RecoveryPage" Spacing="16" Visibility="Collapsed">
           <StackPanel Spacing="4"><TextBlock Text="Dashboard" FontSize="26" FontWeight="SemiBold"/><TextBlock x:Name="DashboardCounts" Style="{StaticResource Caption}"/></StackPanel>
           <Grid ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
@@ -351,7 +442,7 @@
               <TextBlock Text="Error alerts include a game screenshot when available." Style="{StaticResource Caption}" TextWrapping="Wrap"/>
               <TextBlock Text="Bot commands" Style="{StaticResource SectionTitle}" Margin="0,12,0,0"/>
               <TextBlock Text="Install with bot and applications.commands scopes. Allow View Channel, Send Messages, and Embed Links. Only listed users can access commands and autocomplete." Style="{StaticResource Caption}" TextWrapping="Wrap"/>
-              <CheckBox x:Name="BotEnabled" Content="Enable /action and /status-register"/>
+              <CheckBox x:Name="BotEnabled" Content="Enable /action, /status-register, /resources, and /resources-register"/>
               <PasswordBox x:Name="BotToken" Header="Bot token · blank keeps saved token" PasswordRevealMode="Hidden" MaxLength="256"/>
               <TextBox x:Name="BotGuild" Header="Server ID" MaxLength="20"/>
               <TextBox x:Name="BotUsers" Header="Allowed user IDs · comma separated" MaxLength="2200"/>
