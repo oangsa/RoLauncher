@@ -1405,6 +1405,7 @@ mod imp {
             inaccessible_processes: None,
         }
     }
+    pub fn reset_native_resources() {}
 }
 #[cfg(not(any(windows, target_os = "linux")))]
 pub use imp::*;

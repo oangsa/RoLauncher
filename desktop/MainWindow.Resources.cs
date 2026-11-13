@@ -226,21 +226,12 @@ public sealed partial class MainWindow
         var sorted = ResourceFormatting.SortInstances(snap.Accounts, _resourceSortBy, _resourceSortDesc);
         var rows = sorted.Select(a => new ResourceInstanceRow(a)).ToArray();
         ResourceInstanceList.ItemsSource = rows;
-        if (rows.Length == 0)
+        var (emptyVisible, emptyTitle, emptyHint) = ResourceFormatting.EmptyStateCopy(rows.Length, snap.Aggregates.TotalAccounts);
+        ResourceEmptyState.Visibility = emptyVisible ? Visibility.Visible : Visibility.Collapsed;
+        if (emptyVisible)
         {
-            ResourceEmptyState.Visibility = Visibility.Visible;
-            ResourceEmptyTitle.Text = "No saved accounts";
-            ResourceEmptyHint.Text = "Add an account to monitor its managed Roblox instance.";
-        }
-        else if (snap.Aggregates.RunningInstances == 0)
-        {
-            ResourceEmptyState.Visibility = Visibility.Visible;
-            ResourceEmptyTitle.Text = "No running managed Roblox instances";
-            ResourceEmptyHint.Text = "Stopped and exited accounts appear below until started.";
-        }
-        else
-        {
-            ResourceEmptyState.Visibility = Visibility.Collapsed;
+            ResourceEmptyTitle.Text = emptyTitle;
+            ResourceEmptyHint.Text = emptyHint;
         }
     }
 

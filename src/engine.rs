@@ -860,10 +860,14 @@ impl Engine {
         self.0.discord.view()
     }
     pub(crate) fn bot_settings(&self) -> crate::discord_bot::SavedBot {
-        let mut saved = self.0.state.lock().unwrap().database.discord.bot.clone();
-        saved.registration = None;
-        saved.resources_registration = None;
-        saved
+        self.0
+            .state
+            .lock()
+            .unwrap()
+            .database
+            .discord
+            .bot
+            .without_registrations()
     }
     pub(crate) fn bot_generation(&self) -> u64 {
         self.0.bot_generation.load(Ordering::Acquire)
@@ -938,10 +942,7 @@ impl Engine {
         registration: crate::discord_bot::StatusRegistration,
     ) -> Result<(), String> {
         self.transaction(|s| {
-            let mut current = s.database.discord.bot.clone();
-            current.registration = None;
-            current.resources_registration = None;
-            if &current != settings {
+            if &s.database.discord.bot.without_registrations() != settings {
                 return Err("Bot settings changed".into());
             }
             s.database.discord.bot.registration = Some(registration);
@@ -967,10 +968,7 @@ impl Engine {
         registration: Option<crate::discord_bot::StatusRegistration>,
     ) -> Result<(), String> {
         self.transaction(|s| {
-            let mut current = s.database.discord.bot.clone();
-            current.registration = None;
-            current.resources_registration = None;
-            if &current != settings {
+            if &s.database.discord.bot.without_registrations() != settings {
                 return Err("Bot settings changed".into());
             }
             s.database.discord.bot.resources_registration = registration;
@@ -1275,7 +1273,14 @@ impl Engine {
         }
         let _dispatch = self.0.dispatch_lock.lock().unwrap();
         self.transaction(|s| {
-            if bot.is_some_and(|b| { let mut saved = s.database.discord.bot.clone(); saved.registration = None; !b.enabled || *b != saved || self.bot_generation().is_multiple_of(2) }) || self.is_shutdown() { return Err("Command connection changed".into()); }
+            if bot.is_some_and(|b| {
+                !b.enabled
+                    || *b != s.database.discord.bot.without_registrations()
+                    || self.bot_generation().is_multiple_of(2)
+            }) || self.is_shutdown()
+            {
+                return Err("Command connection changed".into());
+            }
             let existing = account_mut(s,id)?.clone();
             if (action == "start" && existing.desired_running && existing.status != Status::NeedsAttention) || (action == "stop" && !existing.desired_running && existing.close_intent.as_ref().is_some_and(|i| i.reason == CloseReason::UserStop && !i.denied && !i.id.is_nil()) && !s.database.retired_launches.iter().any(|r| r.account_id == id && r.process.is_some() && r.close_intent != existing.close_intent)) {
                 if let Some(op) = existing.operation_id.and_then(|id|s.operations.get(&id)).cloned() { return Ok(op); }
@@ -4781,14 +4786,32 @@ mod tests {
             .unwrap();
         assert!(engine.bot_settings() == saved);
         assert!(engine.bot_registration() == Some(registration.clone()));
+        let res_registration = crate::discord_bot::StatusRegistration {
+            guild_id: "42".into(),
+            channel_id: 45,
+            message_id: 46,
+            page: 0,
+        };
+        engine
+            .set_bot_resources_registration(&saved, Some(res_registration.clone()))
+            .unwrap();
+        assert!(engine.bot_settings() == saved);
+        assert!(engine.bot_resources_registration() == Some(res_registration.clone()));
         engine.bot_control("stop").unwrap();
         assert_eq!(engine.bot_generation() % 2, 0);
         assert!(engine.bot_settings() == saved);
         engine.bot_control("start").unwrap();
         assert_eq!(engine.bot_generation() % 2, 1);
+        assert_eq!(
+            engine
+                .bot_command(&saved, "missing-account", "stop")
+                .unwrap_err(),
+            "Account not found"
+        );
         let reopened = Engine::open(Store::new(path.clone()).unwrap(), "test".into()).unwrap();
         assert!(reopened.bot_settings() == saved);
         assert!(reopened.bot_registration() == Some(registration));
+        assert!(reopened.bot_resources_registration() == Some(res_registration));
         assert_eq!(reopened.bot_generation(), 1);
         reopened.bot_control("stop").unwrap();
         let stopped = Engine::open(Store::new(path.clone()).unwrap(), "test".into()).unwrap();

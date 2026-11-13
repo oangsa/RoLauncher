@@ -36,6 +36,16 @@ pub struct SavedBot {
     pub registration: Option<StatusRegistration>,
     pub resources_registration: Option<StatusRegistration>,
 }
+impl SavedBot {
+    /// Strip transient message registrations so config equality checks stay aligned
+    /// across `/status-register`, `/resources-register`, and `/action`.
+    pub(crate) fn without_registrations(&self) -> Self {
+        let mut stripped = self.clone();
+        stripped.registration = None;
+        stripped.resources_registration = None;
+        stripped
+    }
+}
 #[derive(Default, Deserialize)]
 pub struct BotPatch {
     pub enabled: Option<bool>,
@@ -377,6 +387,17 @@ fn format_instance_line(row: &ManagedInstanceResource) -> String {
         }
     }
 }
+fn truncate_embed_description(mut combined: String) -> String {
+    if combined.len() > 3800 {
+        let mut end = 3797.min(combined.len());
+        while end > 0 && !combined.is_char_boundary(end) {
+            end -= 1;
+        }
+        combined.truncate(end);
+        combined.push_str("...");
+    }
+    combined
+}
 fn resources_page(snap: &ResourceSnapshot, page: usize) -> (CreateEmbed, Vec<CreateActionRow>) {
     let visible = resources_visible_rows(snap);
     let pages = visible.len().div_ceil(RESOURCES_PAGE_SIZE).max(1);
@@ -439,12 +460,11 @@ fn resources_page(snap: &ResourceSnapshot, page: usize) -> (CreateEmbed, Vec<Cre
             summary.join("\n")
         )
     } else {
-        let mut combined = format!("{}\n\n{}", summary.join("\n"), instance_lines.join("\n"));
-        if combined.len() > 3800 {
-            combined.truncate(3797);
-            combined.push_str("...");
-        }
-        combined
+        truncate_embed_description(format!(
+            "{}\n\n{}",
+            summary.join("\n"),
+            instance_lines.join("\n")
+        ))
     };
 
     let ts = snap.timestamp.format("%Y-%m-%d %H:%M:%S UTC");
@@ -1641,5 +1661,16 @@ mod tests {
         let changed = new_guild.apply(&base).unwrap();
         assert!(changed.registration.is_none());
         assert!(changed.resources_registration.is_none());
+    }
+
+    #[test]
+    fn resources_page_truncates_safely_on_multibyte_utf8_boundaries() {
+        for pad in 0..8 {
+            let input = format!("{}{}", "a".repeat(pad), "界".repeat(1400));
+            assert!(input.len() > 3800);
+            let truncated = truncate_embed_description(input);
+            assert!(truncated.len() <= 3800);
+            assert!(truncated.ends_with("..."));
+        }
     }
 }

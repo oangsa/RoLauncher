@@ -665,6 +665,8 @@ pub fn sample_native_resources(
     }
 }
 
+pub fn reset_native_resources() {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -4,7 +4,8 @@
 
 use crate::model::{Account, ProcessIdentity, Status};
 use crate::platform::{
-    NativeGpuReading, NativeProcessStatus, NativeResourceScan, sample_native_resources,
+    NativeGpuReading, NativeProcessStatus, NativeResourceScan, reset_native_resources,
+    sample_native_resources,
 };
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -193,10 +194,8 @@ impl MetricsBackend for NativeMetricsBackend {
     fn collect(&self, targets: &[ProcessIdentity], collect_gpu: bool) -> NativeResourceScan {
         sample_native_resources(targets, collect_gpu)
     }
-    #[cfg(windows)]
     fn reset(&self) {
-        // Calling collect with empty targets and collect_gpu = false clears the PDH handle.
-        let _ = sample_native_resources(&[], false);
+        reset_native_resources();
     }
 }
 
@@ -342,10 +341,17 @@ impl ResourceMonitor {
 
     pub fn latest(&self, sustain_demand: bool) -> Option<ResourceSnapshot> {
         let mut state = self.inner.state.write().unwrap();
+        let was_idle = state.paused
+            || (state.active_leases == 0
+                && state
+                    .last_demand_mono
+                    .is_none_or(|t| t.elapsed() >= DEMAND_HOLD_WINDOW));
         if sustain_demand {
             state.last_demand_mono = Some(Instant::now());
             state.paused = false;
-            self.inner.wake.notify_one();
+            if was_idle {
+                self.inner.wake.notify_one();
+            }
         }
         let mode = if state.active_leases > 0 {
             SamplingMode::Active
@@ -999,6 +1005,9 @@ fn with_freshness(snapshot: &ResourceSnapshot, sampling_mode: SamplingMode) -> R
 }
 
 fn accounts_changed_from_snapshot(accounts: &[Account], snapshot: &ResourceSnapshot) -> bool {
+    if accounts.len() != snapshot.aggregates.total_accounts {
+        return true;
+    }
     let current_pids: Vec<(&str, Option<u32>, &str)> = accounts
         .iter()
         .filter(|a| a.process.is_some())

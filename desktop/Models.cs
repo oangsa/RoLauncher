@@ -278,4 +278,12 @@ public static class ResourceFormatting
         while (points.Count > capacity) points.RemoveAt(0);
         return points.ToArray();
     }
+
+    public static (bool Visible, string Title, string Hint) EmptyStateCopy(int rowCount, int totalAccounts)
+    {
+        if (rowCount > 0) return (false, "", "");
+        return totalAccounts == 0
+            ? (true, "No saved accounts", "Add an account to monitor its managed Roblox instance.")
+            : (true, "No running managed Roblox instances", "Start an account on Accounts to view live CPU, RAM, and GPU metrics.");
+    }
 }

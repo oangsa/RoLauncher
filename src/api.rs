@@ -527,31 +527,33 @@ async fn resources_events(
     let initial = engine
         .resources_snapshot(true, crate::resources::HISTORY_CAPACITY, true, true, true)
         .await;
+    let initial_event = Event::default()
+        .event("resources")
+        .json_data(initial)
+        .ok()
+        .map(Ok);
     let recover = engine.clone();
-    let stream = futures_util::stream::once(async move {
-        Ok(Event::default()
-            .event("resources")
-            .json_data(initial)
-            .unwrap())
-    })
-    .chain(BroadcastStream::new(receiver).filter_map(move |item| {
-        // Hold `lease` inside this stream closure so SSE disconnect releases active sampling.
-        let _keep = &lease;
-        let snapshot = match item {
-            Ok(snap) => Some(snap),
-            Err(_) => recover.latest_resources(true),
-        };
-        let event = snapshot.map(|snap| {
-            Ok(Event::default()
-                .event("resources")
-                .json_data(crate::resources::ResourceSnapshotResponse {
-                    snapshot: snap,
-                    history: None,
-                })
-                .unwrap())
-        });
-        std::future::ready(event)
-    }));
+    let stream = futures_util::stream::iter(initial_event).chain(
+        BroadcastStream::new(receiver).filter_map(move |item| {
+            // Hold `lease` inside this stream closure so SSE disconnect releases active sampling.
+            let _keep = &lease;
+            let snapshot = match item {
+                Ok(snap) => Some(snap),
+                Err(_) => recover.latest_resources(true),
+            };
+            let event = snapshot.and_then(|snap| {
+                Event::default()
+                    .event("resources")
+                    .json_data(crate::resources::ResourceSnapshotResponse {
+                        snapshot: snap,
+                        history: None,
+                    })
+                    .ok()
+                    .map(Ok)
+            });
+            std::future::ready(event)
+        }),
+    );
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 pub async fn serve(engine: Engine, port: u16) -> Result<(), String> {

@@ -98,6 +98,16 @@ fn wide_slice_to_string(ptr: *const u16) -> Option<String> {
 }
 
 impl GpuPdhState {
+    fn handle_empty_valid_items(&mut self, now: Instant) -> NativeGpuReading {
+        self.cached = None;
+        if self.collects < 3 {
+            return NativeGpuReading::Pending;
+        }
+        self.unavailable_until = Some(now + GPU_FAILURE_BACKOFF);
+        self.query = None;
+        NativeGpuReading::Unavailable
+    }
+
     fn open_query(&mut self) -> Result<(), ()> {
         self.query = None;
         self.counter = std::ptr::null_mut();
@@ -146,6 +156,9 @@ impl GpuPdhState {
             .is_none_or(|t| now.saturating_duration_since(t) >= GPU_REBUILD_MIN_INTERVAL);
 
         if self.query.is_none() || ((has_unseen_pid || periodic_refresh) && rebuild_allowed) {
+            if has_unseen_pid {
+                self.cached = None;
+            }
             if self.open_query().is_err() {
                 self.unavailable_until = Some(now + GPU_FAILURE_BACKOFF);
                 self.cached = None;
@@ -273,11 +286,7 @@ impl GpuPdhState {
         }
 
         if valid_items == 0 {
-            if self.cached.is_none() && self.collects < 3 {
-                return NativeGpuReading::Pending;
-            }
-            self.unavailable_until = Some(now + GPU_FAILURE_BACKOFF);
-            return NativeGpuReading::Unavailable;
+            return self.handle_empty_valid_items(now);
         }
 
         self.known_pids = observed_pids;
@@ -477,6 +486,10 @@ pub fn sample_native_resources(targets: &[ProcessIdentity], collect_gpu: bool) -
     sample_resources_with(targets, collect_gpu, valid_player_image)
 }
 
+pub fn reset_native_resources() {
+    reset_gpu_sampler();
+}
+
 #[cfg(test)]
 pub(crate) fn sample_native_resources_fixture(
     targets: &[ProcessIdentity],
@@ -505,6 +518,30 @@ mod resource_tests {
         );
         assert_eq!(parse_gpu_engine_instance("pid_abc_luid_0_eng_0"), None);
         assert_eq!(parse_gpu_engine_instance("other_1234"), None);
+    }
+
+    #[test]
+    fn gpu_rebuild_warmup_does_not_lock_out_when_cache_already_exists() {
+        let mut state = GpuPdhState {
+            collects: 2,
+            cached: Some((Some(12.5), HashMap::from([(100, 12.5)]))),
+            ..Default::default()
+        };
+        let now = Instant::now();
+        assert!(matches!(
+            state.handle_empty_valid_items(now),
+            NativeGpuReading::Pending
+        ));
+        assert!(state.unavailable_until.is_none());
+        assert!(state.cached.is_none());
+
+        state.collects = 3;
+        assert!(matches!(
+            state.handle_empty_valid_items(now),
+            NativeGpuReading::Unavailable
+        ));
+        assert!(state.unavailable_until.is_some());
+        assert!(state.query.is_none());
     }
 
     #[test]

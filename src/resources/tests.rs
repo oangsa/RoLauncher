@@ -11,6 +11,7 @@ type ScriptedCollector =
 
 struct ScriptedBackend {
     calls: AtomicUsize,
+    resets: AtomicUsize,
     responder: StdMutex<ScriptedCollector>,
 }
 
@@ -20,6 +21,7 @@ impl ScriptedBackend {
     ) -> Self {
         Self {
             calls: AtomicUsize::new(0),
+            resets: AtomicUsize::new(0),
             responder: StdMutex::new(Box::new(f)),
         }
     }
@@ -29,6 +31,9 @@ impl MetricsBackend for ScriptedBackend {
     fn collect(&self, targets: &[ProcessIdentity], collect_gpu: bool) -> NativeResourceScan {
         let idx = self.calls.fetch_add(1, Ordering::AcqRel);
         (self.responder.lock().unwrap())(targets, collect_gpu, idx)
+    }
+    fn reset(&self) {
+        self.resets.fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -482,4 +487,34 @@ async fn benchmark_0_10_50_simulated_verified_instances() {
             snap2.metadata.last_sample_duration_ms
         );
     }
+}
+
+#[tokio::test]
+async fn total_accounts_change_invalidates_cache_and_shutdown_resets_backend() {
+    let backend = Arc::new(ScriptedBackend::new(|_, _, idx| NativeResourceScan {
+        system: NativeSystemCounters {
+            logical_processors: 4,
+            cpu_times: Some((100 + idx as u64 * 10, 200 + idx as u64 * 20, 100)),
+            total_ram_bytes: Some(8_000_000_000),
+            available_ram_bytes: Some(4_000_000_000),
+        },
+        processes: vec![],
+        gpu: NativeGpuReading::Unavailable,
+        unmanaged_processes: Some(0),
+        inaccessible_processes: Some(0),
+    }));
+    let monitor = ResourceMonitor::with_backend(backend.clone());
+    monitor.set_cold_warmup_for_test(Duration::ZERO);
+
+    let first = monitor.snapshot_or_refresh(&[], false, false, false).await;
+    assert_eq!(first.aggregates.total_accounts, 0);
+    let stopped = Account::new("s1".into(), "stopped_user".into());
+    let second = monitor
+        .snapshot_or_refresh(&[stopped], false, false, false)
+        .await;
+    assert_eq!(second.aggregates.total_accounts, 1);
+    assert_eq!(backend.calls.load(Ordering::Acquire), 2);
+
+    monitor.shutdown();
+    assert_eq!(backend.resets.load(Ordering::Acquire), 1);
 }

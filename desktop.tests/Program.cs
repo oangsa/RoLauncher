@@ -217,6 +217,11 @@ var nextPoint = parsedResources with { Timestamp = parsedResources.Timestamp.Add
 for (var s = 1; s <= 65; s++)
     history = ResourceFormatting.MergeHistory(history, parsedResources with { Timestamp = parsedResources.Timestamp.AddSeconds(s), History = null }, 60);
 Check(history.Length == 60 && history[0].Timestamp == parsedResources.Timestamp.AddSeconds(6), "Client history buffer stays bounded at 60 samples.");
+var noSaved = ResourceFormatting.EmptyStateCopy(0, 0);
+var noneRunning = ResourceFormatting.EmptyStateCopy(0, 3);
+var exitedRowPresent = ResourceFormatting.EmptyStateCopy(1, 3);
+Check(noSaved.Visible && noSaved.Title == "No saved accounts" && noneRunning.Visible && noneRunning.Title == "No running managed Roblox instances" && !exitedRowPresent.Visible,
+    "Resource empty-state overlay distinguishes empty rosters from stopped rosters and never covers exited rows.");
 
 await UpdateDownloadTests.RunAsync(Check);
 await ImportTests.RunAsync(Check);
