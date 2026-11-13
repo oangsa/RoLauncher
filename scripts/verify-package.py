@@ -32,20 +32,19 @@ with zipfile.ZipFile(dist / f"{name}-source.zip") as source:
     assert source.testzip() is None
     paths = {p.replace("\\", "/"): p for p in source.namelist()}
     for filename in ["Cargo.toml", "Cargo.lock", "AGENTS.md", "README.md", "src/engine/management.rs",
-                     "src/updates.rs", "desktop/MainWindow.Management.cs", "desktop/MainWindow.Workspace.cs",
-                     "desktop/MainWindow.xaml", "desktop/MainWindow.xaml.cs", "desktop/BulkDraft.cs",
+                     "src/updates.rs", "desktop/src/main.rs", "desktop/src/app/mod.rs",
+                     "desktop/src/api.rs", "desktop/src/pages/resources.rs", "desktop/Cargo.toml",
                      "scripts/sober-isolation/options.json", "desktop.linux/MainWindow.Smoke.cs",
                      f"docs/RELEASE-{core(version)}.md", "docs/VALIDATION.md", "docs/API.md", "docs/USAGE.md",
-                     "docs/DEVELOPMENT.md", "docs/PERFORMANCE.md", "desktop/packages.lock.json",
-                     "desktop.tests/packages.lock.json", "desktop/RoLauncher.Desktop.csproj",
-                     "desktop.tests/RoLauncher.Desktop.Tests.csproj", "src/store.rs", "src/platform.rs",
+                     "docs/DEVELOPMENT.md", "docs/PERFORMANCE.md", "desktop/build.rs", "desktop/app.manifest",
+                     "desktop/CHANGELOG.txt", "src/store.rs", "src/platform.rs",
                      "scripts/verify-package.py", "build.rs", "assets/RoLauncher.ico", "installer/RoLauncher.iss",
                      "scripts/apply-update.ps1", "scripts/build-installer.ps1", ".github/workflows/ci-release.yml",
-                     "desktop/MainWindow.Updates.cs", "desktop/UpdateDownloader.cs", "desktop/UpdateHandoff.cs", "CHANGELOG.md"]:
+                     "CHANGELOG.md"]:
         assert filename in paths, filename
         assert source.read(paths[filename]) == (root / filename).read_bytes(), filename
     for filename in ["desktop.linux/RoLauncher.Linux.csproj", "desktop.linux/packages.lock.json",
-                     "desktop.linux/MainWindow.Platform.cs", "desktop/Bootstrap.cs", "desktop/MainWindow.Platform.cs",
+                     "desktop.linux/MainWindow.Platform.cs", "desktop/src/bootstrap.rs", "desktop/src/platform/window.rs",
                      "src/platform_linux.rs", "src/login_linux.rs", "src/ui_linux.rs", "docs/LINUX.md",
                      "scripts/build-linux.sh", "scripts/package-linux.py", "scripts/login-linux.py",
                      "scripts/message-linux.py", "scripts/apply-update-linux.py", "scripts/install-linux.py",
@@ -70,7 +69,7 @@ with zipfile.ZipFile(dist / f"{name}-windows-x64.zip") as package:
     assert package.testzip() is None
     paths = {p.replace("\\", "/"): p for p in package.namelist()}
     for filename in ["RoLauncher.exe", "WebView2Loader.dll", "AGENTS.md", "README.md", "LICENSE",
-                     "THIRD_PARTY_NOTICES.md", "desktop/RoLauncher.Desktop.exe", "desktop/RoLauncher.Desktop.pri",
+                     "THIRD_PARTY_NOTICES.md", "desktop/RoLauncher.Desktop.exe",
                      "desktop/CHANGELOG.txt", "desktop/RoLauncher.ico", "desktop/licenses/dependencies.json", "licenses/dependencies.json"]:
         assert f"{name}/{filename}" in paths, filename
     assert package.read(paths[f"{name}/AGENTS.md"]) == (root / "AGENTS.md").read_bytes()
@@ -79,8 +78,8 @@ with zipfile.ZipFile(dist / f"{name}-windows-x64.zip") as package:
     for filename in ["API.md", "USAGE.md", "DEVELOPMENT.md", "PERFORMANCE.md"]:
         assert package.read(paths[f"{name}/docs/{filename}"]) == (root / "docs" / filename).read_bytes()
     assert not any("RbxTools.Desktop" in p or p.endswith("/rbx-tools.exe") for p in paths)
-    assert b"RbxTools" not in package.read(paths[f"{name}/desktop/RoLauncher.Desktop.dll"])
-    assert "WinUI bridge passed".encode("utf-16le") not in package.read(paths[f"{name}/desktop/RoLauncher.Desktop.dll"])
+    assert b"RbxTools" not in package.read(paths[f"{name}/desktop/RoLauncher.Desktop.exe"])
+    assert b"GPUI bridge passed" not in package.read(paths[f"{name}/desktop/RoLauncher.Desktop.exe"])
 print("Verified SHA256, intact ZIPs, matching version/source/instructions, runtime and license files, and absence of smoke code/build caches.")
 
 if args.smoke_shell:
@@ -125,7 +124,7 @@ if args.smoke_shell:
         assert process.poll() is None, f"Published shell exited: {process.returncode}"
         assert requests.count("/v1/status") >= 2 and "/v1/settings/discord" in requests, requests
         assert "/v1/updates/official/check" in requests, "Automatic startup update check did not occur"
-        print("Published WinUI shell passed startup/polling against an isolated API fixture; no saved accounts or external services accessed.")
+        print("Published GPUI shell passed startup/polling against an isolated API fixture; no saved accounts or external services accessed.")
     finally:
         if process.poll() is None:
             process.terminate()

@@ -199,23 +199,10 @@ class SecurityTests(unittest.TestCase):
             self.assertIn("unverified", result.stdout)
             self.assertFalse((Path(directory) / "gitleaks").exists())
 
-    def test_empty_nuget_test_lock_is_not_a_clean_runtime_audit(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            project = root / "desktop.tests/RoLauncher.Desktop.Tests.csproj"
-            project.parent.mkdir()
-            project.write_bytes(SCRIPT.parent.parent.joinpath("desktop.tests/RoLauncher.Desktop.Tests.csproj").read_bytes())
-            project.with_name("packages.lock.json").write_text(json.dumps({"version": 1, "dependencies": {"net8.0": {}}}))
-            result = self.cli("audit", "--kind", "nuget", "--root", root, "--project", "desktop.tests/RoLauncher.Desktop.Tests.csproj",
-                              "--tool", "intentionally-absent")
-            self.assertEqual(result.returncode, 0)
-            self.assertEqual(json.loads(result.stdout)["status"], "not-applicable")
-            self.assertIn("SDK/runtime packs are not audited", json.loads(result.stdout)["reason"])
-
     def test_unreviewed_empty_nuget_graphs_are_unverified(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for name in ("desktop/RoLauncher.Desktop.csproj", "desktop.linux/RoLauncher.Linux.csproj", "other.csproj"):
+            for name in ("fixture/App.csproj", "desktop.linux/RoLauncher.Linux.csproj", "other.csproj"):
                 with self.subTest(project=name):
                     project = root / name
                     project.parent.mkdir(parents=True, exist_ok=True)
@@ -229,7 +216,7 @@ class SecurityTests(unittest.TestCase):
     def test_empty_or_incomplete_production_locks_cannot_use_a_clean_native_report(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            project = root / "desktop/RoLauncher.Desktop.csproj"
+            project = root / "fixture/App.csproj"
             project.parent.mkdir()
             project.write_text('<Project Sdk="Microsoft.NET.Sdk"/>')
             native = json.dumps({"version": 1, "sources": ["https://api.nuget.org/v3/index.json"],
@@ -242,47 +229,12 @@ class SecurityTests(unittest.TestCase):
                     project.with_name("packages.lock.json").write_text(json.dumps(lock))
                     output = io.StringIO()
                     with patch.object(sys, "argv", [str(SCRIPT), "audit", "--kind", "nuget", "--root", str(root),
-                                    "--project", "desktop/RoLauncher.Desktop.csproj"]), \
+                                    "--project", "fixture/App.csproj"]), \
                          patch("security.subprocess.run", return_value=subprocess.CompletedProcess([], 0, native, b"")), \
                          redirect_stdout(output):
                         code = main()
                     self.assertEqual(code, 2)
                     self.assertEqual(json.loads(output.getvalue())["status"], "unverified")
-
-    def test_zero_package_exception_rejects_changed_configuration_and_implicit_imports(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            project = root / "desktop.tests/RoLauncher.Desktop.Tests.csproj"
-            project.parent.mkdir()
-            reviewed = SCRIPT.parent.parent.joinpath("desktop.tests/RoLauncher.Desktop.Tests.csproj").read_bytes()
-            lock = project.with_name("packages.lock.json")
-            lock.write_text(json.dumps({"version": 1, "dependencies": {"net8.0": {}}}))
-            for location in (root, project.parent):
-                for name in ("Directory.Build.props", "Directory.Build.targets", "Directory.Packages.props", "global.json"):
-                    with self.subTest(location=location.name, configuration=name):
-                        project.write_bytes(reviewed)
-                        extra = location / name
-                        extra.write_text('<Project><ItemGroup><PackageReference Include="Synthetic.Package" Version="1.0.0"/></ItemGroup></Project>')
-                        result = self.cli("audit", "--kind", "nuget", "--root", root,
-                            "--project", "desktop.tests/RoLauncher.Desktop.Tests.csproj", "--tool", "intentionally-absent")
-                        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-                        extra.unlink()
-            for content in (reviewed.replace(b"</Project>", b'<ItemGroup><PackageReference Include="Synthetic.Package" Version="1.0.0"/></ItemGroup></Project>'),
-                            reviewed.replace(b"</Project>", b'<Import Project="extra.props"/></Project>'),
-                            reviewed.replace(b"net8.0", b"net10.0"), b"malformed XML"):
-                with self.subTest(configuration=content[-50:]):
-                    project.write_bytes(content)
-                    result = self.cli("audit", "--kind", "nuget", "--root", root,
-                        "--project", "desktop.tests/RoLauncher.Desktop.Tests.csproj", "--tool", "intentionally-absent")
-                    self.assertEqual(result.returncode, 2)
-            project.write_bytes(reviewed.replace(b"\n", b"\r\n"))
-            result = self.cli("audit", "--kind", "nuget", "--root", root,
-                "--project", "desktop.tests/RoLauncher.Desktop.Tests.csproj", "--tool", "intentionally-absent")
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            lock.write_text(json.dumps({"version": 1, "dependencies": {"net10.0": {}}}))
-            result = self.cli("audit", "--kind", "nuget", "--root", root,
-                "--project", "desktop.tests/RoLauncher.Desktop.Tests.csproj", "--tool", "intentionally-absent")
-            self.assertEqual(result.returncode, 2)
 
     def test_workflow_uses_untrusted_pr_boundary_without_writes_secrets_or_artifacts(self):
         # JSON is valid YAML; stdlib parsing keeps the trust contract test dependency-free.

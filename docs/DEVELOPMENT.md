@@ -2,7 +2,7 @@
 
 ## Build and test
 
-Windows prerequisites: Rust 1.99.0, .NET 8 SDK, Python 3.13, Inno Setup 6.7+, Visual Studio C++ Build Tools, and Windows SDK.
+Windows prerequisites: Rust 1.99.0 (or local `.tools` toolchain via `scripts/environment.ps1`), Python 3.13, Inno Setup 6.7+, and Windows 10/11 SDK (`fxc.exe` for release HLSL shaders; offline MinGW builds fall back to `d3dcompiler_47`).
 Dependencies are pinned. Linux: [setup and checks](LINUX.md).
 
 ```powershell
