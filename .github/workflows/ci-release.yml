@@ -36,9 +36,6 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
@@ -49,11 +46,11 @@ jobs:
           rustup default 1.99.0
       - name: Check version and release notes
         run: python scripts/check-release.py
-      - name: Rust, desktop and WinUI tests
-        timeout-minutes: 10
+      - name: Rust, desktop and GPUI smoke tests
+        timeout-minutes: 25
         run: ./scripts/test.ps1
       - name: Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --workspace --locked --all-targets -- -D warnings
       - name: Test isolated installer and update handoff
         run: ./scripts/test-installer.ps1
       - name: Package executable installer, portable app and corresponding source

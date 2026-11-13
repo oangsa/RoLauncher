@@ -1,7 +1,7 @@
-# RoLauncher 2.0.0-dev.1c5f27a17cc4
+# RoLauncher 2.0.0
 
 Manage Roblox accounts, save destinations, and rejoin disconnected sessions.
-RoLauncher is a native WinUI 3 desktop application for Windows.
+RoLauncher is a native Rust desktop application built with Zed GPUI and an isolated Rust supervisor for Windows.
 
 ## Download
 

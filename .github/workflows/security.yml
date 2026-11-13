@@ -42,43 +42,6 @@
           "run": "cargo fetch --locked\npython3 scripts/security.py audit --kind licenses --tool .tools/security/cargo-deny"
         }
       ]
-    },
-    "nuget": {
-      "name": "Security NuGet evidence (${{ matrix.os }})",
-      "runs-on": "${{ matrix.os }}",
-      "timeout-minutes": 20,
-      "strategy": {
-        "fail-fast": false,
-        "matrix": {
-          "include": [
-            { "os": "windows-2025", "project": "desktop/RoLauncher.Desktop.csproj", "directory": "desktop" }
-          ]
-        }
-      },
-      "steps": [
-        {
-          "uses": "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
-          "with": { "persist-credentials": false }
-        },
-        {
-          "uses": "actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9",
-          "with": { "dotnet-version": "8.0.x\n10.0.x" }
-        },
-        {
-          "name": "Restore exact locks without application build or publication",
-          "working-directory": "${{ matrix.directory }}",
-          "run": "dotnet restore --locked-mode -p:Configuration=Release -p:Platform=x64 --configfile NuGet.Config"
-        },
-        {
-          "name": "Audit direct and transitive packages; preserve source failures",
-          "working-directory": "${{ matrix.directory }}",
-          "run": "python ../scripts/security.py audit --kind nuget --project ${{ matrix.project }}"
-        },
-        {
-          "name": "Account for empty test package lock separately from runtime audit",
-          "run": "python scripts/security.py audit --kind nuget --project desktop.tests/RoLauncher.Desktop.Tests.csproj"
-        }
-      ]
     }
   }
 }

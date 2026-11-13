@@ -10,10 +10,6 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
-# Reviewed Microsoft.NET.Sdk/net8.0 project with no PackageReference or custom imports.
-# Configuration changes require review, not an automatic extension of this exception.
-ZERO_PACKAGE_PROJECT = "desktop.tests/RoLauncher.Desktop.Tests.csproj"
-ZERO_PACKAGE_PROJECT_SHA256 = "26eb8bcbca31356d9436a2c4afb31a3a4929b56b9a9806d79a4b83d8d828c19d"
 ADVISORY_MAX_AGE = timedelta(days=30)
 ADVISORY_FUTURE_TOLERANCE = timedelta(minutes=5)
 
@@ -86,23 +82,13 @@ def audit(args):
                 or not all(isinstance(packages, dict) for packages in dependencies.values())):
             raise ValueError("Incomplete NuGet graph")
         if all(not packages for packages in dependencies.values()):
-            if (project.relative_to(args.root.resolve()).as_posix() != ZERO_PACKAGE_PROJECT
-                    or hashlib.sha256(project.read_bytes().replace(b"\r\n", b"\n")).hexdigest() != ZERO_PACKAGE_PROJECT_SHA256
-                    or lock != {"version": 1, "dependencies": {"net8.0": {}}}):
-                raise ValueError("Unreviewed empty NuGet graph")
-            for directory in (project.parent, *project.parent.parents):
-                if any((directory / name).exists() or (directory / name).is_symlink() for name in (
-                        "Directory.Build.props", "Directory.Build.targets", "Directory.Packages.props",
-                        "Directory.Packages.targets", "Directory.Build.rsp", "MSBuild.rsp", "global.json")):
-                    raise ValueError("Unreviewed implicit project configuration")
-            return {"status": "not-applicable", "findings": [],
-                    "reason": "Zero locked NuGet packages; SDK/runtime packs are not audited by this result"}
+            raise ValueError("Unreviewed empty NuGet graph")
         command = [args.tool or "dotnet", "list", project, "package", "--vulnerable",
                    "--include-transitive", "--format", "json", "--output-version", "1"]
         completed = run(command, cwd=project.parent)
         return evaluate("nuget", json.loads(completed.stdout), completed.returncode)
     command = [args.tool or "cargo-deny", "--format", "json", "--locked", "--offline",
-               "--manifest-path", args.root / "Cargo.toml", "--config", ROOT / "scripts/security-deny.toml",
+               "--manifest-path", args.root / "Cargo.toml", "--workspace", "--config", ROOT / "scripts/security-deny.toml",
                "check", "licenses", "sources"]
     completed = run(command, cwd=args.root)
     lines = [json.loads(line) for line in completed.stderr.splitlines() if line.strip()]
@@ -115,7 +101,10 @@ def audit(args):
     expected_code = (4 if summary["licenses"]["errors"] else 0) | (8 if summary["sources"]["errors"] else 0)
     if completed.returncode != expected_code:
         raise ValueError("License scanner failed")
-    policy_findings = [item for item in findings if item["fields"].get("code") != "license-not-encountered"]
+    policy_findings = [
+        item for item in findings
+        if item["fields"].get("code") not in ("license-not-encountered", "unmatched-source")
+    ]
     return {"status": "findings" if errors or policy_findings else "clean", "summary": summary,
             "findings": [{"code": item["fields"].get("code"), "severity": item["fields"].get("severity"),
                           "message": item["fields"].get("message")} for item in findings]}

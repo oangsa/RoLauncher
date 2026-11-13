@@ -9,7 +9,7 @@
 3. Use **Sign in** or **Import cookies**. Paste or import one cookie per line; blanks and duplicates are ignored.
 4. Choose account destinations, select accounts, and press **Start**.
 
-Requires Windows 10 (1809+) or Windows 11, x64, and [WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) for sign-in. .NET is included.
+Requires Windows 10 (1809+) or Windows 11 (x64, Direct3D 11 / DirectComposition support), and [WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) for sign-in. No .NET runtime is required.
 For portable use, extract everything; keep `WebView2Loader.dll` and `desktop` beside `RoLauncher.exe`.
 
 ## Sidebar navigation

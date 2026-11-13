@@ -60,11 +60,12 @@ fn run_shell(engine: Engine, port: u16, shell: &std::path::Path) -> Result<(), S
 mod tests {
     use super::*;
     #[test]
-    #[ignore = "Requires the compiled UI_SMOKE shell; run after scripts/build-desktop.ps1 -Smoke"]
-    fn winui_bootstrap_pipe_connects_to_real_rust_api_and_exits() {
+    #[ignore = "Requires the compiled ui-smoke desktop shell; run after scripts/build-desktop.ps1 -Smoke"]
+    fn desktop_bootstrap_pipe_connects_to_real_rust_api_and_exits() {
         let shell =
             std::env::var_os("ROLAUNCHER_DESKTOP_TEST_EXE").expect("Set the smoke shell path");
-        let path = std::env::temp_dir().join(format!("rbx-winui-bridge-{}", uuid::Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("rbx-desktop-bridge-{}", uuid::Uuid::new_v4()));
         let engine = Engine::open(
             crate::store::Store::new(path.clone()).unwrap(),
             "UI bridge test".into(),
@@ -90,7 +91,7 @@ mod tests {
                 .join("result.txt"),
         )
         .unwrap();
-        assert!(result.starts_with("WinUI bridge passed"), "{result}");
+        assert!(result.starts_with("GPUI bridge passed"), "{result}");
         std::fs::remove_dir_all(path).unwrap();
     }
 }

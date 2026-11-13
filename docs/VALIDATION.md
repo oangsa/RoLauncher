@@ -3,12 +3,14 @@
 Recorded checks below are historical results, not guarantees of live Roblox compatibility.
 Fixtures use isolated data and simulated accounts unless stated otherwise.
 
-## Upcoming 2.0.0 Phase 1 Resource Monitor — 2026-11-13
+## 2.0.0 GPUI rewrite and Resource Monitor — 2026-11-13
 
-- Validated the read-only Resource Monitor subsystem (`src/resources.rs`, `src/platform_resources.rs`, `/v1/resources*` HTTP/SSE routes, Discord `/resources` and `/resources-register`, and temporary WinUI `Resources` page) on native Windows x64 (`2.0.0-dev.1c5f27a17cc4`).
-- Passed on native Windows x64: `318` Rust library tests (`10` ignored), `49` `windows-device-identity` example tests, separate Rust/WinUI bootstrap pipe test, `110` desktop model/UI checks, WinUI interaction smoke (`Resources` tab rendering inspected), Python policy/versioning/packaging suites, `test-security.py` (`18` passed, `3` skipped), `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`, isolated installer fixture tests, and packaged shell smoke (`verify-package.py --smoke-shell`).
-- Explicit Windows 0/10/50 real-process benchmark (`native_benchmark_0_10_50_real_fixture_processes`, `--ignored`): `71.09 ms` average tick at 0 targets (`15.44 MiB` WS), `19.39 ms` at 10 targets (`16.34 MiB` WS), and `41.68 ms` at 50 targets (`16.51 MiB` WS).
-- Best-effort PDH GPU Engine sampling (`\\GPU Engine(*)\\Utilization Percentage`) falls back explicitly to `Unavailable` when counters are absent or warming up; live multi-client Roblox GPU counters, Linux/Uno runtime execution, and interactive Discord gateway roundtrips remain `NOT VERIFIED` locally.
+- Validated the native Zed GPUI desktop rewrite (`desktop/`) alongside the authenticated Rust supervisor (`src/`), Resource Monitor (`/v1/resources*` HTTP/SSE), Discord `/resources` and `/resources-register`, and v1.9.2 lifecycle guarantees on Windows 11 x64 (`168` DPI).
+- Confirmed `gpui_windows` OS compatibility checks target Windows 10 1809+ (`dwBuildNumber >= 17763`) with runtime `GetProcAddress` and `RtlGetVersion` fallbacks for Windows 11 (`22621+`) backdrop attributes.
+- Passed on native Windows x64: `318` Rust library tests (`10` ignored), `49` `windows-device-identity` example tests, `15` GPUI desktop unit tests, `19` security tests, workspace `cargo-deny` license/source audit (`443` packages, `clean`), `93` Python policy/versioning/owner-evidence tests (`6` + `30` + `25` + `32`), Release `ui-smoke` (`test-ui-smoke.py`) across all 11 screens and Resource Monitor SSE, authenticated Rust/GPUI bootstrap pipe bridge, `cargo fmt --check`, `cargo clippy --workspace --locked --all-targets -- -D warnings`, isolated installer/update handoff suite, and packaged shell verification (`verify-package.py --smoke-shell`).
+- Release GPUI vs. WinUI 3 benchmark on Windows 11 x64 (simulated `0/10/50` accounts, `10.0s` sampling): desktop payload dropped from `209.31 MiB` (`542` files) to `15.55 MiB`, warm startup dropped from `1555.4 ms` to `378.9 ms` (`0` accounts), `50`-account idle working set dropped from `202.82 MiB` to `100.48 MiB`, `50`-account CPU dropped from `1.0347%` to `0.3709%`, and active `/v1/resources/events` 1 Hz SSE streaming measured `0.1171%` CPU / `90.91 MiB` WS at `50` instances; see [Performance](PERFORMANCE.md).
+- Phase 1 native Windows resource sampler debug-test benchmark (`native_benchmark_0_10_50_real_fixture_processes`, `--ignored`): `71.09 ms` average tick at `0` targets (`15.44 MiB` WS), `19.39 ms` at `10` targets (`16.34 MiB` WS), and `41.68 ms` at `50` targets (`16.51 MiB` WS).
+- Best-effort PDH GPU Engine sampling (`\\GPU Engine(*)\\Utilization Percentage`) falls back to `Unavailable` when counters are absent or warming up; live multi-client Roblox launches, live Roblox GPU counters, and interactive Discord gateway roundtrips remain `NOT VERIFIED` locally.
 
 ## Upcoming 1.9.1 multi-instance launch reliability — 2026-11-12
 
