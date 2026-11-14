@@ -109,6 +109,7 @@ pub fn modal_frame(
 
     div()
         .id(id)
+        .occlude()
         .absolute()
         .inset_0()
         .flex()

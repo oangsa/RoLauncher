@@ -325,7 +325,8 @@ pub fn render(
         total_accounts.max(res.aggregates.total_accounts),
     );
 
-    let mut rows_col = div().flex().flex_col().w(px(940.0)).child(
+    let column = |min_width| div().min_w(px(min_width)).flex_1();
+    let mut rows_col = div().flex().flex_col().w_full().min_w(px(704.0)).child(
         div()
             .flex()
             .flex_row()
@@ -336,14 +337,14 @@ pub fn render(
             .text_size(px(density.font_caption))
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(theme.text_secondary)
-            .child(div().w(px(190.0)).child("Account"))
-            .child(div().w(px(155.0)).child("Status"))
-            .child(div().w(px(74.0)).child("PID"))
-            .child(div().w(px(80.0)).child("CPU %"))
-            .child(div().w(px(96.0)).child("RAM"))
-            .child(div().w(px(96.0)).child("Private"))
-            .child(div().w(px(90.0)).child("GPU"))
-            .child(div().flex_1().child("Uptime")),
+            .child(column(135.0).child("Account"))
+            .child(column(115.0).child("Status"))
+            .child(column(55.0).child("PID"))
+            .child(column(57.0).child("CPU %"))
+            .child(column(70.0).child("RAM"))
+            .child(column(70.0).child("Private"))
+            .child(column(55.0).child("GPU"))
+            .child(column(65.0).child("Uptime")),
     );
 
     if empty_state.visible {
@@ -381,8 +382,7 @@ pub fn render(
                     .border_t_1()
                     .border_color(theme.border_subtle)
                     .child(
-                        div()
-                            .w(px(190.0))
+                        column(135.0)
                             .flex()
                             .flex_col()
                             .child(
@@ -402,26 +402,24 @@ pub fn render(
                             ),
                     )
                     .child(
-                        div()
-                            .w(px(155.0))
+                        column(115.0)
                             .text_size(px(density.font_caption))
                             .text_color(theme.text_secondary)
                             .truncate()
                             .child(formatted.status),
                     )
-                    .child(cell(formatted.pid, 74.0, theme.text_secondary, &density))
-                    .child(cell(formatted.cpu, 80.0, theme.text_primary, &density))
-                    .child(cell(formatted.ram, 96.0, theme.text_secondary, &density))
+                    .child(cell(formatted.pid, 55.0, theme.text_secondary, &density))
+                    .child(cell(formatted.cpu, 57.0, theme.text_primary, &density))
+                    .child(cell(formatted.ram, 70.0, theme.text_secondary, &density))
                     .child(cell(
                         formatted.private_ram,
-                        96.0,
+                        70.0,
                         theme.text_secondary,
                         &density,
                     ))
-                    .child(cell(formatted.gpu, 90.0, theme.text_secondary, &density))
+                    .child(cell(formatted.gpu, 55.0, theme.text_secondary, &density))
                     .child(
-                        div()
-                            .flex_1()
+                        column(65.0)
                             .text_size(px(density.font_caption))
                             .text_color(theme.text_secondary)
                             .child(formatted.uptime),
@@ -477,6 +475,7 @@ pub fn render(
                     .id("res-table-hscroll")
                     .w_full()
                     .overflow_x_scroll()
+                    .restrict_scroll_to_axis()
                     .child(rows_col),
             ),
         )
@@ -490,7 +489,8 @@ fn cell(
     density: &crate::theme::DensityTokens,
 ) -> gpui::Div {
     div()
-        .w(px(w))
+        .min_w(px(w))
+        .flex_1()
         .text_size(px(density.font_caption))
         .text_color(color)
         .truncate()
