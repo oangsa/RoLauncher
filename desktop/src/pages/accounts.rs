@@ -621,6 +621,8 @@ pub fn render(
         .id("acct-table-hscroll")
         .w_full()
         .overflow_x_scroll()
+        .restrict_scroll_to_axis()
+        .on_scroll(|_, _, cx| cx.stop_propagation())
         .child(
             div()
                 .flex()
@@ -635,6 +637,7 @@ pub fn render(
                         .min_h(px(170.0))
                         .max_h(px(340.0))
                         .overflow_y_scroll()
+                        .restrict_scroll_to_axis()
                         .child(table_rows),
                 ),
         );
