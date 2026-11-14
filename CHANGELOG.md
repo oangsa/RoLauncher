@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.0.1] — Unreleased
+
+- Keep Accounts list scrolling inside the list and separate vertical and horizontal wheel input.
+- Keep the background page still while scrolling in account settings.
+- Make the per-account Resources table resize with the window.
+
 ## [2.0.0] — 2026-11-13
 
 - Replaced the WinUI 3 desktop with a native Rust GPUI interface for faster startup and lower memory use.
