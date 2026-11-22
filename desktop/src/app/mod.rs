@@ -10,6 +10,7 @@ use crate::components::thumbnail::ThumbnailCache;
 use crate::dialogs;
 use crate::domain::models::{
     Activity, DiscordView, ResourceHistoryPoint, ResourceSnapshotResponse, Snapshot, UpdateView,
+    coordination_warning,
 };
 use crate::pages;
 use crate::platform::appearance::{
@@ -822,6 +823,21 @@ impl Render for RoLauncherApp {
 
         let sidebar = self.render_sidebar(&theme, &density, cx);
         let update_notice = self.render_update_notice(&theme, &density, cx);
+        let coordination_banner = self
+            .snapshot
+            .as_ref()
+            .and_then(|s| coordination_warning(&s.compatibility))
+            .map(|msg| {
+                banner(
+                    "coordination-warning-banner",
+                    BannerTone::Warning,
+                    msg.to_owned(),
+                    None,
+                    None,
+                    &theme,
+                    &density,
+                )
+            });
         let feedback_banner = self.feedback.as_ref().map(|fb| {
             banner(
                 "main-feedback-banner",
@@ -885,6 +901,9 @@ impl Render for RoLauncherApp {
             )
             .when_some(update_notice, |main, notice| {
                 main.child(div().px(px(28.0)).pb(px(18.0)).child(notice))
+            })
+            .when_some(coordination_banner, |main, warning| {
+                main.child(div().px(px(28.0)).pb(px(12.0)).child(warning))
             })
             .when_some(feedback_banner, |main, feedback| {
                 main.child(div().px(px(28.0)).pb(px(12.0)).child(feedback))

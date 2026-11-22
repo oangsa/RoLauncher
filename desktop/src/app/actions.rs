@@ -667,6 +667,12 @@ impl RoLauncherApp {
                 app.busy = false;
                 if !failed.is_empty() {
                     app.show_error(failed.join(" "), cx);
+                } else if action_owned == "restart" {
+                    app.show_info(
+                        "Restart queued; waiting for client exit and verified launch.",
+                        Some(6),
+                        cx,
+                    );
                 }
                 app.refresh_snapshot_tick(false, cx);
             });

@@ -7,8 +7,8 @@ use crate::components::primitives::{
 };
 use crate::domain::filter::{REJOIN_FILTER_OPTIONS, STATUS_FILTER_OPTIONS, matches_account};
 use crate::domain::models::{
-    can_retry, format_account_status, format_destination_kind, format_duration, format_error,
-    format_group, format_retry, longest_seconds, running_seconds,
+    can_retry, format_account_status, format_destination_kind, format_duration, format_group,
+    format_waiting_detail, longest_seconds, running_seconds,
 };
 use crate::state::{ConfirmAction, ConfirmModal, OpenMenu};
 use chrono::Utc;
@@ -24,6 +24,7 @@ pub fn render(
     let density = app.density();
     let busy = app.busy;
     let open_menu = app.open_menu;
+    let network_suspended = app.snapshot.as_ref().is_some_and(|s| s.network_suspended);
     let accounts = app
         .snapshot
         .as_ref()
@@ -394,11 +395,7 @@ pub fn render(
                     "—".to_string()
                 }
             };
-            let err_text = if acct.next_retry.is_some() || acct.status == "reconnecting" {
-                format_retry(acct, now)
-            } else {
-                format_error(acct.last_error.as_deref())
-            };
+            let err_text = format_waiting_detail(acct, network_suspended, now);
             let aid_chk = acct.id.clone();
             let aid_row = acct.id.clone();
             let aid_start = acct.id.clone();
