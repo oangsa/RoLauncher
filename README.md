@@ -1,4 +1,4 @@
-# RoLauncher 2.0.2
+# RoLauncher 2.0.3
 
 Manage Roblox accounts, save destinations, and rejoin disconnected sessions.
 RoLauncher is a native Rust desktop application built with Zed GPUI and an isolated Rust supervisor for Windows.
