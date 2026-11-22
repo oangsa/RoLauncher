@@ -5,6 +5,10 @@
     "workflow_dispatch": {}
   },
   "permissions": { "contents": "read" },
+  "concurrency": {
+    "group": "security-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref }}",
+    "cancel-in-progress": "${{ github.event_name == 'pull_request' }}"
+  },
   "jobs": {
     "source": {
       "name": "Security source and dependency evidence",

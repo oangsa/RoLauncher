@@ -7,6 +7,10 @@ on:
     branches: [dev]
   workflow_dispatch:
 
+concurrency:
+  group: identity-poc-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
@@ -25,6 +29,11 @@ jobs:
           rustup toolchain install 1.99.0 --profile minimal
           if ($LASTEXITCODE -ne 0) { throw 'Rust installation failed' }
           rustup default 1.99.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: windows-2025-rust-1.99.0
+          cache-on-failure: true
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Synthetic contracts and sanitized native measurements
         shell: pwsh
         run: ./scripts/test-identity-poc.ps1

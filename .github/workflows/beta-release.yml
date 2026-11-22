@@ -32,6 +32,10 @@ jobs:
           rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
           if ($LASTEXITCODE -ne 0) { throw 'Rust installation failed' }
           rustup default 1.99.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: windows-2025-rust-1.99.0
+          cache-on-failure: true
       - name: Check version and release notes
         run: python scripts/check-release.py
       - name: Rust, desktop and GPUI smoke tests
