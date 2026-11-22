@@ -2,6 +2,25 @@ use super::*;
 use std::os::windows::{io::AsRawHandle, process::CommandExt};
 
 #[test]
+fn empty_cleanup_resamples_conflict_instead_of_treating_zero_as_failure() {
+    let name = format!("empty-cleanup-{}", Uuid::new_v4());
+    let guard = MultiInstanceGuard::acquire_named(&name).unwrap();
+    let blocked = startup_cleanup_outcome(0, startup_launch_conflict_named(&name).unwrap());
+    assert!(
+        blocked
+            .unwrap_err()
+            .contains("Waiting for launch coordination")
+    );
+    drop(guard);
+    assert_eq!(
+        startup_cleanup_outcome(0, startup_launch_conflict_named(&name).unwrap()),
+        Ok(0)
+    );
+    assert_eq!(startup_cleanup_outcome(2, false), Ok(2));
+    assert!(startup_cleanup_outcome(2, true).is_err());
+}
+
+#[test]
 fn consent_and_conflict_are_independent_requirements() {
     assert_eq!(close_startup_background_players(&[], false, false), Ok(0));
     assert_eq!(close_startup_background_players(&[], true, false), Ok(0));
@@ -24,7 +43,13 @@ fn window_fixture() {
     let visible = std::env::var_os("ROLAUNCHER_STARTUP_FIXTURE_VISIBLE").is_some();
     let tray = std::env::var_os("ROLAUNCHER_STARTUP_FIXTURE_TRAY").is_some();
     let tray_lifetime = std::env::var_os("ROLAUNCHER_FIXTURE_TRAY_LIFETIME").is_some();
-    let _fixture_logs: Vec<_> = std::env::var_os("ROLAUNCHER_FIXTURE_LOGS").map(|paths| std::env::split_paths(&paths).map(|path| std::fs::File::open(path).unwrap()).collect()).unwrap_or_default();
+    let _fixture_logs: Vec<_> = std::env::var_os("ROLAUNCHER_FIXTURE_LOGS")
+        .map(|paths| {
+            std::env::split_paths(&paths)
+                .map(|path| std::fs::File::open(path).unwrap())
+                .collect()
+        })
+        .unwrap_or_default();
     let hwnd = unsafe {
         CreateWindowExW(
             if tray { WS_EX_TOOLWINDOW } else { 0 },
@@ -50,8 +75,7 @@ fn window_fixture() {
     std::fs::write(&ready, b"ready").unwrap();
     let mut window_closed = false;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while (tray_lifetime || unsafe { IsWindow(hwnd) } != 0)
-        && std::time::Instant::now() < deadline
+    while (tray_lifetime || unsafe { IsWindow(hwnd) } != 0) && std::time::Instant::now() < deadline
     {
         let mut message = unsafe { std::mem::zeroed() };
         while unsafe { PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, PM_REMOVE) } != 0 {
@@ -101,13 +125,19 @@ fn forced_close_ends_a_clients_background_lifetime() {
         tracker: String::new(),
     }
     .identity(Uuid::nil());
-    assert!(close(&identity, false).is_err(), "A fixture outside the installation root must never pass production image verification");
+    assert!(
+        close(&identity, false).is_err(),
+        "A fixture outside the installation root must never pass production image verification"
+    );
     close_with(&identity, false, fixture_image).unwrap();
     let closed = ready.with_extension("closed");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while !closed.exists() {
         assert!(child.try_wait().unwrap().is_none());
-        assert!(std::time::Instant::now() < deadline, "window close not processed");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "window close not processed"
+        );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     assert!(
@@ -145,7 +175,9 @@ fn external_cleanup_protects_visible_owned_and_changed_processes() {
             .env("ROLAUNCHER_STARTUP_FIXTURE_READY", &ready)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
-        if name == "tray" { command.env("ROLAUNCHER_STARTUP_FIXTURE_TRAY", "1"); }
+        if name == "tray" {
+            command.env("ROLAUNCHER_STARTUP_FIXTURE_TRAY", "1");
+        }
         if visible {
             command.env("ROLAUNCHER_STARTUP_FIXTURE_VISIBLE", "1");
         }
@@ -178,8 +210,12 @@ fn external_cleanup_protects_visible_owned_and_changed_processes() {
     };
     let discovered = native_players(fixture_image).unwrap().players;
     for child in [&visible, &managed, &external, &tray] {
-        assert!(discovered.iter().any(|p| p.pid == child.id() && p.tracker.is_empty()),
-            "global discovery must include visible and hidden untracked clients");
+        assert!(
+            discovered
+                .iter()
+                .any(|p| p.pid == child.id() && p.tracker.is_empty()),
+            "global discovery must include visible and hidden untracked clients"
+        );
     }
     let managed_id = identity(&managed);
     let external_id = identity(&external);
@@ -227,39 +263,72 @@ fn external_cleanup_protects_visible_owned_and_changed_processes() {
 #[test]
 fn background_scan_tolerates_processes_that_disappeared_after_snapshot() {
     assert!(background_process_handle(0).unwrap().is_none());
-    assert!(background_process_handle(unsafe { GetCurrentProcessId() }).unwrap().is_some());
+    assert!(
+        background_process_handle(unsafe { GetCurrentProcessId() })
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
 fn restart_manager_requires_exact_process_start_and_a_unique_owned_log() {
     let root = std::env::temp_dir().join(format!("rbx-owned-logs-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&root).unwrap();
-    let paths = [root.join("first_Player_fixture.log"), root.join("second_Player_fixture.log")];
-    for path in &paths { std::fs::write(path, b"fixture").unwrap(); }
+    let paths = [
+        root.join("first_Player_fixture.log"),
+        root.join("second_Player_fixture.log"),
+    ];
+    for path in &paths {
+        std::fs::write(path, b"fixture").unwrap();
+    }
     let ready = root.join("ready");
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "platform::imp::startup_tests::window_fixture", "--ignored"])
+        .args([
+            "--exact",
+            "platform::imp::startup_tests::window_fixture",
+            "--ignored",
+        ])
         .creation_flags(0x08000000)
         .env("ROLAUNCHER_STARTUP_FIXTURE_READY", &ready)
-        .env("ROLAUNCHER_FIXTURE_LOGS", std::env::join_paths(&paths).unwrap())
-        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
+        .env(
+            "ROLAUNCHER_FIXTURE_LOGS",
+            std::env::join_paths(&paths).unwrap(),
+        )
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while !ready.exists() {
         assert!(child.try_wait().unwrap().is_none());
         assert!(std::time::Instant::now() < deadline);
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    let identity = Player { pid: child.id(), creation_time: process_time(child.as_raw_handle() as _).unwrap(), tracker: "123456789012".into() }.identity(Uuid::new_v4());
-    for path in &paths { std::fs::write(path, b"fresh fixture data").unwrap(); }
-    assert!(discover_owned_logs_at(std::slice::from_ref(&identity), &root).unwrap().is_empty(), "Two owned files cannot be guessed into one authoritative log");
+    let identity = Player {
+        pid: child.id(),
+        creation_time: process_time(child.as_raw_handle() as _).unwrap(),
+        tracker: "123456789012".into(),
+    }
+    .identity(Uuid::new_v4());
+    for path in &paths {
+        std::fs::write(path, b"fresh fixture data").unwrap();
+    }
+    assert!(
+        discover_owned_logs_at(std::slice::from_ref(&identity), &root)
+            .unwrap()
+            .is_empty(),
+        "Two owned files cannot be guessed into one authoritative log"
+    );
     // Keep the child's second descriptor open while removing its path from candidates.
     std::fs::rename(&paths[1], root.join("not-a-client.txt")).unwrap();
     let found = discover_owned_logs_at(std::slice::from_ref(&identity), &root).unwrap();
     let (path, file_id) = &found[&(identity.pid, identity.creation_time.clone())];
     let tail = crate::logs::Tail::new(path.clone(), false).unwrap();
     assert!(tail.matches_file(*file_id));
-    let mut wrong = identity; wrong.creation_time = "0".into();
+    let mut wrong = identity;
+    wrong.creation_time = "0".into();
     assert!(discover_owned_logs_at(&[wrong], &root).unwrap().is_empty());
-    child.kill().unwrap(); child.wait().unwrap();
+    child.kill().unwrap();
+    child.wait().unwrap();
     std::fs::remove_dir_all(root).unwrap();
 }
