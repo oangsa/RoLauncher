@@ -105,6 +105,8 @@ pub struct Account {
     pub longest_streak_seconds: u64,
     #[serde(default)]
     pub game_profile_id: Option<String>,
+    #[serde(default)]
+    pub exit_pending: bool,
 }
 
 impl Account {
@@ -503,16 +505,37 @@ pub fn format_waiting_detail(
         let remaining = (next - now).num_seconds().max(0);
         return format!("Rate-limit cooldown · {remaining}s");
     }
+    if account
+        .last_error
+        .as_deref()
+        .is_some_and(|e| e.starts_with("Restart pending"))
+    {
+        return "Restart pending".to_string();
+    }
+    if account.exit_pending
+        || account
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("Managed process exited; checking"))
+    {
+        return "Client exited; checking for successor".to_string();
+    }
     if account.process.is_some()
         && matches!(account.status.as_str(), "queued" | "stopping" | "backoff")
     {
         return "Waiting for old process to exit".to_string();
     }
+    if account.status != "needs_attention"
+        && account
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("Unable to verify the surviving Roblox client"))
+    {
+        return "Waiting for handoff".to_string();
+    }
     if account.last_error.as_deref().is_some_and(|e| {
         e.contains("unverified Roblox process")
             || e.contains("startup is still in progress")
-            || e.contains("surviving Roblox client")
-            || e.contains("checking for a surviving")
             || e.contains("watching for a late client")
             || e.contains("Launch tracker has no verified instance")
     }) {
@@ -626,6 +649,43 @@ mod tests {
         assert_eq!(
             format_waiting_detail(&late, false, now),
             "Inspecting late Roblox launch"
+        );
+
+        let restart_pending = Account {
+            status: "queued".into(),
+            desired_running: true,
+            last_error: Some("Restart pending; waiting for old client to exit".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            format_waiting_detail(&restart_pending, false, now),
+            "Restart pending"
+        );
+
+        let exit_pending = Account {
+            status: "unknown".into(),
+            desired_running: true,
+            exit_pending: true,
+            last_error: Some(
+                "Managed process exited; checking for a surviving Roblox client before rejoin"
+                    .into(),
+            ),
+            ..Default::default()
+        };
+        assert_eq!(
+            format_waiting_detail(&exit_pending, false, now),
+            "Client exited; checking for successor"
+        );
+
+        let handoff = Account {
+            status: "unknown".into(),
+            desired_running: true,
+            last_error: Some("Unable to verify the surviving Roblox client. Waiting for process ownership before closing or rejoining.".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            format_waiting_detail(&handoff, false, now),
+            "Waiting for handoff"
         );
 
         assert_eq!(

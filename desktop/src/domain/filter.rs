@@ -84,6 +84,7 @@ mod tests {
             running_since: None,
             longest_streak_seconds: 0,
             game_profile_id: None,
+            exit_pending: false,
         }
     }
 
