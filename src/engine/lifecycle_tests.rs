@@ -8,6 +8,359 @@ use axum::{
 use std::sync::atomic::AtomicUsize;
 
 #[test]
+fn legacy_tracker_gets_bounded_inspection_and_other_verified_accounts_do_not_strand_it() {
+    let (engine, path) = super::tests::fixture(1);
+    engine.command("1", "start").unwrap();
+    engine
+        .update("1", engine.snapshot().accounts[0].generation, |a| {
+            a.status = Status::NeedsAttention;
+            a.last_error = Some(OWNERSHIP_TIMEOUT_ERROR.into());
+            a.tracker = Some("123456789012".into());
+            a.ownership_deadline = None;
+        })
+        .unwrap();
+    drop(engine);
+    let engine = Engine::open(Store::new(path.clone()).unwrap(), "fixture".into()).unwrap();
+    let deadline = engine.snapshot().accounts[0].ownership_deadline.unwrap();
+    assert!(deadline > Utc::now());
+    let mut other = platform::Player {
+        pid: 100,
+        creation_time: "fixture".into(),
+        tracker: String::new(),
+    };
+    engine.reconcile_completed_inspection(&[other.clone()], deadline);
+    assert!(engine.snapshot().accounts[0].tracker.is_some());
+    other.tracker = "999999999999".into();
+    engine.reconcile_completed_inspection(&[other], deadline);
+    assert_eq!(engine.snapshot().accounts[0].status, Status::Backoff);
+    assert!(engine.snapshot().accounts[0].tracker.is_none());
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn absent_expired_launch_recovers_only_after_fresh_complete_inspection() {
+    for reason in [
+        OWNERSHIP_TIMEOUT_ERROR,
+        STARTUP_UNRESOLVED_ERROR,
+        "Authentication failed",
+    ] {
+        let (engine, path) = super::tests::fixture(1);
+        engine.command("1", "start").unwrap();
+        let a = engine.snapshot().accounts.remove(0);
+        let deadline = Utc::now() - ChronoDuration::seconds(1);
+        engine
+            .update("1", a.generation, |a| {
+                a.status = Status::NeedsAttention;
+                a.last_error = Some(reason.into());
+                a.tracker = Some("123456789012".into());
+                a.ownership_deadline = Some(deadline);
+            })
+            .unwrap();
+        engine.reconcile_completed_inspection(&[], deadline - ChronoDuration::seconds(1));
+        assert!(engine.snapshot().accounts[0].tracker.is_some());
+        let candidate = platform::Player {
+            pid: 100,
+            creation_time: "fixture".into(),
+            tracker: "123456789012".into(),
+        };
+        engine.reconcile_completed_inspection(&[candidate], Utc::now());
+        assert!(engine.snapshot().accounts[0].tracker.is_some());
+        engine.reconcile_completed_inspection(&[], Utc::now());
+        let after = engine.snapshot().accounts.remove(0);
+        if reason == "Authentication failed" {
+            assert_eq!(after.status, Status::NeedsAttention);
+            assert!(after.tracker.is_some());
+        } else {
+            assert_eq!(after.status, Status::Backoff);
+            assert!(after.tracker.is_none());
+            assert_eq!(after.failures, 1);
+            engine.reconcile_completed_inspection(&[], Utc::now());
+            assert_eq!(engine.snapshot().accounts[0].failures, 1);
+        }
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn connectivity_recovers_while_all_preparation_slots_are_pending() {
+    let preparation = Preparation::default();
+    let (url, server) = http_fixture(preparation.clone()).await;
+    let probe_state = Arc::new((AtomicBool::new(false), AtomicUsize::new(0)));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let probe_url = format!("http://{}/probe", listener.local_addr().unwrap());
+    let app = Router::new()
+        .route(
+            "/probe",
+            get(
+                |HttpState(s): HttpState<Arc<(AtomicBool, AtomicUsize)>>| async move {
+                    s.1.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    if s.0.load(Ordering::SeqCst) {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    }
+                },
+            ),
+        )
+        .with_state(probe_state.clone());
+    let probe_server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let (mut engine, path) = engine_fixture(6, &url, false);
+    Arc::get_mut(&mut engine.0).unwrap().roblox.reachability_url = Some(probe_url);
+    let running = engine.clone();
+    let launcher = tokio::spawn(async move { running.launch_loop().await });
+    wait_for(&preparation.selection, 4, &preparation.entered).await;
+    engine
+        .transaction(|s| {
+            s.network_suspended = true;
+            Ok(())
+        })
+        .unwrap();
+    let running = engine.clone();
+    let network = tokio::spawn(async move { running.connectivity_loop().await });
+    tokio::time::timeout(Duration::from_secs(8), async {
+        while probe_state.1.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(engine.snapshot().network_suspended);
+        probe_state.0.store(true, Ordering::SeqCst);
+        while engine.snapshot().network_suspended {
+            engine.0.wake.notify_waiters();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(preparation.active.load(Ordering::SeqCst), 4);
+    assert_eq!(preparation.tickets.load(Ordering::SeqCst), 0);
+    assert!(engine.snapshot().accounts.iter().all(|a| a.failures == 0));
+    engine.shutdown();
+    launcher.await.unwrap();
+    network.await.unwrap();
+    server.abort();
+    probe_server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn restart_preserves_rate_limit_cooldown() {
+    let (engine, path) = super::tests::fixture(1);
+    engine.command("1", "start").unwrap();
+    let a = engine.snapshot().accounts.remove(0);
+    engine.failure(
+        "1",
+        a.generation,
+        Failure::new(FailureKind::RateLimit, "Rate limited"),
+    );
+    let before = engine.snapshot().accounts.remove(0);
+    engine.command("1", "restart").unwrap();
+    let after = engine.snapshot().accounts.remove(0);
+    assert_eq!(after.next_retry, before.next_retry);
+    assert_eq!(after.recovery_reason, "RateLimit");
+    assert!(!launch_ready(&after, Utc::now()));
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn confirmed_exit_during_shared_outage_does_not_exhaust_retry_budget() {
+    let (engine, path) = super::tests::fixture(6);
+    engine
+        .transaction(|s| {
+            s.network_suspended = true;
+            for (i, saved) in s.database.accounts.iter_mut().enumerate() {
+                let a = &mut saved.account;
+                a.desired_running = true;
+                a.status = Status::Running;
+                a.failures = 4;
+                a.process = Some(ProcessIdentity {
+                    pid: 100 + i as u32,
+                    creation_time: "fixture".into(),
+                    tracker: format!("{}", i + 1),
+                    generation: a.generation,
+                });
+            }
+            Ok(())
+        })
+        .unwrap();
+    for a in engine.snapshot().accounts {
+        engine.confirmed_exit(&a.id, a.generation, a.process.as_ref().unwrap(), false);
+    }
+    for a in engine.snapshot().accounts {
+        assert_eq!(a.failures, 4);
+        assert_eq!(a.status, Status::Backoff);
+        assert!(a.desired_running);
+    }
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn six_account_shared_outage_mixed_reconnect_and_exit_preserves_budget() {
+    let (engine, path) = super::tests::fixture(6);
+    engine
+        .transaction(|s| {
+            s.network_suspended = true;
+            for (i, saved) in s.database.accounts.iter_mut().enumerate() {
+                let a = &mut saved.account;
+                a.desired_running = true;
+                a.status = Status::Running;
+                a.failures = 4;
+                a.process = Some(ProcessIdentity {
+                    pid: 200 + i as u32,
+                    creation_time: "fixture".into(),
+                    tracker: format!("10000000000{}", i + 1),
+                    generation: a.generation,
+                });
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    for a in engine.snapshot().accounts {
+        engine.observe(
+            &a.id,
+            a.generation,
+            a.process.as_ref().unwrap(),
+            Observation::DiskLog(
+                crate::logs::parse_event("[FLog::Network] Sending disconnect with reason: 277")
+                    .unwrap(),
+            ),
+        );
+        assert_eq!(
+            engine
+                .snapshot()
+                .accounts
+                .iter()
+                .find(|cur| cur.id == a.id)
+                .unwrap()
+                .recovery_reason,
+            "Network"
+        );
+    }
+
+    let accounts = engine.snapshot().accounts;
+    for a in &accounts[..3] {
+        engine.signal(&a.id, a.generation, Signal::Connected);
+    }
+    for a in &accounts[3..] {
+        engine.confirmed_exit(&a.id, a.generation, a.process.as_ref().unwrap(), false);
+    }
+
+    engine
+        .transaction(|s| {
+            s.network_suspended = false;
+            Ok(())
+        })
+        .unwrap();
+
+    let after = engine.snapshot().accounts;
+    for a in &after[..3] {
+        assert_eq!(a.status, Status::Running);
+        assert_eq!(a.failures, 4);
+        assert!(a.close_intent.is_none());
+    }
+    for a in &after[3..] {
+        assert_eq!(a.status, Status::Backoff);
+        assert_eq!(a.failures, 4);
+        assert!(launch_ready(a, Utc::now()));
+    }
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connectivity_probe_ignores_non_network_disconnects() {
+    let probe_hits = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let probe_url = format!("http://{}/probe", listener.local_addr().unwrap());
+    let app = Router::new()
+        .route(
+            "/probe",
+            get(|HttpState(hits): HttpState<Arc<AtomicUsize>>| async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                StatusCode::OK
+            }),
+        )
+        .with_state(probe_hits.clone());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let (mut engine, path) = super::tests::fixture(3);
+    Arc::get_mut(&mut engine.0).unwrap().roblox.reachability_url = Some(probe_url);
+    engine
+        .transaction(|s| {
+            for (saved, code) in s.database.accounts.iter_mut().zip([267u32, 278, 273]) {
+                let a = &mut saved.account;
+                a.desired_running = true;
+                a.status = Status::Running;
+                a.process = Some(ProcessIdentity {
+                    pid: 300 + code,
+                    creation_time: "fixture".into(),
+                    tracker: format!("200000000{code}"),
+                    generation: a.generation,
+                });
+            }
+            Ok(())
+        })
+        .unwrap();
+    for (a, code) in engine
+        .snapshot()
+        .accounts
+        .into_iter()
+        .zip([267u32, 278, 273])
+    {
+        engine.signal(&a.id, a.generation, Signal::SessionLost(Some(code)));
+    }
+    let running = engine.clone();
+    let loop_task = tokio::spawn(async move { running.connectivity_loop().await });
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(probe_hits.load(Ordering::SeqCst), 0);
+    engine.shutdown();
+    loop_task.await.unwrap();
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn effective_compatibility_clears_all_resolved_startup_conflict_prefixes() {
+    for suffix in [
+        "; Startup conflict: saved launches still need inspection; waiting for launch coordination and process discovery. No external clients closed.",
+        "; Roblox startup conflict. Quit conflicting background clients",
+        "; Startup inspection unavailable: query failed",
+        "; Waiting for launch coordination: conflicting client remains",
+    ] {
+        let dir = std::env::temp_dir().join(format!("compat-clear-{}", Uuid::new_v4()));
+        let compatibility = format!(
+            "OS multi-instance coordination initialized; read-only RAM log fallback is best effort{suffix}"
+        );
+        let gate = Arc::new(AtomicBool::new(false));
+        let engine =
+            Engine::open_with_launch_gate(Store::new(dir.clone()).unwrap(), compatibility, gate)
+                .unwrap();
+        assert_ne!(
+            engine.snapshot().compatibility,
+            "OS multi-instance coordination initialized; read-only RAM log fallback is best effort"
+        );
+        engine.set_launch_allowed(true);
+        assert_eq!(
+            engine.snapshot().compatibility,
+            "OS multi-instance coordination initialized; read-only RAM log fallback is best effort"
+        );
+        drop(engine);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
 fn ownership_timeout_completes_the_operation_even_when_discovery_never_succeeds() {
     let (engine, path) = super::tests::fixture(1);
     let op = engine.command("1", "start").unwrap();
