@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.0.2] — Unreleased
+
+- Recheck startup conflicts after empty cleanup scans and clear resolved coordination warnings automatically.
+- Resume recovery after temporary network or inspection outages without burning account retries during shared outages.
+- Recover confirmed idle (278) disconnects, preserve rate-limit and duplicate-session cooldowns on restart, and clarify waiting reasons.
+
 ## [2.0.1] — Unreleased
 
 - Keep Accounts list scrolling inside the list and separate vertical and horizontal wheel input.

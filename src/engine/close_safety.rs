@@ -1,5 +1,7 @@
 use super::*;
 
+pub(super) const FORCE_EXIT_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[derive(Default)]
 pub(super) struct CloseAttempts(Vec<CloseAttempt>);
 struct CloseAttempt {
@@ -7,6 +9,7 @@ struct CloseAttempt {
     intent: CloseIntent,
     identity: ProcessIdentity,
     started: Instant,
+    force_submitted: Option<Instant>,
     denied: bool,
 }
 impl CloseAttempts {
@@ -43,9 +46,59 @@ impl CloseAttempts {
                 intent: intent.clone(),
                 identity: identity.clone(),
                 started: now,
+                force_submitted: None,
                 denied: false,
             });
         }
+    }
+    fn record_force(
+        &mut self,
+        id: &str,
+        intent: &CloseIntent,
+        identity: &ProcessIdentity,
+        now: Instant,
+    ) {
+        self.record(id, intent, identity, now);
+        if let Some(attempt) = self
+            .0
+            .iter_mut()
+            .find(|a| a.account_id == id && a.intent == *intent && a.identity == *identity)
+        {
+            attempt.force_submitted.get_or_insert(now);
+        }
+    }
+    fn graceful_submitted(
+        &self,
+        id: &str,
+        intent: &CloseIntent,
+        identity: &ProcessIdentity,
+    ) -> bool {
+        self.0.iter().any(|a| {
+            !a.denied && a.account_id == id && a.intent == *intent && a.identity == *identity
+        })
+    }
+    fn force_elapsed(
+        &mut self,
+        id: &str,
+        intent: &CloseIntent,
+        identity: &ProcessIdentity,
+        now: Instant,
+    ) -> Option<Duration> {
+        let attempt = self.0.iter_mut().find(|a| {
+            !a.denied
+                && a.account_id == id
+                && a.identity.pid == identity.pid
+                && a.identity.creation_time == identity.creation_time
+                && a.identity.tracker == identity.tracker
+                && a.force_submitted.is_some()
+        })?;
+        if attempt.intent != *intent {
+            attempt.intent = intent.clone();
+            attempt.identity = identity.clone();
+        }
+        attempt
+            .force_submitted
+            .map(|submitted| now.saturating_duration_since(submitted))
     }
     fn blocked(&self, id: &str, intent: &CloseIntent, identity: &ProcessIdentity) -> bool {
         self.0.iter().any(|a| {
@@ -181,6 +234,7 @@ fn attach_surviving_player(
     successor: &ProcessIdentity,
     clean: bool,
     direct_child: bool,
+    network_suspended: bool,
 ) {
     let ended_session = direct_child
         && a.desired_running
@@ -220,6 +274,9 @@ fn attach_surviving_player(
     if ended_session {
         if a.auto_recovery {
             if !retry_reserved {
+                if network_suspended && !active_cooldown(a) {
+                    a.recovery_reason = "Network".into();
+                }
                 reserve_recovery(a);
             } else {
                 a.status = Status::Backoff;
@@ -557,13 +614,14 @@ impl Engine {
                     return false;
                 }
                 let mut next = state.clone();
+                let network_suspended = next.network_suspended;
                 let a = account_mut(&mut next, &account.id).unwrap();
                 resume_verified_handoff(a);
                 #[cfg(windows)]
                 let direct_child = platform::direct_successor(identity, &successor);
                 #[cfg(not(windows))]
                 let direct_child = false;
-                attach_surviving_player(a, &successor, clean, direct_child);
+                attach_surviving_player(a, &successor, clean, direct_child, network_suspended);
                 self.0.journal.record("process_handoff_verified", serde_json::json!({
                     "account_id": a.id.parse::<u64>().ok(), "old_process": crate::diagnostics::process(identity),
                     "successor": crate::diagnostics::process(&successor), "reason": if direct_child { "verified_direct_child" } else { "same_tracker_unique_successor" },
@@ -622,7 +680,7 @@ impl Engine {
         }
         *state = next;
         let _ = self.0.events.send(snapshot(state));
-        self.0.wake.notify_one();
+        self.0.wake.notify_waiters();
         Ok(())
     }
 
@@ -689,6 +747,23 @@ impl Engine {
         }
         let was_recovery =
             intent.reason == CloseReason::AutomaticRecovery && recovery_due(a, Utc::now());
+        // Environment readiness can recover without changing ownership or intent.
+        // Defer only when every non-environment policy check still passes.
+        if !attempts.blocked(&expected.id, &intent, identity)
+            && eligible(a, &intent, false, true)
+            && !eligible(
+                a,
+                &intent,
+                network_suspended,
+                self.0.launch_allowed.load(Ordering::Acquire),
+            )
+        {
+            self.0.journal.record("close_deferred", serde_json::json!({
+                "account": crate::diagnostics::account(expected),
+                "reason": if network_suspended { "network_suspended" } else { "launch_coordination_unavailable" },
+            }));
+            return Ok(false);
+        }
         let policy = !attempts.blocked(&expected.id, &intent, identity)
             && eligible(
                 a,
@@ -696,6 +771,58 @@ impl Engine {
                 network_suspended,
                 self.0.launch_allowed.load(Ordering::Acquire),
             );
+        if policy
+            && let Some(elapsed) =
+                attempts.force_elapsed(&expected.id, &intent, identity, now + started.elapsed())
+        {
+            if elapsed < FORCE_EXIT_TIMEOUT {
+                self.0.journal.record(
+                    "close_deferred",
+                    serde_json::json!({
+                        "account": crate::diagnostics::account(a),
+                        "reason": "waiting_for_terminated_process_exit",
+                        "elapsed_ms": elapsed.as_millis(),
+                    }),
+                );
+                return Ok(false);
+            }
+            if let Ok(players) = discover()
+                && uniquely_claimed(&next, &expected.id, identity, false)
+                && !players
+                    .iter()
+                    .any(|p| p.pid == identity.pid || p.tracker == identity.tracker)
+            {
+                self.0.journal.record(
+                    "close_deferred",
+                    serde_json::json!({
+                        "account": crate::diagnostics::account(expected),
+                        "reason": "absent_from_discovery_waiting_for_exact_exit",
+                    }),
+                );
+                return Ok(false);
+            }
+            self.0.journal.record(
+                "close_result",
+                serde_json::json!({
+                    "account_id": expected.id.parse::<u64>().ok(),
+                    "process": crate::diagnostics::process(identity),
+                    "intent": intent,
+                    "force": true,
+                    "success": false,
+                    "reason": "force_exit_timeout",
+                    "elapsed_ms": elapsed.as_millis(),
+                }),
+            );
+            attempts.deny(&expected.id, &intent, identity, now);
+            let a = account_mut(&mut next, &expected.id)?;
+            a.close_intent.as_mut().unwrap().denied = true;
+            a.status = Status::NeedsAttention;
+            a.last_error = Some(CLOSE_FAILED_ERROR.into());
+            self.commit_close_state(&mut state, next)?;
+            return Err(
+                "Verified process close timed out after forced termination; inspect the client before retrying".into(),
+            );
+        }
         let verification = if policy {
             discover().map(|players| {
                 self.0.journal.record("close_verification", serde_json::json!({
@@ -707,7 +834,8 @@ impl Engine {
                 }));
                 // The process can exit after the monitor's alive check, including after
                 // graceful closure. Absence is not proof of conflicting ownership.
-                if intent.reason == CloseReason::AutomaticRecovery
+                if (intent.reason == CloseReason::AutomaticRecovery
+                    || attempts.graceful_submitted(&expected.id, &intent, identity))
                     && uniquely_claimed(&next, &expected.id, identity, false)
                     && !players
                         .iter()
@@ -780,6 +908,9 @@ impl Engine {
             network_suspended,
             self.0.launch_allowed.load(Ordering::Acquire),
         ) {
+            if eligible(a, &intent, false, true) {
+                return Ok(false);
+            }
             attempts.deny(&expected.id, &intent, identity, now);
             let mut next = state.clone();
             let a = account_mut(&mut next, &expected.id)?;
@@ -806,7 +937,11 @@ impl Engine {
         match effect(identity, force) {
             Ok(()) => {
                 self.0.journal.record("close_result", serde_json::json!({"account_id": expected.id.parse::<u64>().ok(), "process": crate::diagnostics::process(identity), "intent": intent, "force": force, "success": true}));
-                attempts.record(&expected.id, &intent, identity, now + started.elapsed());
+                let attempt_at = now + started.elapsed();
+                attempts.record(&expected.id, &intent, identity, attempt_at);
+                if force {
+                    attempts.record_force(&expected.id, &intent, identity, now);
+                }
                 Ok(true)
             }
             Err(error) => {
@@ -876,6 +1011,49 @@ impl Engine {
                         })
                     && verified_unique(&next, &expected.account_id, identity, observed, true)
             });
+        if policy
+            && let Some((identity, intent)) = identity.as_ref().zip(intent.as_ref())
+            && let Some(elapsed) = attempts.force_elapsed(
+                &expected.account_id,
+                intent,
+                identity,
+                now + started.elapsed(),
+            )
+        {
+            if elapsed < FORCE_EXIT_TIMEOUT {
+                if next.database.retired_launches[index].process != expected.process {
+                    self.commit_close_state(&mut state, next)?;
+                }
+                self.0.journal.record(
+                    "close_deferred",
+                    serde_json::json!({
+                        "account_id": expected.account_id.parse::<u64>().ok(),
+                        "retired": true,
+                        "reason": "waiting_for_terminated_process_exit",
+                        "elapsed_ms": elapsed.as_millis(),
+                    }),
+                );
+                return Ok(false);
+            }
+            if let Ok(players) = discover()
+                && !players
+                    .iter()
+                    .any(|p| p.pid == identity.pid || p.tracker == identity.tracker)
+            {
+                return Ok(false);
+            }
+            attempts.deny(&expected.account_id, intent, identity, now);
+            if let Some(intent) = &mut next.database.retired_launches[index].close_intent {
+                intent.denied = true;
+            }
+            if let Ok(a) = account_mut(&mut next, &expected.account_id) {
+                a.status = Status::NeedsAttention;
+                a.last_error =
+                    Some("Late client close failed; inspect it and use Stop to retry".into());
+            }
+            self.commit_close_state(&mut state, next)?;
+            return Err("Late client close failed; force escalation cancelled".into());
+        }
         let allowed = if policy {
             match discover() {
                 Ok(players) => verified_unique(
@@ -950,12 +1128,11 @@ impl Engine {
             self.commit_close_state(&mut state, next)?;
             return Err("Late client close failed; force escalation cancelled".into());
         }
-        attempts.record(
-            &expected.account_id,
-            &intent,
-            &identity,
-            now + started.elapsed(),
-        );
+        let attempt_at = now + started.elapsed();
+        attempts.record(&expected.account_id, &intent, &identity, attempt_at);
+        if force {
+            attempts.record_force(&expected.account_id, &intent, &identity, now);
+        }
         Ok(true)
     }
 }

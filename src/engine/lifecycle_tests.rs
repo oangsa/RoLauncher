@@ -8,6 +8,359 @@ use axum::{
 use std::sync::atomic::AtomicUsize;
 
 #[test]
+fn legacy_tracker_gets_bounded_inspection_and_other_verified_accounts_do_not_strand_it() {
+    let (engine, path) = super::tests::fixture(1);
+    engine.command("1", "start").unwrap();
+    engine
+        .update("1", engine.snapshot().accounts[0].generation, |a| {
+            a.status = Status::NeedsAttention;
+            a.last_error = Some(OWNERSHIP_TIMEOUT_ERROR.into());
+            a.tracker = Some("123456789012".into());
+            a.ownership_deadline = None;
+        })
+        .unwrap();
+    drop(engine);
+    let engine = Engine::open(Store::new(path.clone()).unwrap(), "fixture".into()).unwrap();
+    let deadline = engine.snapshot().accounts[0].ownership_deadline.unwrap();
+    assert!(deadline > Utc::now());
+    let mut other = platform::Player {
+        pid: 100,
+        creation_time: "fixture".into(),
+        tracker: String::new(),
+    };
+    engine.reconcile_completed_inspection(&[other.clone()], deadline);
+    assert!(engine.snapshot().accounts[0].tracker.is_some());
+    other.tracker = "999999999999".into();
+    engine.reconcile_completed_inspection(&[other], deadline);
+    assert_eq!(engine.snapshot().accounts[0].status, Status::Backoff);
+    assert!(engine.snapshot().accounts[0].tracker.is_none());
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn absent_expired_launch_recovers_only_after_fresh_complete_inspection() {
+    for reason in [
+        OWNERSHIP_TIMEOUT_ERROR,
+        STARTUP_UNRESOLVED_ERROR,
+        "Authentication failed",
+    ] {
+        let (engine, path) = super::tests::fixture(1);
+        engine.command("1", "start").unwrap();
+        let a = engine.snapshot().accounts.remove(0);
+        let deadline = Utc::now() - ChronoDuration::seconds(1);
+        engine
+            .update("1", a.generation, |a| {
+                a.status = Status::NeedsAttention;
+                a.last_error = Some(reason.into());
+                a.tracker = Some("123456789012".into());
+                a.ownership_deadline = Some(deadline);
+            })
+            .unwrap();
+        engine.reconcile_completed_inspection(&[], deadline - ChronoDuration::seconds(1));
+        assert!(engine.snapshot().accounts[0].tracker.is_some());
+        let candidate = platform::Player {
+            pid: 100,
+            creation_time: "fixture".into(),
+            tracker: "123456789012".into(),
+        };
+        engine.reconcile_completed_inspection(&[candidate], Utc::now());
+        assert!(engine.snapshot().accounts[0].tracker.is_some());
+        engine.reconcile_completed_inspection(&[], Utc::now());
+        let after = engine.snapshot().accounts.remove(0);
+        if reason == "Authentication failed" {
+            assert_eq!(after.status, Status::NeedsAttention);
+            assert!(after.tracker.is_some());
+        } else {
+            assert_eq!(after.status, Status::Backoff);
+            assert!(after.tracker.is_none());
+            assert_eq!(after.failures, 1);
+            engine.reconcile_completed_inspection(&[], Utc::now());
+            assert_eq!(engine.snapshot().accounts[0].failures, 1);
+        }
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn connectivity_recovers_while_all_preparation_slots_are_pending() {
+    let preparation = Preparation::default();
+    let (url, server) = http_fixture(preparation.clone()).await;
+    let probe_state = Arc::new((AtomicBool::new(false), AtomicUsize::new(0)));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let probe_url = format!("http://{}/probe", listener.local_addr().unwrap());
+    let app = Router::new()
+        .route(
+            "/probe",
+            get(
+                |HttpState(s): HttpState<Arc<(AtomicBool, AtomicUsize)>>| async move {
+                    s.1.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    if s.0.load(Ordering::SeqCst) {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    }
+                },
+            ),
+        )
+        .with_state(probe_state.clone());
+    let probe_server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let (mut engine, path) = engine_fixture(6, &url, false);
+    Arc::get_mut(&mut engine.0).unwrap().roblox.reachability_url = Some(probe_url);
+    let running = engine.clone();
+    let launcher = tokio::spawn(async move { running.launch_loop().await });
+    wait_for(&preparation.selection, 4, &preparation.entered).await;
+    engine
+        .transaction(|s| {
+            s.network_suspended = true;
+            Ok(())
+        })
+        .unwrap();
+    let running = engine.clone();
+    let network = tokio::spawn(async move { running.connectivity_loop().await });
+    tokio::time::timeout(Duration::from_secs(8), async {
+        while probe_state.1.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(engine.snapshot().network_suspended);
+        probe_state.0.store(true, Ordering::SeqCst);
+        while engine.snapshot().network_suspended {
+            engine.0.wake.notify_waiters();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(preparation.active.load(Ordering::SeqCst), 4);
+    assert_eq!(preparation.tickets.load(Ordering::SeqCst), 0);
+    assert!(engine.snapshot().accounts.iter().all(|a| a.failures == 0));
+    engine.shutdown();
+    launcher.await.unwrap();
+    network.await.unwrap();
+    server.abort();
+    probe_server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn restart_preserves_rate_limit_cooldown() {
+    let (engine, path) = super::tests::fixture(1);
+    engine.command("1", "start").unwrap();
+    let a = engine.snapshot().accounts.remove(0);
+    engine.failure(
+        "1",
+        a.generation,
+        Failure::new(FailureKind::RateLimit, "Rate limited"),
+    );
+    let before = engine.snapshot().accounts.remove(0);
+    engine.command("1", "restart").unwrap();
+    let after = engine.snapshot().accounts.remove(0);
+    assert_eq!(after.next_retry, before.next_retry);
+    assert_eq!(after.recovery_reason, "RateLimit");
+    assert!(!launch_ready(&after, Utc::now()));
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn confirmed_exit_during_shared_outage_does_not_exhaust_retry_budget() {
+    let (engine, path) = super::tests::fixture(6);
+    engine
+        .transaction(|s| {
+            s.network_suspended = true;
+            for (i, saved) in s.database.accounts.iter_mut().enumerate() {
+                let a = &mut saved.account;
+                a.desired_running = true;
+                a.status = Status::Running;
+                a.failures = 4;
+                a.process = Some(ProcessIdentity {
+                    pid: 100 + i as u32,
+                    creation_time: "fixture".into(),
+                    tracker: format!("{}", i + 1),
+                    generation: a.generation,
+                });
+            }
+            Ok(())
+        })
+        .unwrap();
+    for a in engine.snapshot().accounts {
+        engine.confirmed_exit(&a.id, a.generation, a.process.as_ref().unwrap(), false);
+    }
+    for a in engine.snapshot().accounts {
+        assert_eq!(a.failures, 4);
+        assert_eq!(a.status, Status::Backoff);
+        assert!(a.desired_running);
+    }
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn six_account_shared_outage_mixed_reconnect_and_exit_preserves_budget() {
+    let (engine, path) = super::tests::fixture(6);
+    engine
+        .transaction(|s| {
+            s.network_suspended = true;
+            for (i, saved) in s.database.accounts.iter_mut().enumerate() {
+                let a = &mut saved.account;
+                a.desired_running = true;
+                a.status = Status::Running;
+                a.failures = 4;
+                a.process = Some(ProcessIdentity {
+                    pid: 200 + i as u32,
+                    creation_time: "fixture".into(),
+                    tracker: format!("10000000000{}", i + 1),
+                    generation: a.generation,
+                });
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    for a in engine.snapshot().accounts {
+        engine.observe(
+            &a.id,
+            a.generation,
+            a.process.as_ref().unwrap(),
+            Observation::DiskLog(
+                crate::logs::parse_event("[FLog::Network] Sending disconnect with reason: 277")
+                    .unwrap(),
+            ),
+        );
+        assert_eq!(
+            engine
+                .snapshot()
+                .accounts
+                .iter()
+                .find(|cur| cur.id == a.id)
+                .unwrap()
+                .recovery_reason,
+            "Network"
+        );
+    }
+
+    let accounts = engine.snapshot().accounts;
+    for a in &accounts[..3] {
+        engine.signal(&a.id, a.generation, Signal::Connected);
+    }
+    for a in &accounts[3..] {
+        engine.confirmed_exit(&a.id, a.generation, a.process.as_ref().unwrap(), false);
+    }
+
+    engine
+        .transaction(|s| {
+            s.network_suspended = false;
+            Ok(())
+        })
+        .unwrap();
+
+    let after = engine.snapshot().accounts;
+    for a in &after[..3] {
+        assert_eq!(a.status, Status::Running);
+        assert_eq!(a.failures, 4);
+        assert!(a.close_intent.is_none());
+    }
+    for a in &after[3..] {
+        assert_eq!(a.status, Status::Backoff);
+        assert_eq!(a.failures, 4);
+        assert!(launch_ready(a, Utc::now()));
+    }
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connectivity_probe_ignores_non_network_disconnects() {
+    let probe_hits = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let probe_url = format!("http://{}/probe", listener.local_addr().unwrap());
+    let app = Router::new()
+        .route(
+            "/probe",
+            get(|HttpState(hits): HttpState<Arc<AtomicUsize>>| async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                StatusCode::OK
+            }),
+        )
+        .with_state(probe_hits.clone());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let (mut engine, path) = super::tests::fixture(3);
+    Arc::get_mut(&mut engine.0).unwrap().roblox.reachability_url = Some(probe_url);
+    engine
+        .transaction(|s| {
+            for (saved, code) in s.database.accounts.iter_mut().zip([267u32, 278, 273]) {
+                let a = &mut saved.account;
+                a.desired_running = true;
+                a.status = Status::Running;
+                a.process = Some(ProcessIdentity {
+                    pid: 300 + code,
+                    creation_time: "fixture".into(),
+                    tracker: format!("200000000{code}"),
+                    generation: a.generation,
+                });
+            }
+            Ok(())
+        })
+        .unwrap();
+    for (a, code) in engine
+        .snapshot()
+        .accounts
+        .into_iter()
+        .zip([267u32, 278, 273])
+    {
+        engine.signal(&a.id, a.generation, Signal::SessionLost(Some(code)));
+    }
+    let running = engine.clone();
+    let loop_task = tokio::spawn(async move { running.connectivity_loop().await });
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(probe_hits.load(Ordering::SeqCst), 0);
+    engine.shutdown();
+    loop_task.await.unwrap();
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn effective_compatibility_clears_all_resolved_startup_conflict_prefixes() {
+    for suffix in [
+        "; Startup conflict: saved launches still need inspection; waiting for launch coordination and process discovery. No external clients closed.",
+        "; Roblox startup conflict. Quit conflicting background clients",
+        "; Startup inspection unavailable: query failed",
+        "; Waiting for launch coordination: conflicting client remains",
+    ] {
+        let dir = std::env::temp_dir().join(format!("compat-clear-{}", Uuid::new_v4()));
+        let compatibility = format!(
+            "OS multi-instance coordination initialized; read-only RAM log fallback is best effort{suffix}"
+        );
+        let gate = Arc::new(AtomicBool::new(false));
+        let engine =
+            Engine::open_with_launch_gate(Store::new(dir.clone()).unwrap(), compatibility, gate)
+                .unwrap();
+        assert_ne!(
+            engine.snapshot().compatibility,
+            "OS multi-instance coordination initialized; read-only RAM log fallback is best effort"
+        );
+        engine.set_launch_allowed(true);
+        assert_eq!(
+            engine.snapshot().compatibility,
+            "OS multi-instance coordination initialized; read-only RAM log fallback is best effort"
+        );
+        drop(engine);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
 fn ownership_timeout_completes_the_operation_even_when_discovery_never_succeeds() {
     let (engine, path) = super::tests::fixture(1);
     let op = engine.command("1", "start").unwrap();
@@ -5547,6 +5900,396 @@ async fn f14_stop_and_shutdown_while_monitor_scan_is_in_flight() {
     );
     assert_eq!(dispatched.load(Ordering::SeqCst), 0);
     assert!(scan_started.try_recv().is_err());
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn partial_api_outage_with_healthy_reachability_paces_retries_without_loop_or_global_suspension()
+ {
+    #[derive(Clone, Default)]
+    struct PartialOutage {
+        probe_hits: Arc<AtomicUsize>,
+        server_hits: Arc<AtomicUsize>,
+        ticket_hits: Arc<AtomicUsize>,
+        servers_ok: Arc<AtomicBool>,
+    }
+    let st = PartialOutage::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new()
+        .route(
+            "/probe",
+            get(|HttpState(s): HttpState<PartialOutage>| async move {
+                s.probe_hits.fetch_add(1, Ordering::SeqCst);
+                StatusCode::OK
+            }),
+        )
+        .route(
+            "/servers",
+            get(|HttpState(s): HttpState<PartialOutage>| async move {
+                s.server_hits.fetch_add(1, Ordering::SeqCst);
+                if s.servers_ok.load(Ordering::SeqCst) {
+                    (
+                        StatusCode::OK,
+                        axum::Json(serde_json::json!({
+                            "data": [{
+                                "id": "00000000-0000-0000-0000-000000000001",
+                                "playing": 1,
+                                "maxPlayers": 10,
+                                "ping": 30
+                            }],
+                            "nextPageCursor": null
+                        })),
+                    )
+                } else {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        axum::Json(serde_json::json!({})),
+                    )
+                }
+            }),
+        )
+        .route(
+            "/ticket",
+            post(|HttpState(s): HttpState<PartialOutage>| async move {
+                s.ticket_hits.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::OK,
+                    [("rbx-authentication-ticket", "DISPOSABLE_FIXTURE_TICKET")],
+                )
+            }),
+        )
+        .with_state(st.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (mut engine, path) = engine_fixture(1, &url, false);
+    Arc::get_mut(&mut engine.0).unwrap().roblox.reachability_url = Some(format!("{url}/probe"));
+    let running = engine.clone();
+    let launcher = tokio::spawn(async move { running.launch_loop().await });
+    let running = engine.clone();
+    let network = tokio::spawn(async move { running.connectivity_loop().await });
+
+    // Wait for first failed preparation and connectivity probe.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while st.server_hits.load(Ordering::SeqCst) == 0
+            || st.probe_hits.load(Ordering::SeqCst) == 0
+            || engine.snapshot().accounts[0].status != Status::Backoff
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    // Reachability HTTP 200 must keep global suspension false and preserve per-account backoff.
+    let first = engine.snapshot();
+    assert!(!first.network_suspended);
+    assert_eq!(first.accounts[0].status, Status::Backoff);
+    assert_eq!(first.accounts[0].failures, 0);
+    assert!(first.accounts[0].next_retry.is_some());
+
+    // Wait 1.5s while connectivity_loop runs: must NOT clear next_retry or hammer /servers.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(st.server_hits.load(Ordering::SeqCst), 1);
+    assert!(!engine.snapshot().network_suspended);
+    assert_eq!(engine.snapshot().accounts[0].status, Status::Backoff);
+
+    // Simulate >5 temporary FailureKind::Network failures: must stay in Backoff (never NeedsAttention) and bound backoff.
+    for _ in 0..7 {
+        let generation = engine.snapshot().accounts[0].generation;
+        engine.failure("1", generation, Failure::network());
+    }
+    let after_many = engine.snapshot().accounts[0].clone();
+    assert_eq!(after_many.status, Status::Backoff);
+    assert_eq!(after_many.failures, 0);
+    assert!(after_many.next_retry.unwrap() <= Utc::now() + ChronoDuration::seconds(32));
+
+    // Service recovers during Backoff -> fast-forward next_retry to verify eventual dispatch.
+    st.servers_ok.store(true, Ordering::SeqCst);
+    let generation = after_many.generation;
+    engine
+        .update("1", generation, |a| a.next_retry = Some(Utc::now()))
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while st.ticket_hits.load(Ordering::SeqCst) == 0
+            || engine.snapshot().accounts[0].tracker.is_none()
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(engine.snapshot().accounts[0].failures, 0);
+
+    engine.shutdown();
+    launcher.await.unwrap();
+    network.await.unwrap();
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_account_succeeds_while_another_fails_and_rate_limit_remains_respected() {
+    #[derive(Clone, Default)]
+    struct MixedApi {
+        server_hits: Arc<AtomicUsize>,
+        servers_ok: Arc<AtomicBool>,
+        ticket_hits: Arc<AtomicUsize>,
+        rate_limit_tickets: Arc<AtomicBool>,
+    }
+    let st = MixedApi::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new()
+        .route("/probe", get(|| async { StatusCode::OK }))
+        .route(
+            "/servers",
+            get(|HttpState(s): HttpState<MixedApi>| async move {
+                s.server_hits.fetch_add(1, Ordering::SeqCst);
+                if s.servers_ok.load(Ordering::SeqCst) {
+                    (
+                        StatusCode::OK,
+                        axum::Json(serde_json::json!({
+                            "data": [{
+                                "id": "00000000-0000-0000-0000-000000000001",
+                                "playing": 1,
+                                "maxPlayers": 10,
+                                "ping": 30
+                            }],
+                            "nextPageCursor": null
+                        })),
+                    )
+                } else {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        axum::Json(serde_json::json!({})),
+                    )
+                }
+            }),
+        )
+        .route(
+            "/ticket",
+            post(|HttpState(s): HttpState<MixedApi>| async move {
+                s.ticket_hits.fetch_add(1, Ordering::SeqCst);
+                if s.rate_limit_tickets.load(Ordering::SeqCst) {
+                    (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        [("rbx-authentication-ticket", "")],
+                    )
+                } else {
+                    (
+                        StatusCode::OK,
+                        [("rbx-authentication-ticket", "DISPOSABLE_FIXTURE_TICKET")],
+                    )
+                }
+            }),
+        )
+        .with_state(st.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (mut engine, path) = super::tests::fixture(2);
+    {
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.roblox.servers_url = Some(format!("{url}/servers"));
+        inner.roblox.ticket_url = Some(format!("{url}/ticket"));
+        inner.roblox.reachability_url = Some(format!("{url}/probe"));
+        inner.launch_result = Some(Ok(()));
+        inner.launch_spacing = Duration::from_millis(20);
+        inner.launch_readiness_timeout = Duration::from_millis(20);
+    }
+    engine
+        .transaction(|s| {
+            for saved in &mut s.database.accounts {
+                saved.encrypted_session = platform::protect("DISPOSABLE_FIXTURE_SESSION")?;
+            }
+            // Account 2 has explicit job_id (skips /servers), Account 1 needs /servers (fails 503).
+            s.database.accounts[1]
+                .account
+                .target
+                .as_mut()
+                .unwrap()
+                .job_id = Some(Uuid::from_u128(1));
+            Ok(())
+        })
+        .unwrap();
+    engine.command("1", "start").unwrap();
+    engine.command("2", "start").unwrap();
+
+    let running = engine.clone();
+    let launcher = tokio::spawn(async move { running.launch_loop().await });
+    let running = engine.clone();
+    let network = tokio::spawn(async move { running.connectivity_loop().await });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let snap = engine.snapshot();
+            if snap.accounts[1].tracker.is_some() && snap.accounts[0].status == Status::Backoff {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!engine.snapshot().network_suspended);
+
+    // Recover /servers, but return HTTP 429 on /ticket: rate limit cooldown must be respected even with probe HTTP 200.
+    st.servers_ok.store(true, Ordering::SeqCst);
+    st.rate_limit_tickets.store(true, Ordering::SeqCst);
+    let gen1 = engine.snapshot().accounts[0].generation;
+    engine
+        .update("1", gen1, |a| a.next_retry = Some(Utc::now()))
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while engine.snapshot().accounts[0].recovery_reason != "RateLimit" {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let rl = engine.snapshot().accounts[0].clone();
+    assert!(rl.next_retry.unwrap() >= Utc::now() + ChronoDuration::seconds(50));
+    engine.command("1", "restart").unwrap();
+    assert_eq!(engine.snapshot().accounts[0].recovery_reason, "RateLimit");
+    assert!(!launch_ready(&engine.snapshot().accounts[0], Utc::now()));
+
+    engine.shutdown();
+    launcher.await.unwrap();
+    network.await.unwrap();
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn six_accounts_simultaneous_api_failure_and_complete_outage_recovery() {
+    #[derive(Clone, Default)]
+    struct OutageState {
+        probe_ok: Arc<AtomicBool>,
+        servers_ok: Arc<AtomicBool>,
+        server_hits: Arc<AtomicUsize>,
+        ticket_hits: Arc<AtomicUsize>,
+    }
+    let st = OutageState::default();
+    st.probe_ok.store(true, Ordering::SeqCst);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new()
+        .route(
+            "/probe",
+            get(|HttpState(s): HttpState<OutageState>| async move {
+                if s.probe_ok.load(Ordering::SeqCst) {
+                    StatusCode::OK
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+            }),
+        )
+        .route(
+            "/servers",
+            get(|HttpState(s): HttpState<OutageState>| async move {
+                s.server_hits.fetch_add(1, Ordering::SeqCst);
+                if s.servers_ok.load(Ordering::SeqCst) {
+                    (
+                        StatusCode::OK,
+                        axum::Json(serde_json::json!({
+                            "data": [{
+                                "id": "00000000-0000-0000-0000-000000000001",
+                                "playing": 1,
+                                "maxPlayers": 10,
+                                "ping": 30
+                            }],
+                            "nextPageCursor": null
+                        })),
+                    )
+                } else {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        axum::Json(serde_json::json!({})),
+                    )
+                }
+            }),
+        )
+        .route(
+            "/ticket",
+            post(|HttpState(s): HttpState<OutageState>| async move {
+                s.ticket_hits.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::OK,
+                    [("rbx-authentication-ticket", "DISPOSABLE_FIXTURE_TICKET")],
+                )
+            }),
+        )
+        .with_state(st.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (mut engine, path) = engine_fixture(6, &url, false);
+    {
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.roblox.reachability_url = Some(format!("{url}/probe"));
+        inner.launch_spacing = Duration::from_millis(10);
+        inner.launch_readiness_timeout = Duration::from_millis(10);
+    }
+    let running = engine.clone();
+    let launcher = tokio::spawn(async move { running.launch_loop().await });
+    let running = engine.clone();
+    let network = tokio::spawn(async move { running.connectivity_loop().await });
+
+    // Phase 1: Six accounts fail simultaneously on /servers 503 while /probe is 200 (no retry storm, no false global suspension).
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let snap = engine.snapshot();
+            if snap.accounts.iter().all(|a| a.status == Status::Backoff) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let hits_during_partial_outage = st.server_hits.load(Ordering::SeqCst);
+    assert_eq!(hits_during_partial_outage, 6);
+    assert!(!engine.snapshot().network_suspended);
+
+    // Phase 2: Complete internet outage (/probe drops to 503) -> shared suspension, retry budget preserved, no retry storm.
+    st.probe_ok.store(false, Ordering::SeqCst);
+    engine.0.probe_requested.store(true, Ordering::Release);
+    engine.0.wake.notify_waiters();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if engine.snapshot().network_suspended {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let hits_during_outage = st.server_hits.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(st.server_hits.load(Ordering::SeqCst), hits_during_outage);
+    assert!(engine.snapshot().accounts.iter().all(|a| a.failures == 0));
+
+    // Phase 3: Internet returns -> /probe and /servers return 200 -> all 6 eligible accounts resume and dispatch without duplicate launches.
+    st.probe_ok.store(true, Ordering::SeqCst);
+    st.servers_ok.store(true, Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            engine.0.wake.notify_waiters();
+            let snap = engine.snapshot();
+            if !snap.network_suspended && snap.accounts.iter().all(|a| a.tracker.is_some()) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(st.ticket_hits.load(Ordering::SeqCst), 6);
+
+    engine.shutdown();
+    launcher.await.unwrap();
+    network.await.unwrap();
     server.abort();
     drop(engine);
     std::fs::remove_dir_all(path).unwrap();

@@ -39,6 +39,9 @@ A disk failure does not stop launching or recovery; later events retry logging a
 - `process_exit_pending`, `exit_reconciliation_checked`, `process_handoff_verified`: retain tracking, record fresh candidates and settlement, and identify a unique surviving client before replacement.
 - `account_state_changed`: before/after status, safe reason, retry count/deadline, recovery evidence, close intent, and recovery settings.
 - Network suspension, launch coordination, retired launches, save failures, restoration, and shutdown have separate events.
+- `connectivity_probe` records Roblox service reachability without claiming host-wide internet failure.
+- `launch_inspection_resolved` distinguishes verified absence after the ownership deadline from restored metadata for an unsent launch.
+- `startup_conflict_classified` records the startup conflict and external cleanup classification alongside launch gate readiness.
 
 For a pause, find `account_state_changed` with `after.status` equal to `needs_attention` and inspect its reason and preceding events.
 For error 264 or 273, compare preceding `launch_submitted` trackers and process identities to see whether this launcher handed off another launch.

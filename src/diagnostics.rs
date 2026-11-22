@@ -160,7 +160,8 @@ pub(crate) fn account(a: &Account) -> Value {
         "recovery_reason": match a.recovery_reason.as_str() {
             "Network" | "RateLimit" | "Auth" | "Permission" | "TargetUnavailable" |
             "Unsupported" | "Other" | "SessionLost" | "ConnectionFailed" |
-            "ConfirmedTerminalDisconnect" | "NormalExit" => a.recovery_reason.as_str(),
+            "ConfirmedTerminalDisconnect" | "NormalExit" | "SessionConflict" |
+            "NetworkDisconnect" | "AfkKick" => a.recovery_reason.as_str(),
             _ => "unspecified",
         },
         "reason": reason(a.last_error.as_deref().unwrap_or("")),
@@ -296,6 +297,8 @@ pub(crate) fn reason(message: &str) -> &'static str {
         ("Account validation:", "account_validation_failed"),
         ("Authentication ticket:", "authentication_ticket_failed"),
         ("Game lookup:", "game_lookup_failed"),
+        ("Public server selection:", "public_server_selection_failed"),
+        ("Same-preset friend lookup:", "friend_server_lookup_failed"),
         (
             "Private share-link resolution:",
             "private_link_resolution_failed",
@@ -321,6 +324,23 @@ pub(crate) fn reason(message: &str) -> &'static str {
         ("A launch is already pending", "launch_already_pending"),
         ("Connectivity is suspended", "network_suspended"),
         ("The rate-limit cooldown", "rate_limit_cooldown"),
+        ("Rate-limit cooldown", "rate_limit_cooldown"),
+        (
+            "Cooldown for duplicate session",
+            "duplicate_session_cooldown",
+        ),
+        (
+            "The duplicate-session cooldown",
+            "duplicate_session_cooldown",
+        ),
+        ("Waiting for internet / Roblox service", "network_suspended"),
+        (
+            "Waiting for launch coordination",
+            "launch_coordination_unavailable",
+        ),
+        ("Restart is already in progress", "restart_already_pending"),
+        ("Idle disconnect", "afk_kick"),
+        ("Launch ended without a client", "verified_launch_absence"),
     ] {
         if message.starts_with(prefix) {
             return code;
