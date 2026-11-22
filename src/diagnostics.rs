@@ -160,7 +160,8 @@ pub(crate) fn account(a: &Account) -> Value {
         "recovery_reason": match a.recovery_reason.as_str() {
             "Network" | "RateLimit" | "Auth" | "Permission" | "TargetUnavailable" |
             "Unsupported" | "Other" | "SessionLost" | "ConnectionFailed" |
-            "ConfirmedTerminalDisconnect" | "NormalExit" => a.recovery_reason.as_str(),
+            "ConfirmedTerminalDisconnect" | "NormalExit" | "SessionConflict" |
+            "NetworkDisconnect" | "AfkKick" => a.recovery_reason.as_str(),
             _ => "unspecified",
         },
         "reason": reason(a.last_error.as_deref().unwrap_or("")),
@@ -296,6 +297,8 @@ pub(crate) fn reason(message: &str) -> &'static str {
         ("Account validation:", "account_validation_failed"),
         ("Authentication ticket:", "authentication_ticket_failed"),
         ("Game lookup:", "game_lookup_failed"),
+        ("Public server selection:", "public_server_selection_failed"),
+        ("Same-preset friend lookup:", "friend_server_lookup_failed"),
         (
             "Private share-link resolution:",
             "private_link_resolution_failed",

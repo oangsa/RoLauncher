@@ -133,28 +133,130 @@ fn slow_post_force_teardown_defers_retermination_and_recovers_on_confirmed_exit(
     );
     assert_eq!(calls, vec![false, true]);
 
-    for offset in [7, 8, 9, 10] {
+    for offset in [7, 8, 9, 10, 12, 20, 29] {
         assert!(
             !f.engine
                 .close_owned(
                     &f.account(),
                     t0 + Duration::from_secs(offset),
                     &mut attempts,
-                    || Ok(players.clone()),
+                    || panic!("pending post-force teardown must not rediscover"),
                     |_, _| panic!("must not re-terminate during post-force kernel teardown")
                 )
-                .unwrap()
+                .unwrap(),
+            "offset={offset}"
         );
         assert_ne!(f.account().status, Status::NeedsAttention);
     }
 
     let acc = f.account();
-    // If the process genuinely outlives the 5-second post-force grace, force retries once.
+    f.engine
+        .confirmed_exit("1", acc.generation, acc.process.as_ref().unwrap(), false);
+    assert_eq!(f.account().status, Status::Queued);
+    assert!(launch_ready(&f.account(), Utc::now()));
+}
+
+#[test]
+fn force_termination_timeout_transitions_to_needs_attention_and_recovers_if_late_exit_arrives() {
+    for mode in ["stop", "recovery"] {
+        let f = Fixture::new();
+        if mode == "stop" {
+            f.engine.command("1", "stop").unwrap();
+        } else {
+            f.recovery();
+        }
+        let mut attempts = CloseAttempts::default();
+        let t0 = Instant::now();
+        let players = f.players();
+        let mut calls = Vec::new();
+        assert!(
+            f.engine
+                .close_owned(
+                    &f.account(),
+                    t0,
+                    &mut attempts,
+                    || Ok(players.clone()),
+                    |_, force| {
+                        calls.push(force);
+                        Ok(())
+                    }
+                )
+                .unwrap()
+        );
+        assert!(
+            f.engine
+                .close_owned(
+                    &f.account(),
+                    t0 + Duration::from_secs(6),
+                    &mut attempts,
+                    || Ok(players.clone()),
+                    |_, force| {
+                        calls.push(force);
+                        Ok(())
+                    }
+                )
+                .unwrap()
+        );
+        assert_eq!(calls, vec![false, true]);
+        assert!(
+            !f.engine
+                .close_owned(
+                    &f.account(),
+                    t0 + Duration::from_secs(35),
+                    &mut attempts,
+                    || panic!("must wait until FORCE_EXIT_TIMEOUT"),
+                    |_, _| panic!("must not re-terminate"),
+                )
+                .unwrap()
+        );
+        let err = f
+            .engine
+            .close_owned(
+                &f.account(),
+                t0 + Duration::from_secs(36),
+                &mut attempts,
+                || Ok(players.clone()),
+                |_, _| panic!("timeout must report failure instead of re-terminating"),
+            )
+            .unwrap_err();
+        assert!(err.contains("timed out"));
+        let paused = f.account();
+        assert_eq!(paused.status, Status::NeedsAttention);
+        assert_eq!(paused.last_error.as_deref(), Some(CLOSE_FAILED_ERROR));
+        assert!(paused.close_intent.as_ref().unwrap().denied);
+        assert_eq!(calls, vec![false, true]);
+
+        f.engine.confirmed_exit(
+            "1",
+            paused.generation,
+            paused.process.as_ref().unwrap(),
+            false,
+        );
+        let after = f.account();
+        if mode == "stop" {
+            assert_eq!(after.status, Status::Stopped);
+        } else {
+            assert_eq!(after.status, Status::Backoff);
+            assert!(after.close_intent.is_none());
+            assert!(launch_ready(&after, Utc::now() + ChronoDuration::hours(1)));
+        }
+    }
+}
+
+#[test]
+fn manual_restart_and_process_exit_during_pending_force_termination_do_not_reterminate_or_pause() {
+    // 1. Manual Restart during pending force termination preserves the wait instead of re-terminating.
+    let f = Fixture::new();
+    f.recovery();
+    let mut attempts = CloseAttempts::default();
+    let t0 = Instant::now();
+    let players = f.players();
+    let mut calls = Vec::new();
     assert!(
         f.engine
             .close_owned(
-                &acc,
-                t0 + Duration::from_secs(12),
+                &f.account(),
+                t0,
                 &mut attempts,
                 || Ok(players.clone()),
                 |_, force| {
@@ -164,12 +266,211 @@ fn slow_post_force_teardown_defers_retermination_and_recovers_on_confirmed_exit(
             )
             .unwrap()
     );
-    assert_eq!(calls, vec![false, true, true]);
-
-    f.engine
-        .confirmed_exit("1", acc.generation, acc.process.as_ref().unwrap(), false);
+    assert!(
+        f.engine
+            .close_owned(
+                &f.account(),
+                t0 + Duration::from_secs(6),
+                &mut attempts,
+                || Ok(players.clone()),
+                |_, force| {
+                    calls.push(force);
+                    Ok(())
+                }
+            )
+            .unwrap()
+    );
+    f.engine.command("1", "restart").unwrap();
+    assert!(
+        !f.engine
+            .close_owned(
+                &f.account(),
+                t0 + Duration::from_secs(8),
+                &mut attempts,
+                || panic!("manual restart during pending force teardown must wait for exit"),
+                |_, _| panic!("must not issue second TerminateProcess"),
+            )
+            .unwrap()
+    );
+    assert_eq!(f.account().status, Status::Queued);
+    assert_eq!(calls, vec![false, true]);
+    let pending_restart = f.account();
+    f.engine.confirmed_exit(
+        "1",
+        pending_restart.generation,
+        pending_restart.process.as_ref().unwrap(),
+        false,
+    );
     assert_eq!(f.account().status, Status::Queued);
     assert!(launch_ready(&f.account(), Utc::now()));
+
+    // 2. Immediate exit after force (or graceful) submission defers instead of pausing, even during metadata unavailability.
+    for reason in ["manual_stop", "recovery"] {
+        let f2 = Fixture::new();
+        if reason == "manual_stop" {
+            f2.engine.command("1", "stop").unwrap();
+        } else {
+            f2.recovery();
+        }
+        let mut a2 = CloseAttempts::default();
+        assert_eq!(f2.tick(&f2.account(), t0, &mut a2), vec![false]);
+        assert!(
+            !f2.engine
+                .close_owned(
+                    &f2.account(),
+                    t0 + Duration::from_secs(2),
+                    &mut a2,
+                    || Ok(Vec::new()),
+                    |_, _| panic!("absent process must defer"),
+                )
+                .unwrap()
+        );
+        assert_ne!(f2.account().status, Status::NeedsAttention);
+        assert!(
+            !f2.engine
+                .close_owned(
+                    &f2.account(),
+                    t0 + Duration::from_secs(3),
+                    &mut a2,
+                    || Err("metadata unavailable".into()),
+                    |_, _| panic!("unavailable metadata must defer"),
+                )
+                .unwrap()
+        );
+        assert_ne!(f2.account().status, Status::NeedsAttention);
+    }
+
+    // 3. Multiple accounts terminate independently without sharing close/denial state.
+    let f3 = Fixture::new();
+    f3.engine.command("1", "stop").unwrap();
+    f3.engine.command("2", "restart").unwrap();
+    let mut a3 = CloseAttempts::default();
+    let players3 = f3.players();
+    let accounts3 = f3.engine.snapshot().accounts;
+    assert!(
+        f3.engine
+            .close_owned(
+                &accounts3[0],
+                t0,
+                &mut a3,
+                || Ok(players3.clone()),
+                |_, _| Ok(()),
+            )
+            .unwrap()
+    );
+    assert!(
+        f3.engine
+            .close_owned(
+                &accounts3[0],
+                t0 + Duration::from_secs(6),
+                &mut a3,
+                || Ok(players3.clone()),
+                |_, _| Ok(()),
+            )
+            .unwrap()
+    );
+    assert!(
+        f3.engine
+            .close_owned(
+                &accounts3[1],
+                t0 + Duration::from_secs(6),
+                &mut a3,
+                || Ok(players3.clone()),
+                |p, force| {
+                    assert_eq!(p.pid, accounts3[1].process.as_ref().unwrap().pid);
+                    assert!(!force);
+                    Ok(())
+                },
+            )
+            .unwrap()
+    );
+    assert!(
+        !f3.engine
+            .close_owned(
+                &f3.account(),
+                t0 + Duration::from_secs(8),
+                &mut a3,
+                || panic!("account 1 pending force must defer"),
+                |_, _| panic!("account 1 must not re-terminate"),
+            )
+            .unwrap()
+    );
+    f3.engine.confirmed_exit(
+        "2",
+        accounts3[1].generation,
+        accounts3[1].process.as_ref().unwrap(),
+        true,
+    );
+    let after3 = f3.engine.snapshot().accounts;
+    assert_eq!(after3[0].status, Status::Stopping);
+    assert_eq!(after3[1].status, Status::Queued);
+    assert!(launch_ready(&after3[1], Utc::now()));
+
+    // 4. Process handoff during shutdown: force close on old parent clears upon handoff, and successor closes cleanly.
+    let f4 = Fixture::new();
+    f4.engine.command("1", "stop").unwrap();
+    let mut a4 = CloseAttempts::default();
+    let original4 = f4.account();
+    let old_id4 = original4.process.clone().unwrap();
+    let players4 = f4.players();
+    assert!(
+        f4.engine
+            .close_owned(
+                &original4,
+                t0,
+                &mut a4,
+                || Ok(players4.clone()),
+                |_, force| {
+                    assert!(!force);
+                    Ok(())
+                }
+            )
+            .unwrap()
+    );
+    assert!(
+        f4.engine
+            .close_owned(
+                &f4.account(),
+                t0 + Duration::from_secs(6),
+                &mut a4,
+                || Ok(players4.clone()),
+                |_, force| {
+                    assert!(force);
+                    Ok(())
+                }
+            )
+            .unwrap()
+    );
+    let mut handoff_players = players4;
+    handoff_players[0].pid += 100;
+    handoff_players[0].creation_time = "shutdown-handoff".into();
+    assert!(
+        f4.engine
+            .reconcile_exit(&original4, &old_id4, true, &handoff_players, false)
+    );
+    a4.remove(&old_id4);
+    let successor4 = f4.account();
+    assert_eq!(successor4.status, Status::Stopping);
+    assert_eq!(successor4.process.as_ref().unwrap().pid, old_id4.pid + 100);
+    assert!(
+        f4.engine
+            .close_owned(
+                &successor4,
+                t0 + Duration::from_secs(7),
+                &mut a4,
+                || Ok(handoff_players.clone()),
+                |p, force| {
+                    assert_eq!(p.pid, old_id4.pid + 100);
+                    assert!(!force);
+                    Ok(())
+                }
+            )
+            .unwrap()
+    );
+    let successor_id4 = successor4.process.clone().unwrap();
+    f4.engine
+        .confirmed_exit("1", successor4.generation, &successor_id4, true);
+    assert_eq!(f4.account().status, Status::Stopped);
 }
 
 #[test]

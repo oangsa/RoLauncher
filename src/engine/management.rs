@@ -229,6 +229,7 @@ impl Engine {
             }
             if a.recovery_reason == "RateLimit" { return Err("The rate-limit cooldown must finish before retrying".into()); }
             if active_cooldown(a) { return Err("The duplicate-session cooldown must finish before retrying".into()); }
+            a.transient_failures = 0;
             a.next_retry = Some(Utc::now());
             let pending = a.operation_id;
             if let Some(op) = pending.and_then(|id|s.operations.get(&id)).filter(|op|op.state == "queued").cloned() { return Ok(op); }

@@ -320,7 +320,10 @@ mod imp {
     ) -> Result<(), String> {
         if force
             && let Some(pinned) = PINNED_CLOSES.lock().ok().and_then(|mut list| {
-                let pos = list.iter().position(|entry| entry.identity == *identity)?;
+                let pos = list.iter().position(|entry| {
+                    entry.identity.pid == identity.pid
+                        && entry.identity.creation_time == identity.creation_time
+                })?;
                 Some(list.swap_remove(pos))
             })
         {
@@ -422,8 +425,11 @@ mod imp {
         }
         if unsafe { TerminateProcess(handle, 0) } == 0 {
             let error = unsafe { GetLastError() };
-            // TerminateProcess returns ERROR_ACCESS_DENIED for already-terminated processes.
-            if unsafe { WaitForSingleObject(handle, 0) } == WAIT_OBJECT_0 {
+            // TerminateProcess returns ERROR_ACCESS_DENIED (STATUS_PROCESS_IS_TERMINATING)
+            // when the kernel is already tearing down the process.
+            if error == ERROR_ACCESS_DENIED
+                || unsafe { WaitForSingleObject(handle, 50) } == WAIT_OBJECT_0
+            {
                 return Ok(());
             }
             return Err(format!(

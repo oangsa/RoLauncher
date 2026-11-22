@@ -5904,3 +5904,393 @@ async fn f14_stop_and_shutdown_while_monitor_scan_is_in_flight() {
     drop(engine);
     std::fs::remove_dir_all(path).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn partial_api_outage_with_healthy_reachability_paces_retries_without_loop_or_global_suspension()
+ {
+    #[derive(Clone, Default)]
+    struct PartialOutage {
+        probe_hits: Arc<AtomicUsize>,
+        server_hits: Arc<AtomicUsize>,
+        ticket_hits: Arc<AtomicUsize>,
+        servers_ok: Arc<AtomicBool>,
+    }
+    let st = PartialOutage::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new()
+        .route(
+            "/probe",
+            get(|HttpState(s): HttpState<PartialOutage>| async move {
+                s.probe_hits.fetch_add(1, Ordering::SeqCst);
+                StatusCode::OK
+            }),
+        )
+        .route(
+            "/servers",
+            get(|HttpState(s): HttpState<PartialOutage>| async move {
+                s.server_hits.fetch_add(1, Ordering::SeqCst);
+                if s.servers_ok.load(Ordering::SeqCst) {
+                    (
+                        StatusCode::OK,
+                        axum::Json(serde_json::json!({
+                            "data": [{
+                                "id": "00000000-0000-0000-0000-000000000001",
+                                "playing": 1,
+                                "maxPlayers": 10,
+                                "ping": 30
+                            }],
+                            "nextPageCursor": null
+                        })),
+                    )
+                } else {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        axum::Json(serde_json::json!({})),
+                    )
+                }
+            }),
+        )
+        .route(
+            "/ticket",
+            post(|HttpState(s): HttpState<PartialOutage>| async move {
+                s.ticket_hits.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::OK,
+                    [("rbx-authentication-ticket", "DISPOSABLE_FIXTURE_TICKET")],
+                )
+            }),
+        )
+        .with_state(st.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (mut engine, path) = engine_fixture(1, &url, false);
+    Arc::get_mut(&mut engine.0).unwrap().roblox.reachability_url = Some(format!("{url}/probe"));
+    let running = engine.clone();
+    let launcher = tokio::spawn(async move { running.launch_loop().await });
+    let running = engine.clone();
+    let network = tokio::spawn(async move { running.connectivity_loop().await });
+
+    // Wait for first failed preparation and connectivity probe.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while st.server_hits.load(Ordering::SeqCst) == 0
+            || st.probe_hits.load(Ordering::SeqCst) == 0
+            || engine.snapshot().accounts[0].status != Status::Backoff
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    // Reachability HTTP 200 must keep global suspension false and preserve per-account backoff.
+    let first = engine.snapshot();
+    assert!(!first.network_suspended);
+    assert_eq!(first.accounts[0].status, Status::Backoff);
+    assert_eq!(first.accounts[0].failures, 0);
+    assert!(first.accounts[0].next_retry.is_some());
+
+    // Wait 1.5s while connectivity_loop runs: must NOT clear next_retry or hammer /servers.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(st.server_hits.load(Ordering::SeqCst), 1);
+    assert!(!engine.snapshot().network_suspended);
+    assert_eq!(engine.snapshot().accounts[0].status, Status::Backoff);
+
+    // Simulate >5 temporary FailureKind::Network failures: must stay in Backoff (never NeedsAttention) and bound backoff.
+    for _ in 0..7 {
+        let generation = engine.snapshot().accounts[0].generation;
+        engine.failure("1", generation, Failure::network());
+    }
+    let after_many = engine.snapshot().accounts[0].clone();
+    assert_eq!(after_many.status, Status::Backoff);
+    assert_eq!(after_many.failures, 0);
+    assert!(after_many.next_retry.unwrap() <= Utc::now() + ChronoDuration::seconds(32));
+
+    // Service recovers during Backoff -> fast-forward next_retry to verify eventual dispatch.
+    st.servers_ok.store(true, Ordering::SeqCst);
+    let generation = after_many.generation;
+    engine
+        .update("1", generation, |a| a.next_retry = Some(Utc::now()))
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while st.ticket_hits.load(Ordering::SeqCst) == 0
+            || engine.snapshot().accounts[0].tracker.is_none()
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(engine.snapshot().accounts[0].failures, 0);
+
+    engine.shutdown();
+    launcher.await.unwrap();
+    network.await.unwrap();
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_account_succeeds_while_another_fails_and_rate_limit_remains_respected() {
+    #[derive(Clone, Default)]
+    struct MixedApi {
+        server_hits: Arc<AtomicUsize>,
+        servers_ok: Arc<AtomicBool>,
+        ticket_hits: Arc<AtomicUsize>,
+        rate_limit_tickets: Arc<AtomicBool>,
+    }
+    let st = MixedApi::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new()
+        .route("/probe", get(|| async { StatusCode::OK }))
+        .route(
+            "/servers",
+            get(|HttpState(s): HttpState<MixedApi>| async move {
+                s.server_hits.fetch_add(1, Ordering::SeqCst);
+                if s.servers_ok.load(Ordering::SeqCst) {
+                    (
+                        StatusCode::OK,
+                        axum::Json(serde_json::json!({
+                            "data": [{
+                                "id": "00000000-0000-0000-0000-000000000001",
+                                "playing": 1,
+                                "maxPlayers": 10,
+                                "ping": 30
+                            }],
+                            "nextPageCursor": null
+                        })),
+                    )
+                } else {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        axum::Json(serde_json::json!({})),
+                    )
+                }
+            }),
+        )
+        .route(
+            "/ticket",
+            post(|HttpState(s): HttpState<MixedApi>| async move {
+                s.ticket_hits.fetch_add(1, Ordering::SeqCst);
+                if s.rate_limit_tickets.load(Ordering::SeqCst) {
+                    (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        [("rbx-authentication-ticket", "")],
+                    )
+                } else {
+                    (
+                        StatusCode::OK,
+                        [("rbx-authentication-ticket", "DISPOSABLE_FIXTURE_TICKET")],
+                    )
+                }
+            }),
+        )
+        .with_state(st.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (mut engine, path) = super::tests::fixture(2);
+    {
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.roblox.servers_url = Some(format!("{url}/servers"));
+        inner.roblox.ticket_url = Some(format!("{url}/ticket"));
+        inner.roblox.reachability_url = Some(format!("{url}/probe"));
+        inner.launch_result = Some(Ok(()));
+        inner.launch_spacing = Duration::from_millis(20);
+        inner.launch_readiness_timeout = Duration::from_millis(20);
+    }
+    engine
+        .transaction(|s| {
+            for saved in &mut s.database.accounts {
+                saved.encrypted_session = platform::protect("DISPOSABLE_FIXTURE_SESSION")?;
+            }
+            // Account 2 has explicit job_id (skips /servers), Account 1 needs /servers (fails 503).
+            s.database.accounts[1]
+                .account
+                .target
+                .as_mut()
+                .unwrap()
+                .job_id = Some(Uuid::from_u128(1));
+            Ok(())
+        })
+        .unwrap();
+    engine.command("1", "start").unwrap();
+    engine.command("2", "start").unwrap();
+
+    let running = engine.clone();
+    let launcher = tokio::spawn(async move { running.launch_loop().await });
+    let running = engine.clone();
+    let network = tokio::spawn(async move { running.connectivity_loop().await });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let snap = engine.snapshot();
+            if snap.accounts[1].tracker.is_some() && snap.accounts[0].status == Status::Backoff {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!engine.snapshot().network_suspended);
+
+    // Recover /servers, but return HTTP 429 on /ticket: rate limit cooldown must be respected even with probe HTTP 200.
+    st.servers_ok.store(true, Ordering::SeqCst);
+    st.rate_limit_tickets.store(true, Ordering::SeqCst);
+    let gen1 = engine.snapshot().accounts[0].generation;
+    engine
+        .update("1", gen1, |a| a.next_retry = Some(Utc::now()))
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while engine.snapshot().accounts[0].recovery_reason != "RateLimit" {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let rl = engine.snapshot().accounts[0].clone();
+    assert!(rl.next_retry.unwrap() >= Utc::now() + ChronoDuration::seconds(50));
+    engine.command("1", "restart").unwrap();
+    assert_eq!(engine.snapshot().accounts[0].recovery_reason, "RateLimit");
+    assert!(!launch_ready(&engine.snapshot().accounts[0], Utc::now()));
+
+    engine.shutdown();
+    launcher.await.unwrap();
+    network.await.unwrap();
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn six_accounts_simultaneous_api_failure_and_complete_outage_recovery() {
+    #[derive(Clone, Default)]
+    struct OutageState {
+        probe_ok: Arc<AtomicBool>,
+        servers_ok: Arc<AtomicBool>,
+        server_hits: Arc<AtomicUsize>,
+        ticket_hits: Arc<AtomicUsize>,
+    }
+    let st = OutageState::default();
+    st.probe_ok.store(true, Ordering::SeqCst);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new()
+        .route(
+            "/probe",
+            get(|HttpState(s): HttpState<OutageState>| async move {
+                if s.probe_ok.load(Ordering::SeqCst) {
+                    StatusCode::OK
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+            }),
+        )
+        .route(
+            "/servers",
+            get(|HttpState(s): HttpState<OutageState>| async move {
+                s.server_hits.fetch_add(1, Ordering::SeqCst);
+                if s.servers_ok.load(Ordering::SeqCst) {
+                    (
+                        StatusCode::OK,
+                        axum::Json(serde_json::json!({
+                            "data": [{
+                                "id": "00000000-0000-0000-0000-000000000001",
+                                "playing": 1,
+                                "maxPlayers": 10,
+                                "ping": 30
+                            }],
+                            "nextPageCursor": null
+                        })),
+                    )
+                } else {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        axum::Json(serde_json::json!({})),
+                    )
+                }
+            }),
+        )
+        .route(
+            "/ticket",
+            post(|HttpState(s): HttpState<OutageState>| async move {
+                s.ticket_hits.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::OK,
+                    [("rbx-authentication-ticket", "DISPOSABLE_FIXTURE_TICKET")],
+                )
+            }),
+        )
+        .with_state(st.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (mut engine, path) = engine_fixture(6, &url, false);
+    {
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.roblox.reachability_url = Some(format!("{url}/probe"));
+        inner.launch_spacing = Duration::from_millis(10);
+        inner.launch_readiness_timeout = Duration::from_millis(10);
+    }
+    let running = engine.clone();
+    let launcher = tokio::spawn(async move { running.launch_loop().await });
+    let running = engine.clone();
+    let network = tokio::spawn(async move { running.connectivity_loop().await });
+
+    // Phase 1: Six accounts fail simultaneously on /servers 503 while /probe is 200 (no retry storm, no false global suspension).
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let snap = engine.snapshot();
+            if snap.accounts.iter().all(|a| a.status == Status::Backoff) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let hits_during_partial_outage = st.server_hits.load(Ordering::SeqCst);
+    assert_eq!(hits_during_partial_outage, 6);
+    assert!(!engine.snapshot().network_suspended);
+
+    // Phase 2: Complete internet outage (/probe drops to 503) -> shared suspension, retry budget preserved, no retry storm.
+    st.probe_ok.store(false, Ordering::SeqCst);
+    engine.0.probe_requested.store(true, Ordering::Release);
+    engine.0.wake.notify_waiters();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if engine.snapshot().network_suspended {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let hits_during_outage = st.server_hits.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(st.server_hits.load(Ordering::SeqCst), hits_during_outage);
+    assert!(engine.snapshot().accounts.iter().all(|a| a.failures == 0));
+
+    // Phase 3: Internet returns -> /probe and /servers return 200 -> all 6 eligible accounts resume and dispatch without duplicate launches.
+    st.probe_ok.store(true, Ordering::SeqCst);
+    st.servers_ok.store(true, Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            engine.0.wake.notify_waiters();
+            let snap = engine.snapshot();
+            if !snap.network_suspended && snap.accounts.iter().all(|a| a.tracker.is_some()) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(st.ticket_hits.load(Ordering::SeqCst), 6);
+
+    engine.shutdown();
+    launcher.await.unwrap();
+    network.await.unwrap();
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}

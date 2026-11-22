@@ -108,6 +108,7 @@ struct Inner {
     events: broadcast::Sender<Snapshot>,
     shutdown: AtomicBool,
     launch_allowed: Arc<AtomicBool>,
+    probe_requested: AtomicBool,
     bot_generation: AtomicU64,
     discord: crate::discord::Discord,
     resources: crate::resources::ResourceMonitor,
@@ -273,6 +274,7 @@ fn apply_observation(account: &mut Account, observation: Observation) {
         account.connected_since.get_or_insert_with(Utc::now);
         account.disconnected_since = None;
         account.last_error = None;
+        account.transient_failures = 0;
         if !rate_limited {
             account.next_retry = None;
             account.recovery_reason.clear();
@@ -452,6 +454,7 @@ fn reserve_recovery(account: &mut Account) {
         ),
     );
     if shared_outage {
+        account.transient_failures = 0;
         account.next_retry = Some(Utc::now());
     }
     if let (Some(previous), Some(next)) = (retry, account.next_retry) {
@@ -518,7 +521,7 @@ fn resume_after_confirmed_close(account: &mut Account) {
         && account
             .close_intent
             .as_ref()
-            .is_some_and(|i| i.denied && i.reason == CloseReason::AutomaticRecovery);
+            .is_some_and(|i| i.denied && i.reason.automatic());
     let close_error = account.last_error.as_deref().is_some_and(|error| {
         error.starts_with(CLOSE_BLOCKED_PREFIX)
             || error == "Unable to close managed instance (Windows error 5)"
@@ -702,6 +705,7 @@ impl Engine {
             shutdown: AtomicBool::new(false),
             bot_generation: AtomicU64::new(u64::from(bot_running)),
             launch_allowed,
+            probe_requested: AtomicBool::new(false),
             discord,
             resources: crate::resources::ResourceMonitor::new(),
             journal,
@@ -849,7 +853,7 @@ impl Engine {
         let event = snapshot(&current);
         drop(current);
         let _ = self.0.events.send(event);
-        self.0.wake.notify_one();
+        self.0.wake.notify_waiters();
         Ok(result)
     }
     fn journal_changes(&self, old: &State, next: &State) {
@@ -1423,7 +1427,7 @@ impl Engine {
             let multi_instance_enabled = s.database.multi_instance_enabled;
             let a = account_mut(s,id)?; a.finish_run(Utc::now()); a.desired_running = action != "stop";
             if a.process.is_none() { a.tracker=None;a.ownership_deadline=None; }
-            a.generation = generation; a.close_intent = if action == "stop" || a.process.is_some() { Some(close_intent) } else { None }; a.failures = 0;
+            a.generation = generation; a.close_intent = if action == "stop" || a.process.is_some() { Some(close_intent) } else { None }; a.failures = 0; a.transient_failures = 0;
             a.next_retry = if single_instance_deferred {
                 Some(Utc::now() + ChronoDuration::seconds(5))
             } else {
@@ -1520,7 +1524,7 @@ impl Engine {
                 "error_code": crate::diagnostics::error_code(&error.message),
             }));
             if error.kind == FailureKind::Network {
-                s.network_suspended = true;
+                self.0.probe_requested.store(true, Ordering::Release);
             }
             let a = account_mut(s, id)?;
             apply_failure(a, &error);
@@ -2553,6 +2557,13 @@ impl Engine {
                 if clear_tracker {
                     account.tracker = None;
                     account.ownership_deadline = None;
+                    if account.desired_running && account.status == Status::Launching {
+                        account.status = if state.network_suspended {
+                            Status::Backoff
+                        } else {
+                            Status::Queued
+                        };
+                    }
                 }
                 if removed
                     && !has_other_retired
@@ -3701,6 +3712,9 @@ impl Engine {
                     Status::NeedsAttention | Status::Queued | Status::Backoff
                 )
             {
+                let cooldown = active_cooldown(account)
+                    .then_some(account.next_retry)
+                    .flatten();
                 apply_failure(
                     account,
                     &Failure::new(
@@ -3708,6 +3722,10 @@ impl Engine {
                         if network_suspended { "Waiting for internet / Roblox service" } else { "Managed client exited; scheduling recovery" },
                     ),
                 );
+                if network_suspended {
+                    account.transient_failures = 0;
+                    account.next_retry = Some(cooldown.unwrap_or_else(Utc::now));
+                }
             } else if !account.desired_running || !account.auto_recovery {
                 account.desired_running = false;
                 account.status = Status::Stopped;
@@ -3905,13 +3923,23 @@ fn apply_failure(a: &mut Account, error: &Failure) {
     a.connected_since = None;
     a.disconnected_since = None;
     if error.kind == FailureKind::Network {
+        a.transient_failures = a.transient_failures.saturating_add(1);
+        let base = [2u64, 5, 10, 20, 30][a.transient_failures.saturating_sub(1).min(4) as usize];
+        let delay = base + rand::random_range(0..=1);
+        let retry = Utc::now() + ChronoDuration::seconds(delay as i64);
         a.status = Status::Backoff;
-        a.next_retry = cooldown.as_ref().and_then(|(time, _)| *time);
+        a.next_retry = Some(
+            cooldown
+                .as_ref()
+                .and_then(|(time, _)| *time)
+                .map_or(retry, |previous| retry.max(previous)),
+        );
         if let Some((_, reason)) = cooldown {
             a.recovery_reason = reason;
         }
         return;
     }
+    a.transient_failures = 0;
     if matches!(
         error.kind,
         FailureKind::Auth | FailureKind::Permission | FailureKind::Unsupported

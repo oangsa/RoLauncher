@@ -49,10 +49,17 @@ impl Engine {
                 if absent {
                     current.tracker = None;
                     current.ownership_deadline = None;
+                    let cooldown = active_cooldown(current)
+                        .then_some(current.next_retry)
+                        .flatten();
                     apply_failure(current, &Failure::new(
                         if suspended { FailureKind::Network } else { FailureKind::Other },
                         "Launch ended without a client; completed inspection confirms absence",
                     ));
+                    if suspended {
+                        current.transient_failures = 0;
+                        current.next_retry = Some(cooldown.unwrap_or_else(Utc::now));
+                    }
                 } else {
                     current.status = Status::Queued;
                     current.last_error = None;
