@@ -185,7 +185,8 @@ pub fn account_notice(old: &Account, new: &Account) -> Option<Notice> {
     if new.status == Status::Reconnecting
         && (new.disconnect_notified
             || error.starts_with("Session lost (code")
-            || error.starts_with("Connection failed:"))
+            || error.starts_with("Connection failed:")
+            || error.starts_with("Idle disconnect (code"))
         && (old.status != Status::Reconnecting
             || (!old.disconnect_notified && new.disconnect_notified)
             || (error.starts_with("Session lost (code 267)")
@@ -197,6 +198,11 @@ pub fn account_notice(old: &Account, new: &Account) -> Option<Notice> {
     {
         let (title, reason) = if error.starts_with("Session lost (code 267)") {
             ("Account kicked", "Roblox reported a kick (code 267).")
+        } else if error.starts_with("Idle disconnect (code") {
+            (
+                "Account disconnected (idle)",
+                "Roblox disconnected this account for inactivity (code 278).",
+            )
         } else if error.starts_with("Connection failed:") {
             (
                 "Unable to connect",

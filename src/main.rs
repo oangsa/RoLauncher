@@ -87,37 +87,86 @@ fn run() -> Result<(), String> {
     };
     // Runs under InstanceGuard, before Engine/API launch workers exist.
     #[cfg(windows)]
-    let startup_cleanup = (|| -> Result<usize, String> {
-        let conflict = if saved.multi_instance_enabled {
-            multi
-                .as_ref()
-                .ok()
-                .and_then(|guard| guard.as_ref())
-                .is_some_and(|guard| {
-                    !guard
-                        .launch_gate()
-                        .load(std::sync::atomic::Ordering::Acquire)
-                })
-        } else {
-            platform::startup_launch_conflict()?
-        };
-        if conflict
-            && (!saved.retired_launches.is_empty()
-                || saved.accounts.iter().any(|s| s.account.tracker.is_some()))
-        {
-            return Err("Startup conflict: saved launches still need inspection. No external clients closed; quit conflicting Roblox clients and restart RoLauncher.".into());
-        }
-        let protected: Vec<_> = saved
-            .accounts
-            .iter()
-            .filter_map(|s| s.account.process.clone())
-            .collect();
-        platform::close_startup_background_players(
-            &protected,
-            saved.external_background_cleanup_enabled,
-            conflict,
-        )
-    })();
+    let (startup_cleanup, startup_classification) =
+        (|| -> (Result<usize, String>, &'static str) {
+            let conflict = match if saved.multi_instance_enabled {
+                Ok(multi
+                    .as_ref()
+                    .ok()
+                    .and_then(|guard| guard.as_ref())
+                    .is_some_and(|guard| {
+                        !guard
+                            .launch_gate()
+                            .load(std::sync::atomic::Ordering::Acquire)
+                    }))
+            } else {
+                platform::startup_launch_conflict()
+            } {
+                Ok(conflict) => conflict,
+                Err(error) => return (Err(error), "inspection_unavailable"),
+            };
+            if !conflict {
+                return (Ok(0), "no_conflict");
+            }
+            if !saved.retired_launches.is_empty()
+                || saved.accounts.iter().any(|s| s.account.tracker.is_some())
+            {
+                return (
+                Err("Startup conflict: saved launches still need inspection; waiting for launch coordination and process discovery. No external clients closed.".into()),
+                "saved_launches_pending",
+            );
+            }
+            if !saved.external_background_cleanup_enabled {
+                let Err(error) = platform::close_startup_background_players(&[], false, true)
+                else {
+                    return (Ok(0), "no_conflict");
+                };
+                return (Err(error), "cleanup_disabled_conflict");
+            }
+            let protected: Vec<_> = saved
+                .accounts
+                .iter()
+                .filter_map(|s| s.account.process.clone())
+                .collect();
+            let count = match platform::close_startup_background_players(
+                &protected,
+                saved.external_background_cleanup_enabled,
+                conflict,
+            ) {
+                Ok(count) => count,
+                Err(error) => return (Err(error), "inspection_unavailable"),
+            };
+            // A count is not a conflict verdict. The guard can acquire the mutex
+            // while cleanup is scanning an already empty process list.
+            let still_conflicted = if let Ok(Some(guard)) = &multi {
+                let gate = guard.launch_gate();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+                while !gate.load(std::sync::atomic::Ordering::Acquire)
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                !gate.load(std::sync::atomic::Ordering::Acquire)
+            } else {
+                match platform::startup_launch_conflict() {
+                    Ok(c) => c,
+                    Err(error) => return (Err(error), "inspection_unavailable"),
+                }
+            };
+            let classification = if still_conflicted {
+                "still_conflicted"
+            } else if count > 0 {
+                "cleared_after_cleanup"
+            } else {
+                "cleared_on_recheck"
+            };
+            (
+                platform::startup_cleanup_outcome(count, still_conflicted),
+                classification,
+            )
+        })();
+    #[cfg(windows)]
+    let startup_closed_count = startup_cleanup.as_ref().copied().unwrap_or(0);
     #[cfg(windows)]
     let compatibility = {
         let coordination = if !saved.multi_instance_enabled {
@@ -155,6 +204,8 @@ fn run() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     let launch_gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(multi.is_ok()));
     let engine = Engine::open_with_launch_gate(store, compatibility, launch_gate)?;
+    #[cfg(windows)]
+    engine.record_startup_conflict(startup_classification, startup_closed_count);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()

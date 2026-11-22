@@ -263,6 +263,8 @@ pub struct Account {
     pub group: String,
     #[serde(default)]
     pub recovery_reason: String,
+    #[serde(skip)]
+    pub(crate) transient_failures: u32,
 }
 impl Account {
     pub fn new(id: String, username: String) -> Self {
@@ -295,6 +297,7 @@ impl Account {
             fallback_policy: FallbackPolicy::default(),
             group: String::new(),
             recovery_reason: String::new(),
+            transient_failures: 0,
         }
     }
     pub fn running_seconds(&self, now: DateTime<Utc>) -> u64 {

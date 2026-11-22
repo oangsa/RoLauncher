@@ -55,6 +55,8 @@ pub struct Roblox {
     pub(crate) servers_url: Option<String>,
     #[cfg(test)]
     pub(crate) ticket_url: Option<String>,
+    #[cfg(test)]
+    pub(crate) reachability_url: Option<String>,
 }
 impl Roblox {
     pub fn new() -> Result<Self, String> {
@@ -74,6 +76,8 @@ impl Roblox {
             servers_url: None,
             #[cfg(test)]
             ticket_url: None,
+            #[cfg(test)]
+            reachability_url: None,
         })
     }
     fn cookie_header(cookie: &str) -> Result<HeaderValue, Failure> {
@@ -127,8 +131,12 @@ impl Roblox {
         Err(failure)
     }
     pub async fn reachable(&self) -> bool {
+        let url = "https://users.roblox.com/v1/users/1";
+        #[cfg(test)]
+        let url = self.reachability_url.as_deref().unwrap_or(url);
         self.client
-            .get("https://users.roblox.com/v1/users/1")
+            .get(url)
+            .timeout(std::time::Duration::from_secs(5))
             .send()
             .await
             .is_ok_and(|r| r.status().is_success())

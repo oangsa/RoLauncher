@@ -320,7 +320,10 @@ mod imp {
     ) -> Result<(), String> {
         if force
             && let Some(pinned) = PINNED_CLOSES.lock().ok().and_then(|mut list| {
-                let pos = list.iter().position(|entry| entry.identity == *identity)?;
+                let pos = list.iter().position(|entry| {
+                    entry.identity.pid == identity.pid
+                        && entry.identity.creation_time == identity.creation_time
+                })?;
                 Some(list.swap_remove(pos))
             })
         {
@@ -422,8 +425,11 @@ mod imp {
         }
         if unsafe { TerminateProcess(handle, 0) } == 0 {
             let error = unsafe { GetLastError() };
-            // TerminateProcess returns ERROR_ACCESS_DENIED for already-terminated processes.
-            if unsafe { WaitForSingleObject(handle, 0) } == WAIT_OBJECT_0 {
+            // TerminateProcess returns ERROR_ACCESS_DENIED (STATUS_PROCESS_IS_TERMINATING)
+            // when the kernel is already tearing down the process.
+            if error == ERROR_ACCESS_DENIED
+                || unsafe { WaitForSingleObject(handle, 50) } == WAIT_OBJECT_0
+            {
                 return Ok(());
             }
             return Err(format!(
@@ -480,6 +486,14 @@ mod imp {
         }
     }
     /// External cleanup requires separate persisted consent and an observed launch conflict.
+    pub fn startup_cleanup_outcome(count: usize, still_conflicted: bool) -> Result<usize, String> {
+        if still_conflicted {
+            Err("Waiting for launch coordination: conflicting client remains; visible and managed clients stay open".into())
+        } else {
+            Ok(count)
+        }
+    }
+
     pub fn close_startup_background_players(
         protected: &[ProcessIdentity],
         authorized: bool,
@@ -495,11 +509,7 @@ mod imp {
         close_startup_background_players_at(
             protected,
             &PathBuf::from(local).join("Roblox").join("Versions"),
-        ).and_then(|count| {
-            if count == 0 {
-                Err("No eligible hidden external clients found; visible and managed clients stay open".into())
-            } else { Ok(count) }
-        }).map_err(|error: String| format!("Startup cleanup incomplete: {error}. Quit conflicting Roblox clients and restart RoLauncher."))
+        ).map_err(|error: String| format!("Startup inspection unavailable: {error}. Waiting for launch coordination; visible and managed clients stay open."))
     }
     fn close_startup_candidate(
         identity: &ProcessIdentity,

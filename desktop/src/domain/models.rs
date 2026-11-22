@@ -451,12 +451,16 @@ pub fn format_error(last_error: Option<&str>) -> String {
 
 pub fn format_recovery_reason(account: &Account) -> String {
     match account.recovery_reason.as_str() {
-        "Auth" => "Session expired · sign in again".to_string(),
-        "Permission" => "Experience denied access".to_string(),
+        "Auth" => "Action required: sign in again".to_string(),
+        "Permission" => "Action required: access restriction".to_string(),
         "TargetUnavailable" => "Destination unavailable".to_string(),
-        "Unsupported" => "Integration needs attention".to_string(),
-        "RateLimit" => "Rate limited · retry pending".to_string(),
-        "Network" => "Connection lost".to_string(),
+        "Unsupported" => "Action required: update or client check".to_string(),
+        "RateLimit" => "Rate limited · cooldown active".to_string(),
+        "SessionConflict" => "Cooldown for duplicate session".to_string(),
+        "NetworkDisconnect" => "Network disconnect · rejoining".to_string(),
+        "ConnectionFailed" => "Server did not respond (279)".to_string(),
+        "AfkKick" => "Idle disconnect (278) · rejoining".to_string(),
+        "Network" => "Waiting for internet / Roblox service".to_string(),
         _ => format_error(account.last_error.as_deref()),
     }
 }
@@ -473,12 +477,79 @@ pub fn format_retry(account: &Account, now: DateTime<Utc>) -> String {
     }
 }
 
+pub fn format_waiting_detail(
+    account: &Account,
+    network_suspended: bool,
+    now: DateTime<Utc>,
+) -> String {
+    if network_suspended
+        && account.desired_running
+        && matches!(
+            account.status.as_str(),
+            "queued" | "backoff" | "reconnecting"
+        )
+    {
+        return "Waiting for internet / Roblox service".to_string();
+    }
+    if account.recovery_reason == "SessionConflict"
+        && let Some(next) = account.next_retry.filter(|t| *t > now)
+    {
+        let remaining = (next - now).num_seconds().max(0);
+        return format!("Cooldown for duplicate session · {remaining}s");
+    }
+    if account.recovery_reason == "RateLimit"
+        && let Some(next) = account.next_retry.filter(|t| *t > now)
+    {
+        let remaining = (next - now).num_seconds().max(0);
+        return format!("Rate-limit cooldown · {remaining}s");
+    }
+    if account.process.is_some()
+        && matches!(account.status.as_str(), "queued" | "stopping" | "backoff")
+    {
+        return "Waiting for old process to exit".to_string();
+    }
+    if account.last_error.as_deref().is_some_and(|e| {
+        e.contains("unverified Roblox process")
+            || e.contains("startup is still in progress")
+            || e.contains("surviving Roblox client")
+            || e.contains("checking for a surviving")
+            || e.contains("watching for a late client")
+            || e.contains("Launch tracker has no verified instance")
+    }) {
+        return "Inspecting late Roblox launch".to_string();
+    }
+    if account.status == "needs_attention" {
+        return format_error(account.last_error.as_deref());
+    }
+    if account.next_retry.is_some() || account.status == "reconnecting" {
+        format_retry(account, now)
+    } else {
+        format_error(account.last_error.as_deref())
+    }
+}
+
+pub fn coordination_warning(compatibility: &str) -> Option<&str> {
+    [
+        "Waiting for launch coordination",
+        "Startup conflict",
+        "Roblox startup conflict",
+        "Startup inspection unavailable",
+        "launch coordination blocked",
+    ]
+    .iter()
+    .any(|pattern| compatibility.contains(pattern))
+    .then_some(compatibility)
+}
+
 pub fn can_retry(account: &Account) -> bool {
     account.status == "backoff"
         && account.next_retry.is_some()
         && account.auto_recovery
         && account.desired_running
-        && account.recovery_reason != "RateLimit"
+        && !matches!(
+            account.recovery_reason.as_str(),
+            "RateLimit" | "SessionConflict"
+        )
 }
 
 pub fn running_seconds(account: &Account, now: DateTime<Utc>) -> u64 {
@@ -492,4 +563,80 @@ pub fn longest_seconds(account: &Account, now: DateTime<Utc>) -> u64 {
     account
         .longest_streak_seconds
         .max(running_seconds(account, now))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration as ChronoDuration;
+
+    #[test]
+    fn retry_gate_blocks_rate_limit_and_duplicate_session_cooldowns() {
+        let now = Utc::now();
+        let mut account = Account {
+            status: "backoff".into(),
+            next_retry: Some(now + ChronoDuration::seconds(30)),
+            auto_recovery: true,
+            desired_running: true,
+            ..Default::default()
+        };
+        assert!(can_retry(&account));
+        for reason in ["RateLimit", "SessionConflict"] {
+            account.recovery_reason = reason.into();
+            assert!(!can_retry(&account), "{reason}");
+        }
+    }
+
+    #[test]
+    fn waiting_detail_and_coordination_warning_surface_specific_reasons() {
+        let now = Utc::now();
+        let account = Account {
+            status: "backoff".into(),
+            desired_running: true,
+            auto_recovery: true,
+            next_retry: Some(now + ChronoDuration::seconds(45)),
+            recovery_reason: "SessionConflict".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            format_waiting_detail(&account, true, now),
+            "Waiting for internet / Roblox service"
+        );
+        assert!(
+            format_waiting_detail(&account, false, now)
+                .starts_with("Cooldown for duplicate session")
+        );
+
+        let old_proc = Account {
+            status: "queued".into(),
+            desired_running: true,
+            process: Some(ProcessInfo { pid: 123 }),
+            ..Default::default()
+        };
+        assert_eq!(
+            format_waiting_detail(&old_proc, false, now),
+            "Waiting for old process to exit"
+        );
+
+        let late = Account {
+            status: "needs_attention".into(),
+            last_error: Some("Launch tracker has no verified instance".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            format_waiting_detail(&late, false, now),
+            "Inspecting late Roblox launch"
+        );
+
+        assert_eq!(
+            coordination_warning("UI fixture · real-client validation remains outstanding"),
+            None
+        );
+        assert!(
+            coordination_warning(
+                "OS multi-instance coordination initialized; Waiting for launch coordination"
+            )
+            .is_some()
+        );
+    }
 }

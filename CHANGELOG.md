@@ -1,6 +1,12 @@
 # Changelog
 
-## [2.0.1] — Unreleased
+## [2.0.2] — Unreleased
+
+- Recheck startup conflicts after empty cleanup scans and clear resolved coordination warnings automatically.
+- Resume recovery after temporary network or inspection outages and pace per-account API retries without burning retry budgets.
+- Recover confirmed idle (278) disconnects, preserve cooldowns on restart, bound post-force teardown without false errors, and clarify waiting reasons.
+
+## [2.0.1] — 2026-11-14
 
 - Keep Accounts list scrolling inside the list and separate vertical and horizontal wheel input.
 - Keep the background page still while scrolling in account settings.
