@@ -18,8 +18,10 @@ use tokio::sync::{Notify, broadcast};
 use uuid::Uuid;
 
 mod close_safety;
+mod connectivity;
 #[cfg(test)]
 mod import_tests;
+mod inspection;
 #[cfg(test)]
 mod lifecycle_tests;
 mod management;
@@ -199,6 +201,13 @@ fn recovery_due(account: &Account, now: chrono::DateTime<Utc>) -> bool {
             .is_some_and(|t| now - t >= ChronoDuration::seconds(30))
 }
 
+fn active_cooldown(account: &Account) -> bool {
+    matches!(
+        account.recovery_reason.as_str(),
+        "RateLimit" | "SessionConflict"
+    ) && account.next_retry.is_some_and(|time| time > Utc::now())
+}
+
 #[derive(Clone, Copy)]
 enum Observation {
     DiskLog(crate::logs::LogEvent),
@@ -250,8 +259,7 @@ fn apply_observation(account: &mut Account, observation: Observation) {
         return;
     }
     if signal == Signal::Connected {
-        let rate_limited = account.recovery_reason == "RateLimit"
-            && account.next_retry.is_some_and(|time| time > Utc::now());
+        let rate_limited = account.recovery_reason == "RateLimit" && active_cooldown(account);
         if account
             .close_intent
             .as_ref()
@@ -308,20 +316,27 @@ fn apply_observation(account: &mut Account, observation: Observation) {
     };
     account.disconnected_since.get_or_insert_with(Utc::now);
     account.connected_since = None;
-    if !(account.recovery_reason == "RateLimit"
-        && account.next_retry.is_some_and(|time| time > Utc::now()))
-    {
+    if !active_cooldown(account) {
         account.recovery_reason = match signal {
             Signal::ConnectionFailed => "ConnectionFailed",
+            Signal::SessionLost(Some(264 | 273)) => "SessionConflict",
+            Signal::SessionLost(Some(266 | 277)) => "NetworkDisconnect",
+            Signal::SessionLost(Some(278)) => "AfkKick",
             Signal::SessionLost(_) => "SessionLost",
             _ => "ConfirmedTerminalDisconnect",
         }
         .into();
+        if account.recovery_reason == "SessionConflict" {
+            account.next_retry = Some(Utc::now() + ChronoDuration::seconds(60));
+        }
     }
     account.last_error = Some(match signal {
         _ if !account.auto_recovery => "Game disconnected; waiting for the session to settle before closing Roblox".into(),
         Signal::ConnectionFailed => {
             "Connection failed: server did not respond (279); allowing 30 seconds to reconnect before recovery".into()
+        }
+        Signal::SessionLost(Some(278)) => {
+            "Idle disconnect (code 278); allowing 30 seconds to reconnect before recovery".into()
         }
         Signal::SessionLost(Some(code)) => {
             format!("Session lost (code {code}); allowing 30 seconds to reconnect before recovery")
@@ -415,6 +430,7 @@ async fn completed_task<T>(
 
 fn reserve_recovery(account: &mut Account) {
     let retry = account.next_retry;
+    let shared_outage = account.recovery_reason == "Network";
     let rate_limited =
         account.recovery_reason == "RateLimit" && retry.is_some_and(|time| time > Utc::now());
     let message = account
@@ -427,12 +443,17 @@ fn reserve_recovery(account: &mut Account) {
         &Failure::new(
             if rate_limited {
                 FailureKind::RateLimit
+            } else if shared_outage {
+                FailureKind::Network
             } else {
                 FailureKind::Other
             },
             &message,
         ),
     );
+    if shared_outage {
+        account.next_retry = Some(Utc::now());
+    }
     if let (Some(previous), Some(next)) = (retry, account.next_retry) {
         account.next_retry = Some(previous.max(next));
     }
@@ -472,7 +493,9 @@ fn normalize_accounts(next: &mut State) {
         a.track_run(now);
         if a.status == Status::Reconnecting && a.desired_running {
             let known_error = a.last_error.as_deref().is_some_and(|error| {
-                error.starts_with("Session lost (code") || error.starts_with("Connection failed:")
+                error.starts_with("Session lost (code")
+                    || error.starts_with("Connection failed:")
+                    || error.starts_with("Idle disconnect (code")
             });
             a.disconnect_notified = a.recovery_evidence
                 == RecoveryEvidence::ConfirmedTerminalDisconnect
@@ -589,6 +612,10 @@ impl Engine {
         };
         for saved in &mut database.accounts {
             let a = &mut saved.account;
+            if a.tracker.is_some() && a.process.is_none() && a.ownership_deadline.is_none() {
+                // Legacy reservations still get a full observation window on reopen.
+                a.ownership_deadline = Some(Utc::now() + ChronoDuration::seconds(90));
+            }
             a.track_run(Utc::now());
             resume_after_confirmed_close(a);
             if a.desired_running && a.status != Status::NeedsAttention {
@@ -712,6 +739,16 @@ impl Engine {
     }
     pub fn is_shutdown(&self) -> bool {
         self.0.shutdown.load(Ordering::Acquire)
+    }
+    pub fn record_startup_conflict(&self, classification: &str, closed: usize) {
+        self.0.journal.record(
+            "startup_conflict_classified",
+            serde_json::json!({
+                "classification": classification,
+                "closed": closed,
+                "launch_allowed": self.0.launch_allowed.load(Ordering::Acquire),
+            }),
+        );
     }
     pub fn set_launch_allowed(&self, allowed: bool) {
         let _dispatch = self.0.dispatch_lock.lock().unwrap();
@@ -1282,6 +1319,7 @@ impl Engine {
                 return Err("Command connection changed".into());
             }
             let existing = account_mut(s,id)?.clone();
+            let cooldown = action != "stop" && active_cooldown(&existing);
             if (action == "start" && existing.desired_running && existing.status != Status::NeedsAttention) || (action == "stop" && !existing.desired_running && existing.close_intent.as_ref().is_some_and(|i| i.reason == CloseReason::UserStop && !i.denied && !i.id.is_nil()) && !s.database.retired_launches.iter().any(|r| r.account_id == id && r.process.is_some() && r.close_intent != existing.close_intent)) {
                 if let Some(op) = existing.operation_id.and_then(|id|s.operations.get(&id)).cloned() { return Ok(op); }
                 let pending = if action == "stop" { existing.process.is_some() || existing.tracker.is_some() || retired_blocks_launch(&s.database, id) } else { existing.status != Status::Running };
@@ -1296,7 +1334,19 @@ impl Engine {
             if action != "stop" { existing.target.as_ref().ok_or("Set a launch target first")?.validate()?; }
             if action != "stop" && existing.process.is_none() && existing.tracker.is_some() { return Err("Previous launch is unresolved; use Stop and wait for process discovery before starting again".into()); }
             if action != "stop" && retired_blocks_launch(&s.database, id) { return Err("A cancelled launch is still being observed; inspect late clients and use Stop, or wait for discovery to confirm exit".into()); }
-            if action == "restart" && matches!(existing.status,Status::Launching|Status::Queued) { return Err("A launch is already pending; Stop it before restarting".into()); }
+            if action == "restart" && matches!(existing.status, Status::Launching | Status::Queued) {
+                if existing.status == Status::Queued
+                    && existing
+                        .close_intent
+                        .as_ref()
+                        .is_some_and(|i| i.reason == CloseReason::ManualRestart && !i.denied)
+                {
+                    return Err(
+                        "Restart is already in progress; waiting for old client to exit".into(),
+                    );
+                }
+                return Err("A launch is already pending; Stop it before restarting".into());
+            }
             #[cfg(windows)]
             if action != "stop" {
                 self.cleanup_launch_conflict(s, |protected| {
@@ -1396,6 +1446,13 @@ impl Engine {
                 Status::Queued
             };
             a.public_fallback_active = false; a.recovery_reason.clear(); a.operation_id = Some(op.id);
+            if cooldown {
+                a.next_retry = existing.next_retry;
+                a.recovery_reason = existing.recovery_reason.clone();
+                a.last_error = Some(if a.recovery_reason == "SessionConflict" {
+                    "Cooldown for duplicate session; restart queued"
+                } else { "Rate-limit cooldown; restart queued" }.into());
+            }
             if single_instance_deferred {
                 self.0.journal.record(
                     "launch_coordination_unavailable",
@@ -1493,24 +1550,30 @@ impl Engine {
         tokio::spawn(async move {
             engine.monitor_loop().await;
         });
+        let engine = self.clone();
+        tokio::spawn(async move {
+            engine.connectivity_loop().await;
+        });
         self.0.resources.spawn(self.clone());
     }
     async fn launch_loop(&self) {
         let mut pending: HashMap<String, (Uuid, tokio::task::JoinHandle<()>)> = HashMap::new();
         let mut dispatch_order: HashMap<String, u64> = HashMap::new();
         let mut next_dispatch_seq = 0u64;
-        let mut network_probe_at = Instant::now();
         let mut previous_gate = None;
         while !self.is_shutdown() {
             let allowed = self.0.launch_allowed.load(Ordering::Acquire);
+            let snapshot = self.snapshot();
             if previous_gate != Some(allowed) {
                 self.0.journal.record(
                     "launch_gate_observed",
                     serde_json::json!({"allowed": allowed}),
                 );
+                if previous_gate.is_some() {
+                    let _ = self.0.events.send(snapshot.clone());
+                }
                 previous_gate = Some(allowed);
             }
-            let snapshot = self.snapshot();
             let finished: Vec<_> = pending
                 .iter()
                 .filter(|(_, (_, task))| task.is_finished())
@@ -1537,18 +1600,7 @@ impl Engine {
                     task.abort();
                 }
             }
-            if snapshot.network_suspended {
-                if pending.is_empty() && Instant::now() >= network_probe_at {
-                    network_probe_at = Instant::now() + Duration::from_secs(30);
-                    let reachable = tokio::select! { ready = self.0.roblox.reachable() => ready, _=self.0.wake.notified() => false };
-                    if reachable {
-                        let _ = self.transaction(|s| {
-                            s.network_suspended = false;
-                            Ok(())
-                        });
-                    }
-                }
-            } else if allowed {
+            if !snapshot.network_suspended && allowed {
                 let max_concurrent = if snapshot.active_multi_instance { 4 } else { 1 };
                 let mut indices: Vec<usize> = (0..snapshot.accounts.len()).collect();
                 indices.sort_by_key(|&idx| {
@@ -2248,6 +2300,14 @@ impl Engine {
                 );
                 a.status = account.status.clone();
                 a.next_retry = Some(Utc::now() + ChronoDuration::seconds(5));
+                a.last_error = Some(
+                    if !allowed {
+                        "Waiting for launch coordination"
+                    } else {
+                        "Waiting for internet / Roblox service"
+                    }
+                    .into(),
+                );
                 let _ = self.commit_close_state(&mut state, next);
                 return;
             }
@@ -2966,6 +3026,7 @@ impl Engine {
     async fn monitor_loop(&self) {
         let mut tails: HashMap<(u32, String), crate::logs::Tail> = HashMap::new();
         let mut last_discovery = Instant::now() - Duration::from_secs(30);
+        let mut discovery_started_utc = Utc::now();
         let mut last_log_discovery = Instant::now() - Duration::from_secs(30);
         let mut close_attempts = CloseAttempts::default();
         let mut exit_watches: HashMap<(u32, String), platform::ExitWatch> = HashMap::new();
@@ -3027,6 +3088,7 @@ impl Engine {
                 && last_discovery.elapsed() >= discovery_interval
                 && should_discover
             {
+                discovery_started_utc = Utc::now();
                 #[cfg(windows)]
                 let engine = self.clone();
                 discovery = Some(tokio::task::spawn_blocking(move || {
@@ -3062,6 +3124,13 @@ impl Engine {
                 #[cfg(windows)]
                 Some(Ok(Ok(scan))) => {
                     metadata_pending = scan.metadata_pending;
+                    if !scan.metadata_pending
+                        && scan.uninspected == 0
+                        && scan.inaccessible == 0
+                        && !scan.bootstrapper_active
+                    {
+                        self.reconcile_completed_inspection(&scan.players, discovery_started_utc);
+                    }
                     let startup_verified = self.observe_startup_scan(
                         &scan.players,
                         scan.uninspected,
@@ -3133,7 +3202,9 @@ impl Engine {
                             continue;
                         };
                         if old.process.is_none()
-                            && old.deadline <= Utc::now()
+                            && old.deadline <= discovery_started_utc
+                            && !scan.bootstrapper_active
+                            && !scan.metadata_pending
                             && !players.iter().any(|p| p.tracker == old.tracker)
                         {
                             let _ = self.transaction(|s| {
@@ -3160,6 +3231,7 @@ impl Engine {
                 #[cfg(not(windows))]
                 Some(Ok(Ok(players))) => {
                     metadata_pending = false;
+                    self.reconcile_completed_inspection(&players, discovery_started_utc);
                     if self.reconcile_launch_discovery(&players, true) {
                         last_log_discovery = Instant::now() - Duration::from_secs(30);
                     }
@@ -3187,7 +3259,7 @@ impl Engine {
                     }
                     for old in &retired {
                         if old.process.is_none()
-                            && old.deadline <= Utc::now()
+                            && old.deadline <= discovery_started_utc
                             && !players.iter().any(|p| p.tracker == old.tracker)
                         {
                             let _ = self.transaction(|s| {
@@ -3512,6 +3584,7 @@ impl Engine {
     ) {
         let accepted = self
             .transaction(|state| {
+                let network_suspended = state.network_suspended;
                 let account = account_mut(state, id)?;
                 let (source, signal, confirmed, code, timestamp) = match observation {
                     Observation::DiskLog(event) => ("owned_disk_log", event.signal, event.confirmed_terminal, event.code, event.timestamp),
@@ -3538,6 +3611,17 @@ impl Engine {
                     account.recovery_process = None;
                 }
                 apply_observation(account, observation);
+                if network_suspended
+                    && account.desired_running
+                    && account.status == Status::Reconnecting
+                    && matches!(
+                        account.recovery_reason.as_str(),
+                        "ConnectionFailed" | "NetworkDisconnect" | "ConfirmedTerminalDisconnect"
+                    )
+                {
+                    account.recovery_reason = "Network".into();
+                    account.last_error = Some("Waiting for internet / Roblox service".into());
+                }
                 account.recovery_process = (account.recovery_evidence
                     != RecoveryEvidence::Unavailable)
                     .then(|| identity.clone());
@@ -3584,9 +3668,11 @@ impl Engine {
     }
 
     fn confirmed_exit(&self, id: &str, generation: Uuid, identity: &ProcessIdentity, clean: bool) {
-        let _ = self.update(id, generation, |account| {
-            if account.process.as_ref() != Some(identity) {
-                return;
+        let _ = self.transaction(|state| {
+            let network_suspended = state.network_suspended;
+            let account = account_mut(state, id)?;
+            if account.generation != generation || account.process.as_ref() != Some(identity) {
+                return Ok(());
             }
             self.0.journal.record("process_exit_confirmed", serde_json::json!({"account": crate::diagnostics::account(account), "clean_exit": clean}));
             resume_verified_handoff(account);
@@ -3618,18 +3704,19 @@ impl Engine {
                 apply_failure(
                     account,
                     &Failure::new(
-                        FailureKind::Other,
-                        "Managed client exited; scheduling recovery",
+                        if network_suspended { FailureKind::Network } else { FailureKind::Other },
+                        if network_suspended { "Waiting for internet / Roblox service" } else { "Managed client exited; scheduling recovery" },
                     ),
                 );
             } else if !account.desired_running || !account.auto_recovery {
                 account.desired_running = false;
                 account.status = Status::Stopped;
             }
-            if clean && ordinary_exit {
+            if clean && ordinary_exit && !active_cooldown(account) {
                 account.last_error = Some("Client closed normally".into());
                 account.recovery_reason = "NormalExit".into();
             }
+            Ok(())
         });
     }
 
@@ -3756,6 +3843,19 @@ fn account_mut<'a>(s: &'a mut State, id: &str) -> Result<&'a mut Account, String
 }
 fn effective_compatibility(s: &State) -> String {
     let mut text = s.compatibility.clone();
+    if s.active_multi_instance && s.launch_allowed {
+        for prefix in [
+            "; Startup conflict:",
+            "; Roblox startup conflict.",
+            "; Startup inspection unavailable:",
+            "; Waiting for launch coordination:",
+        ] {
+            if let Some((coordination, _)) = text.split_once(prefix) {
+                text = coordination.to_owned();
+                break;
+            }
+        }
+    }
     if s.database.multi_instance_enabled != s.active_multi_instance {
         let suffix = if s.database.multi_instance_enabled {
             "restart RoLauncher to enable multiple instances"
@@ -3798,6 +3898,7 @@ fn snapshot(s: &State) -> Snapshot {
     }
 }
 fn apply_failure(a: &mut Account, error: &Failure) {
+    let cooldown = active_cooldown(a).then(|| (a.next_retry, a.recovery_reason.clone()));
     a.close_intent = None;
     a.recovery_reason = format!("{:?}", error.kind);
     a.last_error = Some(error.message.clone());
@@ -3805,7 +3906,10 @@ fn apply_failure(a: &mut Account, error: &Failure) {
     a.disconnected_since = None;
     if error.kind == FailureKind::Network {
         a.status = Status::Backoff;
-        a.next_retry = None;
+        a.next_retry = cooldown.as_ref().and_then(|(time, _)| *time);
+        if let Some((_, reason)) = cooldown {
+            a.recovery_reason = reason;
+        }
         return;
     }
     if matches!(
@@ -3845,6 +3949,10 @@ fn apply_failure(a: &mut Account, error: &Failure) {
                 + rand::random_range(0..=3);
         a.status = Status::Backoff;
         a.next_retry = Some(Utc::now() + ChronoDuration::seconds(delay as i64));
+        if let Some((Some(previous), reason)) = cooldown {
+            a.next_retry = a.next_retry.map(|next| next.max(previous));
+            a.recovery_reason = reason;
+        }
         if error.kind == FailureKind::TargetUnavailable && a.process.is_some() {
             a.close_intent = Some(CloseIntent {
                 id: Uuid::new_v4(),

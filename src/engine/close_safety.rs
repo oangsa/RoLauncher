@@ -7,6 +7,7 @@ struct CloseAttempt {
     intent: CloseIntent,
     identity: ProcessIdentity,
     started: Instant,
+    force_submitted: Option<Instant>,
     denied: bool,
 }
 impl CloseAttempts {
@@ -43,9 +44,42 @@ impl CloseAttempts {
                 intent: intent.clone(),
                 identity: identity.clone(),
                 started: now,
+                force_submitted: None,
                 denied: false,
             });
         }
+    }
+    fn record_force(
+        &mut self,
+        id: &str,
+        intent: &CloseIntent,
+        identity: &ProcessIdentity,
+        now: Instant,
+    ) {
+        if let Some(attempt) = self
+            .0
+            .iter_mut()
+            .find(|a| a.account_id == id && a.intent == *intent && a.identity == *identity)
+        {
+            attempt.force_submitted = Some(now);
+        }
+    }
+    fn waiting_for_force_exit(
+        &self,
+        id: &str,
+        intent: &CloseIntent,
+        identity: &ProcessIdentity,
+        now: Instant,
+    ) -> bool {
+        self.0.iter().any(|a| {
+            !a.denied
+                && a.account_id == id
+                && a.intent == *intent
+                && a.identity == *identity
+                && a.force_submitted.is_some_and(|submitted| {
+                    now.saturating_duration_since(submitted) < Duration::from_secs(5)
+                })
+        })
     }
     fn blocked(&self, id: &str, intent: &CloseIntent, identity: &ProcessIdentity) -> bool {
         self.0.iter().any(|a| {
@@ -181,6 +215,7 @@ fn attach_surviving_player(
     successor: &ProcessIdentity,
     clean: bool,
     direct_child: bool,
+    network_suspended: bool,
 ) {
     let ended_session = direct_child
         && a.desired_running
@@ -220,6 +255,9 @@ fn attach_surviving_player(
     if ended_session {
         if a.auto_recovery {
             if !retry_reserved {
+                if network_suspended && !active_cooldown(a) {
+                    a.recovery_reason = "Network".into();
+                }
                 reserve_recovery(a);
             } else {
                 a.status = Status::Backoff;
@@ -557,13 +595,14 @@ impl Engine {
                     return false;
                 }
                 let mut next = state.clone();
+                let network_suspended = next.network_suspended;
                 let a = account_mut(&mut next, &account.id).unwrap();
                 resume_verified_handoff(a);
                 #[cfg(windows)]
                 let direct_child = platform::direct_successor(identity, &successor);
                 #[cfg(not(windows))]
                 let direct_child = false;
-                attach_surviving_player(a, &successor, clean, direct_child);
+                attach_surviving_player(a, &successor, clean, direct_child, network_suspended);
                 self.0.journal.record("process_handoff_verified", serde_json::json!({
                     "account_id": a.id.parse::<u64>().ok(), "old_process": crate::diagnostics::process(identity),
                     "successor": crate::diagnostics::process(&successor), "reason": if direct_child { "verified_direct_child" } else { "same_tracker_unique_successor" },
@@ -689,6 +728,23 @@ impl Engine {
         }
         let was_recovery =
             intent.reason == CloseReason::AutomaticRecovery && recovery_due(a, Utc::now());
+        // Environment readiness can recover without changing ownership or intent.
+        // Defer only when every non-environment policy check still passes.
+        if !attempts.blocked(&expected.id, &intent, identity)
+            && eligible(a, &intent, false, true)
+            && !eligible(
+                a,
+                &intent,
+                network_suspended,
+                self.0.launch_allowed.load(Ordering::Acquire),
+            )
+        {
+            self.0.journal.record("close_deferred", serde_json::json!({
+                "account": crate::diagnostics::account(expected),
+                "reason": if network_suspended { "network_suspended" } else { "launch_coordination_unavailable" },
+            }));
+            return Ok(false);
+        }
         let policy = !attempts.blocked(&expected.id, &intent, identity)
             && eligible(
                 a,
@@ -780,6 +836,9 @@ impl Engine {
             network_suspended,
             self.0.launch_allowed.load(Ordering::Acquire),
         ) {
+            if eligible(a, &intent, false, true) {
+                return Ok(false);
+            }
             attempts.deny(&expected.id, &intent, identity, now);
             let mut next = state.clone();
             let a = account_mut(&mut next, &expected.id)?;
@@ -802,11 +861,32 @@ impl Engine {
             now + started.elapsed(),
             grace,
         );
+        if force
+            && attempts.waiting_for_force_exit(
+                &expected.id,
+                &intent,
+                identity,
+                now + started.elapsed(),
+            )
+        {
+            self.0.journal.record(
+                "close_deferred",
+                serde_json::json!({
+                    "account": crate::diagnostics::account(a),
+                    "reason": "waiting_for_terminated_process_exit",
+                }),
+            );
+            return Ok(false);
+        }
         self.0.journal.record("close_submitted", serde_json::json!({"account": crate::diagnostics::account(a), "force": force, "intent": intent}));
         match effect(identity, force) {
             Ok(()) => {
                 self.0.journal.record("close_result", serde_json::json!({"account_id": expected.id.parse::<u64>().ok(), "process": crate::diagnostics::process(identity), "intent": intent, "force": force, "success": true}));
-                attempts.record(&expected.id, &intent, identity, now + started.elapsed());
+                let attempt_at = now + started.elapsed();
+                attempts.record(&expected.id, &intent, identity, attempt_at);
+                if force {
+                    attempts.record_force(&expected.id, &intent, identity, attempt_at);
+                }
                 Ok(true)
             }
             Err(error) => {

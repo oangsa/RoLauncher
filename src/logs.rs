@@ -82,13 +82,19 @@ pub fn parse_line(line: &str) -> Option<Signal> {
     if network && line.contains("Failed to connect to server") && line.contains("no response") {
         return Some(Signal::ConnectionFailed);
     }
-    // Native kick dialogs can omit the numeric 267 disconnect message entirely.
+    // Native kick dialogs can omit the numeric 267 or 278 disconnect message entirely.
     if network
         && let Some((label, reason)) = tagged.and_then(|(_, message)| message.split_once(':'))
         && label.trim() == "Lost connection with reason"
-        && reason.trim() == "You have been kicked from the game"
     {
-        return Some(Signal::SessionLost(Some(267)));
+        match reason.trim() {
+            "You have been kicked from the game" => return Some(Signal::SessionLost(Some(267))),
+            "You were kicked from this experience: You have been idle for 20 minutes"
+            | "You have been disconnected for being idle 20 minutes" => {
+                return Some(Signal::SessionLost(Some(278)));
+            }
+            _ => {}
+        }
     }
     if network && let Some((_, reason)) = line.split_once("Sending disconnect with reason:") {
         let code = reason
@@ -103,7 +109,7 @@ pub fn parse_line(line: &str) -> Option<Signal> {
                 279 => return Some(Signal::ConnectionFailed),
                 280 => return Some(Signal::ClientUpdateRequired),
                 524 | 533 | 600 | 773 => return Some(Signal::PermissionDenied),
-                264 | 266 | 267 | 268 | 273 | 277 | 285 => {
+                264 | 266 | 267 | 268 | 273 | 277 | 278 | 285 => {
                     return Some(Signal::SessionLost(Some(code)));
                 }
                 _ => {}
@@ -175,7 +181,10 @@ pub fn parse_event(line: &str) -> Option<LogEvent> {
         }
         // Only known failed-session codes authorize shutdown. Unknown codes need evidence.
         Signal::SessionLost(code) => {
-            matches!(code, Some(264 | 266 | 267 | 268 | 273 | 277 | 280 | 529))
+            matches!(
+                code,
+                Some(264 | 266 | 267 | 268 | 273 | 277 | 278 | 280 | 529)
+            )
         }
         Signal::ConnectionFailed | Signal::TargetUnavailable | Signal::PermissionDenied => true,
     };
@@ -385,12 +394,26 @@ mod tests {
         }
         for line in [
             "[FLog::Output] Lost connection with reason : You have been kicked from the game",
+            "[FLog::Output] Lost connection with reason : You were kicked from this experience: You have been idle for 20 minutes",
+            "[FLog::Output] Sending disconnect with reason: 278",
             "[FLog::Error] Lost connection with reason : You have been kicked from the game",
             "[FLog::Network] Lost connection with reason : unknown",
             "[FLog::Network] Lost connection with reason : You have been kicked from the game is sample text",
             "[FLog::Network] Players service requests player disconnect",
         ] {
             assert!(parse_event(line).is_none(), "{line}");
+        }
+    }
+    #[test]
+    fn idle_kick_278_and_native_idle_messages_confirm_terminal_disconnect() {
+        for line in [
+            "[FLog::Network] Sending disconnect with reason: 278",
+            "[FLog::Network] Lost connection with reason : You were kicked from this experience: You have been idle for 20 minutes",
+            "[DFLog::NetworkClient] Lost connection with reason : You have been disconnected for being idle 20 minutes",
+        ] {
+            let event = parse_event(line).expect("idle kick must be recognized");
+            assert_eq!(event.signal, Signal::SessionLost(Some(278)));
+            assert!(event.confirmed_terminal);
         }
     }
     #[test]

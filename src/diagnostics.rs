@@ -321,6 +321,23 @@ pub(crate) fn reason(message: &str) -> &'static str {
         ("A launch is already pending", "launch_already_pending"),
         ("Connectivity is suspended", "network_suspended"),
         ("The rate-limit cooldown", "rate_limit_cooldown"),
+        ("Rate-limit cooldown", "rate_limit_cooldown"),
+        (
+            "Cooldown for duplicate session",
+            "duplicate_session_cooldown",
+        ),
+        (
+            "The duplicate-session cooldown",
+            "duplicate_session_cooldown",
+        ),
+        ("Waiting for internet / Roblox service", "network_suspended"),
+        (
+            "Waiting for launch coordination",
+            "launch_coordination_unavailable",
+        ),
+        ("Restart is already in progress", "restart_already_pending"),
+        ("Idle disconnect", "afk_kick"),
+        ("Launch ended without a client", "verified_launch_absence"),
     ] {
         if message.starts_with(prefix) {
             return code;
