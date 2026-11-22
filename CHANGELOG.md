@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.0.4] — Unreleased
+
+- Settle verified Roblox process exits in 1–5 seconds without waiting for unrelated 90-second startup ownership deadlines.
+- Make manual Restart work reliably from `Unknown`, pending-exit, `Backoff`, `Reconnecting`, and recoverable attention states without `Stop` then `Start`.
+- Report accurate `exit_pending`, `Restart pending`, and handoff waiting reasons in the desktop UI and Support Export.
+
 ## [2.0.3] — 2026-11-22
 
 - Mark published release dates in the in-app changelog and GitHub release notes instead of showing Unreleased.
