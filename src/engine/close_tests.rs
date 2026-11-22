@@ -1060,27 +1060,19 @@ fn handoff_discards_old_automatic_authority_but_retains_explicit_commands_and_pa
 }
 
 #[test]
-fn exit_settlement_requires_both_a_five_second_grace_and_the_existing_launch_deadline() {
+fn exit_settlement_ignores_stale_launch_deadline_and_uses_handoff_grace() {
     let now = Instant::now();
     let utc = Utc::now();
     let pending = PendingExit {
         observed: now,
         clean: true,
+        exit_code: Some(0),
+        bootstrapper_blocked_logged: false,
     };
     let mut a = Account::new("1".into(), "fixture".into());
-    assert!(!pending.settled(&a, now + Duration::from_secs(4), utc));
-    assert!(pending.settled(&a, now + Duration::from_secs(5), utc));
     a.ownership_deadline = Some(utc + ChronoDuration::seconds(90));
-    assert!(!pending.settled(
-        &a,
-        now + Duration::from_secs(89),
-        utc + ChronoDuration::seconds(89)
-    ));
-    assert!(pending.settled(
-        &a,
-        now + Duration::from_secs(90),
-        utc + ChronoDuration::seconds(90)
-    ));
+    assert!(!pending.settled(&a, now + Duration::from_secs(4)));
+    assert!(pending.settled(&a, now + Duration::from_secs(5)));
 }
 
 #[test]
@@ -1107,9 +1099,11 @@ fn connected_game_retires_bootstrap_deadline_and_cleanup_settles_in_one_second()
     let pending = PendingExit {
         observed: now,
         clean: true,
+        exit_code: Some(0),
+        bootstrapper_blocked_logged: false,
     };
-    assert!(!pending.settled(&f.account(), now + Duration::from_millis(999), Utc::now()));
-    assert!(pending.settled(&f.account(), now + Duration::from_secs(1), Utc::now()));
+    assert!(!pending.settled(&f.account(), now + Duration::from_millis(999)));
+    assert!(pending.settled(&f.account(), now + Duration::from_secs(1)));
 }
 
 #[test]
@@ -3419,8 +3413,13 @@ fn missing_process_does_not_override_policy_manual_or_shared_ownership_denials()
             || Ok(Vec::new()),
             |_, _| panic!("Missing process cannot override denial"),
         );
-        assert_eq!(f.account().status, Status::NeedsAttention, "{scenario}");
-        assert!(f.account().close_intent.unwrap().denied);
+        if scenario == "manual" {
+            assert_eq!(f.account().status, Status::Queued, "{scenario}");
+            assert!(!f.account().close_intent.unwrap().denied);
+        } else {
+            assert_eq!(f.account().status, Status::NeedsAttention, "{scenario}");
+            assert!(f.account().close_intent.unwrap().denied);
+        }
     }
 }
 
@@ -3642,4 +3641,332 @@ fn target_scoped_verification_refuses_inaccessible_uninspected_conflicting_and_h
         f_handoff.account().process.as_ref().map(|p| p.pid),
         Some(parent_id.pid + 500)
     );
+}
+
+#[test]
+fn verified_process_exit_settles_without_waiting_for_stale_90s_ownership_deadline() {
+    let f = Fixture::new();
+    let acc = f.account();
+    let identity = acc.process.clone().unwrap();
+    let deadline = Utc::now() + ChronoDuration::seconds(90);
+    f.engine
+        .update("1", acc.generation, |a| {
+            a.status = Status::Unknown;
+            a.ownership_deadline = Some(deadline);
+        })
+        .unwrap();
+    let observed = Instant::now();
+    let pending = PendingExit {
+        observed,
+        clean: false,
+        exit_code: Some(1),
+        bootstrapper_blocked_logged: false,
+    };
+    let current = f.account();
+    assert!(!pending.settled(&current, observed + Duration::from_secs(4)));
+    assert!(pending.settled(&current, observed + Duration::from_secs(5)));
+
+    // With unrelated differently-tracked Roblox client in scan, reconcile_exit settles promptly.
+    let unrelated = vec![platform::Player {
+        pid: 20196,
+        creation_time: "unrelated-proc".into(),
+        tracker: "1793566205213002".into(),
+    }];
+    let settled = pending.settled(&current, observed + Duration::from_secs(5));
+    assert!(settled);
+    assert!(
+        f.engine
+            .reconcile_exit(&current, &identity, false, &unrelated, settled)
+    );
+    let after = f.account();
+    assert!(after.process.is_none());
+    assert!(after.tracker.is_none());
+    assert!(!after.exit_pending);
+    assert_eq!(after.status, Status::Backoff);
+}
+
+#[test]
+fn manual_restart_from_unknown_and_pending_exit_settles_and_launches_without_stop_start() {
+    let f = Fixture::new();
+    let acc = f.account();
+    let identity = acc.process.clone().unwrap();
+    f.engine
+        .update("1", acc.generation, |a| {
+            a.status = Status::Unknown;
+            a.ownership_deadline = Some(Utc::now() + ChronoDuration::seconds(90));
+        })
+        .unwrap();
+    let op = f.engine.command("1", "restart").unwrap();
+    assert_eq!(op.state, "queued");
+    assert!(
+        f.engine
+            .command("1", "restart")
+            .unwrap_err()
+            .contains("Restart is already in progress")
+    );
+    let queued = f.account();
+    assert_eq!(queued.status, Status::Queued);
+    assert!(queued.ownership_deadline.is_none());
+
+    // Process exits right before close_owned runs: must defer instead of poisoning to NeedsAttention.
+    let mut attempts = CloseAttempts::default();
+    assert!(
+        !f.engine
+            .close_owned(
+                &queued,
+                Instant::now(),
+                &mut attempts,
+                || Ok(Vec::new()),
+                |_, _| panic!("must defer when process is already absent"),
+            )
+            .unwrap()
+    );
+    assert_eq!(f.account().status, Status::Queued);
+
+    let observed = Instant::now();
+    let pending = PendingExit {
+        observed,
+        clean: false,
+        exit_code: Some(1),
+        bootstrapper_blocked_logged: false,
+    };
+    let settled = pending.settled(&f.account(), observed + Duration::from_secs(1));
+    assert!(settled);
+    assert!(
+        f.engine
+            .reconcile_exit(&f.account(), &identity, false, &[], settled)
+    );
+    let ready = f.account();
+    assert_eq!(ready.status, Status::Queued);
+    assert!(launch_ready(&ready, Utc::now()));
+}
+
+#[test]
+fn reopen_preserves_pending_manual_restart_instead_of_clobbering_to_unknown() {
+    let f = Fixture::new();
+    f.engine.command("1", "restart").unwrap();
+    let reopened = Engine::open(Store::new(f.path.clone()).unwrap(), "synthetic".into()).unwrap();
+    let acc = reopened
+        .snapshot()
+        .accounts
+        .into_iter()
+        .find(|a| a.id == "1")
+        .unwrap();
+    assert_eq!(acc.status, Status::Queued);
+    assert_eq!(
+        acc.close_intent.as_ref().map(|i| i.reason),
+        Some(CloseReason::ManualRestart)
+    );
+}
+
+#[test]
+fn six_account_mixed_state_isolation_and_restart_from_all_recoverable_states() {
+    let (engine, path) = crate::engine::tests::fixture(6);
+    engine
+        .transaction(|s| {
+            // Account 1: Running with bound process -> Restart
+            // Account 2: Unknown + exit_pending + 90s ownership_deadline
+            // Account 3: Backoff -> Restart
+            // Account 4: Reconnecting -> Restart
+            // Account 5: NeedsAttention (StartupUnresolved) -> Restart
+            // Account 6: Stopped (manual stop must stay durable)
+            for (i, saved) in s.database.accounts.iter_mut().enumerate() {
+                let a = &mut saved.account;
+                let n = i + 1;
+                a.desired_running = n != 6;
+                a.tracker = Some(format!("10000000000{n}"));
+                let id = ProcessIdentity {
+                    pid: 5000 + n as u32,
+                    creation_time: format!("t-{n}"),
+                    tracker: a.tracker.clone().unwrap(),
+                    generation: a.generation,
+                };
+                match n {
+                    1 => {
+                        a.status = Status::Running;
+                        a.process = Some(id);
+                    }
+                    2 => {
+                        a.status = Status::Unknown;
+                        a.process = Some(id);
+                        a.ownership_deadline = Some(Utc::now() + ChronoDuration::seconds(90));
+                        a.exit_pending = true;
+                    }
+                    3 => {
+                        a.status = Status::Backoff;
+                        a.tracker = None;
+                        a.next_retry = Some(Utc::now() + ChronoDuration::seconds(40));
+                    }
+                    4 => {
+                        a.status = Status::Reconnecting;
+                        a.process = Some(id);
+                    }
+                    5 => {
+                        a.status = Status::NeedsAttention;
+                        a.process = None;
+                        a.last_error = Some(STARTUP_UNRESOLVED_ERROR.into());
+                    }
+                    _ => {
+                        a.status = Status::Stopped;
+                        a.tracker = None;
+                    }
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    // Restarting accounts 1, 3, 4, 5 succeeds independently without affecting 2 or 6.
+    for id in ["1", "3", "4", "5"] {
+        assert!(engine.command(id, "restart").is_ok(), "restart {id}");
+    }
+    let snap = engine.snapshot();
+    assert_eq!(snap.accounts[0].status, Status::Queued);
+    assert_eq!(snap.accounts[1].status, Status::Unknown);
+    assert!(snap.accounts[1].exit_pending);
+    assert_eq!(snap.accounts[2].status, Status::Queued);
+    assert!(launch_ready(&snap.accounts[2], Utc::now()));
+    assert_eq!(snap.accounts[3].status, Status::Queued);
+    assert_eq!(snap.accounts[4].status, Status::Queued);
+    assert!(!snap.accounts[5].desired_running);
+    assert_eq!(snap.accounts[5].status, Status::Stopped);
+
+    // Account 2 exits and reconciles with unrelated trackers present -> settles in 5s, never touches Account 1 or 6.
+    let acc2 = snap.accounts[1].clone();
+    let id2 = acc2.process.clone().unwrap();
+    let others = vec![platform::Player {
+        pid: 20196,
+        creation_time: "other".into(),
+        tracker: "999999999999".into(),
+    }];
+    assert!(engine.reconcile_exit(&acc2, &id2, false, &others, true));
+    let after = engine.snapshot();
+    assert_eq!(after.accounts[1].status, Status::Backoff);
+    assert!(!after.accounts[1].exit_pending);
+    assert!(!after.accounts[5].desired_running);
+    assert_eq!(after.accounts[5].status, Status::Stopped);
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn bootstrapper_active_delays_absence_confirmation_while_allowing_successor_and_bounding_wait() {
+    let f = Fixture::new();
+    let acc = f.account();
+    let identity = acc.process.clone().unwrap();
+    let observed = Instant::now();
+    let pending = PendingExit {
+        observed,
+        clean: false,
+        exit_code: Some(1),
+        bootstrapper_blocked_logged: false,
+    };
+    let mut scan = platform::ProcessScan::default();
+    scan.bootstrapper_active = true;
+    // Absence must NOT be confirmed while bootstrapper_active is true.
+    assert!(!pending.bootstrapper_timed_out(&acc, observed + Duration::from_secs(5), Utc::now()));
+    assert!(pending.bootstrapper_timed_out(&acc, observed + Duration::from_secs(30), Utc::now()));
+
+    // Same-tracker successor attaches immediately even while bootstrapper_active is true.
+    scan.players.push(platform::Player {
+        pid: identity.pid + 10,
+        creation_time: "new-child".into(),
+        tracker: identity.tracker.clone(),
+    });
+    let players = scan.verified_for_target(&identity).unwrap();
+    assert!(
+        f.engine
+            .reconcile_exit(&acc, &identity, false, &players, false)
+    );
+    assert_eq!(
+        f.account().process.as_ref().map(|p| p.pid),
+        Some(identity.pid + 10)
+    );
+}
+
+#[test]
+fn manual_restart_with_retired_late_client_closes_late_client_then_clears_for_single_launch() {
+    let f = Fixture::new();
+    let acc = f.account();
+    f.engine
+        .update("1", acc.generation, |a| {
+            a.process = None;
+            a.status = Status::Launching;
+            a.tracker = Some("987654321098".into());
+            a.ownership_deadline = Some(Utc::now() + ChronoDuration::seconds(90));
+        })
+        .unwrap();
+    f.engine.command("1", "restart").unwrap();
+    assert!(retired_blocks_launch(
+        &f.engine.0.state.lock().unwrap().database,
+        "1"
+    ));
+
+    let retired = f
+        .engine
+        .0
+        .state
+        .lock()
+        .unwrap()
+        .database
+        .retired_launches
+        .clone();
+    assert_eq!(retired.len(), 1);
+    let late_player = vec![platform::Player {
+        pid: 7777,
+        creation_time: "late-start".into(),
+        tracker: "987654321098".into(),
+    }];
+    let mut attempts = CloseAttempts::default();
+    let mut closed_pids = Vec::new();
+    assert!(
+        f.engine
+            .close_retired(
+                &retired[0],
+                &late_player,
+                Instant::now(),
+                &mut attempts,
+                || Ok(late_player.clone()),
+                |id, force| {
+                    assert!(!force);
+                    closed_pids.push(id.pid);
+                    Ok(())
+                },
+            )
+            .unwrap()
+    );
+    assert_eq!(closed_pids, vec![7777]);
+
+    // Once late client exits, monitor clears retired launch and ManualRestart close_intent.
+    f.engine
+        .transaction(|s| {
+            s.database.retired_launches.clear();
+            Engine::clear_retired_restart_intent(s, "1");
+            Ok(())
+        })
+        .unwrap();
+    let ready = f.account();
+    assert!(ready.close_intent.is_none());
+    assert!(ready.last_error.is_none());
+    assert!(launch_ready(&ready, Utc::now()));
+}
+
+#[test]
+fn manual_restart_during_pre_tracker_launching_supersedes_generation_and_queues_once() {
+    let f = Fixture::new();
+    let acc = f.account();
+    f.engine
+        .update("1", acc.generation, |a| {
+            a.process = None;
+            a.tracker = None;
+            a.status = Status::Launching;
+        })
+        .unwrap();
+    let old_gen = acc.generation;
+    let op = f.engine.command("1", "restart").unwrap();
+    assert_eq!(op.state, "queued");
+    let after = f.account();
+    assert_eq!(after.status, Status::Queued);
+    assert_ne!(after.generation, old_gen);
+    assert!(launch_ready(&after, Utc::now()));
 }

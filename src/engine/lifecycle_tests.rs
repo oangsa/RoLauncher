@@ -537,7 +537,7 @@ async fn accepted_protocol_without_a_process_retains_tracking_and_blocks_duplica
     let a = engine.snapshot().accounts[0].clone();
     assert!(a.tracker.is_some() && a.process.is_none());
     assert!(!launch_ready(&a, Utc::now() + ChronoDuration::hours(1)));
-    assert!(engine.command("1", "restart").is_err());
+    assert!(engine.command("1", "restart").is_ok());
     engine.command("1", "stop").unwrap();
     assert_eq!(engine.snapshot().accounts[0].status, Status::Stopping);
     assert!(engine.command("1", "start").is_err());
@@ -1715,8 +1715,15 @@ async fn cancel_first_launch_restart_unresolved_and_engine_shutdown_during_readi
     state.release.notify_waiters();
     t1.await.unwrap();
 
-    // Restarting an unresolved launch must be rejected until Stop + discovery clears its retired tracker.
+    // Restarting an unresolved launch retires its tracker safely, blocks duplicate launch,
+    // and rejects a second concurrent restart while pending.
+    let restart_op = engine.command("1", "restart").unwrap();
+    assert_eq!(restart_op.state, "queued");
     assert!(engine.command("1", "restart").is_err());
+    assert!(retired_blocks_launch(
+        &engine.0.state.lock().unwrap().database,
+        "1"
+    ));
 
     let e2 = engine.clone();
     let a2 = accounts[1].clone();
@@ -6291,6 +6298,80 @@ async fn six_accounts_simultaneous_api_failure_and_complete_outage_recovery() {
     launcher.await.unwrap();
     network.await.unwrap();
     server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn manual_restart_retires_unowned_tracker_and_stop_supersedes_it() {
+    let (engine, path) = super::tests::fixture(2);
+    engine.command("1", "start").unwrap();
+    let a = engine.snapshot().accounts[0].clone();
+    engine
+        .update("1", a.generation, |a| {
+            a.status = Status::Unknown;
+            a.tracker = Some("123456789012".into());
+            a.ownership_deadline = Some(Utc::now() - ChronoDuration::seconds(1));
+        })
+        .unwrap();
+    // Restart from Unknown with unowned tracker must succeed by retiring old tracker.
+    let restart_op = engine.command("1", "restart").unwrap();
+    assert_eq!(restart_op.state, "queued");
+    assert!(
+        engine
+            .command("1", "restart")
+            .unwrap_err()
+            .contains("Restart is already in progress")
+    );
+    let after_restart = engine.snapshot().accounts[0].clone();
+    assert_eq!(after_restart.status, Status::Queued);
+    assert!(after_restart.tracker.is_none());
+    assert!(retired_blocks_launch(
+        &engine.0.state.lock().unwrap().database,
+        "1"
+    ));
+
+    // Stop supersedes pending Restart cleanly.
+    let stop_op = engine.command("1", "stop").unwrap();
+    assert_eq!(stop_op.state, "queued");
+    let after_stop = engine.snapshot().accounts[0].clone();
+    assert_eq!(after_stop.status, Status::Stopping);
+    assert!(!after_stop.desired_running);
+    assert_eq!(
+        engine.0.state.lock().unwrap().database.retired_launches[0]
+            .close_intent
+            .as_ref()
+            .map(|i| i.reason),
+        Some(CloseReason::UserStop)
+    );
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn diagnostics_exit_pending_reflects_actual_reconciliation_not_status_stopping() {
+    let (engine, path) = super::tests::fixture(1);
+    engine.command("1", "start").unwrap();
+    let a = engine.snapshot().accounts[0].clone();
+    let identity = ProcessIdentity {
+        pid: 4242,
+        creation_time: "fixture".into(),
+        tracker: "123456789012".into(),
+        generation: a.generation,
+    };
+    engine
+        .update("1", a.generation, |a| {
+            a.status = Status::Running;
+            a.process = Some(identity.clone());
+            note_process_exit(a, &identity, false);
+        })
+        .unwrap();
+    let diag = engine.diagnostics();
+    assert_eq!(diag["accounts"][0]["status"], "unknown");
+    assert_eq!(diag["accounts"][0]["exit_pending"], true);
+    engine.confirmed_exit("1", a.generation, &identity, false);
+    let diag_after = engine.diagnostics();
+    assert_eq!(diag_after["accounts"][0]["exit_pending"], false);
     drop(engine);
     std::fs::remove_dir_all(path).unwrap();
 }
