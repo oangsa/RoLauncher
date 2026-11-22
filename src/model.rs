@@ -263,6 +263,8 @@ pub struct Account {
     pub group: String,
     #[serde(default)]
     pub recovery_reason: String,
+    #[serde(default)]
+    pub exit_pending: bool,
     #[serde(skip)]
     pub(crate) transient_failures: u32,
 }
@@ -297,6 +299,7 @@ impl Account {
             fallback_policy: FallbackPolicy::default(),
             group: String::new(),
             recovery_reason: String::new(),
+            exit_pending: false,
             transient_failures: 0,
         }
     }

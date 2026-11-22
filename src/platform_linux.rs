@@ -39,6 +39,9 @@ impl ExitWatch {
     pub fn new(identity: &ProcessIdentity) -> Option<Self> {
         Some(Self(identity.tracker.clone()))
     }
+    pub fn exit_code(&self) -> Option<u32> {
+        None
+    }
     pub fn clean_exit(&self) -> Option<bool> {
         LAUNCH_EXITS.lock().ok()?.remove(&self.0)
     }

@@ -168,6 +168,7 @@ pub(crate) fn account(a: &Account) -> Value {
         "error_code": error_code(a.last_error.as_deref().unwrap_or("")),
         "retry_limit_reached": a.failures >= 5,
         "rejoin_disabled": a.status == Status::NeedsAttention && !a.auto_recovery,
+        "exit_pending": a.exit_pending,
         "close_intent": a.close_intent, "fallback_policy": a.fallback_policy,
         "public_fallback_active": a.public_fallback_active,
         "place_id": a.target.as_ref().map(|t| t.place_id),
@@ -339,6 +340,18 @@ pub(crate) fn reason(message: &str) -> &'static str {
             "launch_coordination_unavailable",
         ),
         ("Restart is already in progress", "restart_already_pending"),
+        (
+            "Restart pending; waiting for previous launch to clear",
+            "restart_waiting_retired_launch",
+        ),
+        (
+            "Restart pending; waiting for old client to exit",
+            "restart_waiting_old_process",
+        ),
+        (
+            "Restart pending; checking for surviving client",
+            "restart_exit_pending",
+        ),
         ("Idle disconnect", "afk_kick"),
         ("Launch ended without a client", "verified_launch_absence"),
     ] {

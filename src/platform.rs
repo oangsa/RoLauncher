@@ -266,11 +266,29 @@ mod imp {
                 && valid_player_image(handle.0))
             .then_some(Self(handle, identity.clone()))
         }
-        pub fn clean_exit(&self) -> Option<bool> {
+        #[cfg(test)]
+        pub fn from_test_pid(pid: u32) -> Option<Self> {
+            let handle =
+                process_handle(pid, PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE).ok()?;
+            let creation_time = process_time(handle.0).ok()?;
+            Some(Self(
+                handle,
+                ProcessIdentity {
+                    pid,
+                    creation_time,
+                    tracker: "123456".into(),
+                    generation: Uuid::nil(),
+                },
+            ))
+        }
+        pub fn exit_code(&self) -> Option<u32> {
             let mut code = 0;
             (unsafe { WaitForSingleObject(self.0.0, 0) } == WAIT_OBJECT_0
                 && unsafe { GetExitCodeProcess(self.0.0, &mut code) } != 0)
-                .then_some(code == 0)
+                .then_some(code)
+        }
+        pub fn clean_exit(&self) -> Option<bool> {
+            self.exit_code().map(|code| code == 0)
         }
         pub fn alive(&self, identity: &ProcessIdentity) -> Result<bool, String> {
             if identity != &self.1 {
@@ -1476,5 +1494,18 @@ mod tests {
         assert!(!encrypted.contains("sample-session"));
         assert_eq!(&*unprotect(&encrypted).unwrap(), "sample-session");
         assert!(unprotect("bad-data").is_err());
+    }
+    #[cfg(windows)]
+    #[test]
+    fn exit_watch_records_nonzero_windows_exit_code() {
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/C", "exit", "42"])
+            .spawn()
+            .unwrap();
+        let watch = imp::ExitWatch::from_test_pid(child.id()).unwrap();
+        let status = child.wait().unwrap();
+        assert_eq!(status.code(), Some(42));
+        assert_eq!(watch.exit_code(), Some(42));
+        assert_eq!(watch.clean_exit(), Some(false));
     }
 }

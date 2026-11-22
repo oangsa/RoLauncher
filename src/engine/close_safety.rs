@@ -67,16 +67,6 @@ impl CloseAttempts {
             attempt.force_submitted.get_or_insert(now);
         }
     }
-    fn graceful_submitted(
-        &self,
-        id: &str,
-        intent: &CloseIntent,
-        identity: &ProcessIdentity,
-    ) -> bool {
-        self.0.iter().any(|a| {
-            !a.denied && a.account_id == id && a.intent == *intent && a.identity == *identity
-        })
-    }
     fn force_elapsed(
         &mut self,
         id: &str,
@@ -267,6 +257,7 @@ fn attach_surviving_player(
     }
     a.connected_since = None;
     a.disconnected_since = None;
+    a.exit_pending = false;
     attach_verified_player(a, successor.clone());
     if direct_child {
         a.ownership_deadline = None;
@@ -832,11 +823,9 @@ impl Engine {
                     "candidates": players.iter().filter(|p| p.pid == identity.pid || p.tracker == identity.tracker)
                         .map(|p| crate::diagnostics::process(&p.identity(expected.generation))).collect::<Vec<_>>(),
                 }));
-                // The process can exit after the monitor's alive check, including after
-                // graceful closure. Absence is not proof of conflicting ownership.
-                if (intent.reason == CloseReason::AutomaticRecovery
-                    || attempts.graceful_submitted(&expected.id, &intent, identity))
-                    && uniquely_claimed(&next, &expected.id, identity, false)
+                // The process can exit after the monitor's alive check, including during
+                // restart/stop/recovery closure. Absence is not proof of conflicting ownership.
+                if uniquely_claimed(&next, &expected.id, identity, false)
                     && !players
                         .iter()
                         .any(|p| p.pid == identity.pid || p.tracker == identity.tracker)
@@ -994,12 +983,16 @@ impl Engine {
         let record = &next.database.retired_launches[index];
         let intent = record.close_intent.clone();
         let identity = record.process.clone();
+        let launch_allowed = self.0.launch_allowed.load(Ordering::Acquire);
         let policy = identity
             .as_ref()
             .zip(intent.as_ref())
             .is_some_and(|(identity, intent)| {
                 !attempts.blocked(&expected.account_id, intent, identity)
-                    && intent.reason == CloseReason::UserStop
+                    && matches!(
+                        intent.reason,
+                        CloseReason::UserStop | CloseReason::ManualRestart
+                    )
                     && next
                         .database
                         .accounts
@@ -1007,7 +1000,12 @@ impl Engine {
                         .find(|a| a.account.id == expected.account_id)
                         .is_some_and(|a| {
                             a.account.close_intent.as_ref() == Some(intent)
-                                && eligible(&a.account, intent, next.network_suspended, false)
+                                && eligible(
+                                    &a.account,
+                                    intent,
+                                    next.network_suspended,
+                                    launch_allowed,
+                                )
                         })
                     && verified_unique(&next, &expected.account_id, identity, observed, true)
             });

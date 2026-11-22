@@ -144,18 +144,24 @@ type MemoryProbe = (
 struct PendingExit {
     observed: Instant,
     clean: bool,
+    exit_code: Option<u32>,
+    bootstrapper_blocked_logged: bool,
 }
 impl PendingExit {
-    fn settled(&self, account: &Account, now: Instant, utc: chrono::DateTime<Utc>) -> bool {
-        let grace = if account.ownership_deadline.is_none() && account.close_intent.is_some() {
-            1
-        } else {
-            5
-        };
+    fn settled(&self, account: &Account, now: Instant) -> bool {
+        let grace = if account.close_intent.is_some() { 1 } else { 5 };
         now.saturating_duration_since(self.observed) >= Duration::from_secs(grace)
-            && account
+    }
+    fn bootstrapper_timed_out(
+        &self,
+        account: &Account,
+        now: Instant,
+        utc: chrono::DateTime<Utc>,
+    ) -> bool {
+        now.saturating_duration_since(self.observed) >= Duration::from_secs(30)
+            || account
                 .ownership_deadline
-                .is_none_or(|deadline| utc >= deadline)
+                .is_some_and(|deadline| utc >= deadline)
     }
 }
 
@@ -365,11 +371,23 @@ fn close_authorized(account: &Account) -> bool {
             && account.recovery_process == account.process
             && account.recovery_evidence == RecoveryEvidence::RecoveryStarted
 }
+fn is_manual_restart_pending(account: &Account) -> bool {
+    account.desired_running
+        && account.status == Status::Queued
+        && account.close_intent.as_ref().is_some_and(|i| {
+            !i.denied
+                && matches!(
+                    i.reason,
+                    CloseReason::ManualRestart | CloseReason::ManualStartReplacement
+                )
+        })
+}
 fn log_unavailable(account: &mut Account) {
-    // A transient read failure must not erase an already confirmed disconnect.
+    // A transient read failure must not erase an already confirmed disconnect or manual restart.
     if matches!(account.status, Status::Reconnecting | Status::Stopping)
         || account.status == Status::NeedsAttention
         || account.recovery_evidence == RecoveryEvidence::RecoveryStarted
+        || is_manual_restart_pending(account)
     {
         return;
     }
@@ -382,6 +400,7 @@ fn note_process_exit(a: &mut Account, identity: &ProcessIdentity, clean: bool) {
     if a.process.as_ref() != Some(identity) {
         return;
     }
+    a.exit_pending = true;
     if !a.auto_recovery
         && a.desired_running
         && a.close_intent.is_none()
@@ -393,6 +412,10 @@ fn note_process_exit(a: &mut Account, identity: &ProcessIdentity, clean: bool) {
             || clean && a.connected_since.is_some())
     {
         stop_ended_session(a);
+    } else if a.status == Status::Queued && is_manual_restart_pending(a) {
+        if !active_cooldown(a) {
+            a.last_error = Some("Restart pending; checking for surviving client".into());
+        }
     } else if matches!(
         a.status,
         Status::Running | Status::Launching | Status::Unknown
@@ -407,8 +430,9 @@ fn note_process_exit(a: &mut Account, identity: &ProcessIdentity, clean: bool) {
 }
 
 fn process_unavailable(account: &mut Account) {
-    // Inaccessibility supplies no new evidence and cannot reset a terminal/attention decision.
+    // Inaccessibility supplies no new evidence and cannot reset a terminal/attention/restart decision.
     if account.status == Status::NeedsAttention
+        || is_manual_restart_pending(account)
         || matches!(
             account.recovery_evidence,
             RecoveryEvidence::ConfirmedTerminalDisconnect | RecoveryEvidence::RecoveryStarted
@@ -559,6 +583,7 @@ fn resume_after_confirmed_close(account: &mut Account) {
 
 fn attach_verified_player(account: &mut Account, identity: ProcessIdentity) {
     account.process = Some(identity);
+    account.exit_pending = false;
     account.recovery_evidence = RecoveryEvidence::Unavailable;
     account.recovery_process = None;
     // A late exact match resolves only the ownership-timeout or startup-unresolved pause, not auth or other failures.
@@ -615,14 +640,29 @@ impl Engine {
         };
         for saved in &mut database.accounts {
             let a = &mut saved.account;
+            a.exit_pending = false;
             if a.tracker.is_some() && a.process.is_none() && a.ownership_deadline.is_none() {
                 // Legacy reservations still get a full observation window on reopen.
                 a.ownership_deadline = Some(Utc::now() + ChronoDuration::seconds(90));
             }
             a.track_run(Utc::now());
             resume_after_confirmed_close(a);
+            let manual_restart_pending = a.close_intent.as_ref().is_some_and(|i| {
+                !i.denied
+                    && matches!(
+                        i.reason,
+                        CloseReason::ManualRestart | CloseReason::ManualStartReplacement
+                    )
+            }) || database.retired_launches.iter().any(|r| {
+                r.account_id == a.id
+                    && r.close_intent
+                        .as_ref()
+                        .is_some_and(|i| !i.denied && i.reason == CloseReason::ManualRestart)
+            });
             if a.desired_running && a.status != Status::NeedsAttention {
-                a.status = if a.process.is_some() || a.tracker.is_some() {
+                a.status = if manual_restart_pending {
+                    Status::Queued
+                } else if a.process.is_some() || a.tracker.is_some() {
                     Status::Unknown
                 } else if a.status == Status::Backoff {
                     Status::Backoff
@@ -1300,6 +1340,17 @@ impl Engine {
                         "stage": "queued",
                     }),
                 );
+                if action == "restart" {
+                    self.0.journal.record(
+                        "restart_queued",
+                        serde_json::json!({
+                            "account": crate::diagnostics::account(&account),
+                            "operation_id": account.operation_id,
+                            "generation": account.generation,
+                            "source": source,
+                        }),
+                    );
+                }
             }
         }
     }
@@ -1336,20 +1387,28 @@ impl Engine {
                 s.operations.insert(op.id,op.clone()); return Ok(op);
             }
             if action != "stop" { existing.target.as_ref().ok_or("Set a launch target first")?.validate()?; }
-            if action != "stop" && existing.process.is_none() && existing.tracker.is_some() { return Err("Previous launch is unresolved; use Stop and wait for process discovery before starting again".into()); }
-            if action != "stop" && retired_blocks_launch(&s.database, id) { return Err("A cancelled launch is still being observed; inspect late clients and use Stop, or wait for discovery to confirm exit".into()); }
-            if action == "restart" && matches!(existing.status, Status::Launching | Status::Queued) {
-                if existing.status == Status::Queued
-                    && existing
+            if action == "start" && existing.process.is_none() && existing.tracker.is_some() { return Err("Previous launch is unresolved; use Stop and wait for process discovery before starting again".into()); }
+            if action == "start" && retired_blocks_launch(&s.database, id) { return Err("A cancelled launch is still being observed; inspect late clients and use Stop, or wait for discovery to confirm exit".into()); }
+            if action == "restart" {
+                let restart_in_progress = existing.desired_running
+                    && existing.status == Status::Queued
+                    && (existing
                         .close_intent
                         .as_ref()
                         .is_some_and(|i| i.reason == CloseReason::ManualRestart && !i.denied)
-                {
+                        || (existing.process.is_none() && retired_blocks_launch(&s.database, id)));
+                if restart_in_progress {
                     return Err(
                         "Restart is already in progress; waiting for old client to exit".into(),
                     );
                 }
-                return Err("A launch is already pending; Stop it before restarting".into());
+                if existing.status == Status::Queued
+                    && existing.process.is_none()
+                    && existing.tracker.is_none()
+                    && !retired_blocks_launch(&s.database, id)
+                {
+                    return Err("A launch is already pending; Stop it before restarting".into());
+                }
             }
             #[cfg(windows)]
             if action != "stop" {
@@ -1399,11 +1458,16 @@ impl Engine {
                 _ => CloseReason::ManualStartReplacement,
             }, generation, operation_id: Some(op.id), denied: false };
             if existing.process.is_none() && let Some(tracker)=existing.tracker {
-                s.database.retired_launches.push(RetiredLaunch {tracker,generation:existing.generation,account_id:id.into(),deadline:existing.ownership_deadline.unwrap_or_else(||Utc::now()+ChronoDuration::seconds(90)), close_intent:Some(CloseIntent {reason: if action == "stop" {CloseReason::UserStop} else {CloseReason::ObsoleteLaunch}, ..close_intent.clone()}), process:None});
+                s.database.retired_launches.push(RetiredLaunch {tracker,generation:existing.generation,account_id:id.into(),deadline:existing.ownership_deadline.unwrap_or_else(||Utc::now()+ChronoDuration::seconds(90)), close_intent:Some(CloseIntent {reason: if action == "stop" {CloseReason::UserStop} else {CloseReason::ManualRestart}, ..close_intent.clone()}), process:None});
             }
-            if action == "stop" {
+            if matches!(action, "stop" | "restart") {
                 for old in s.database.retired_launches.iter_mut().filter(|r| r.account_id == id) {
-                    if old.process.is_some() || old.close_intent.as_ref().is_some_and(|i| i.reason == CloseReason::UserStop && !i.denied) {
+                    if old.process.is_some()
+                        || old.close_intent.as_ref().is_some_and(|i| {
+                            !i.denied
+                                && matches!(i.reason, CloseReason::UserStop | CloseReason::ManualRestart)
+                        })
+                    {
                         old.close_intent = Some(close_intent.clone());
                     }
                 }
@@ -1425,9 +1489,11 @@ impl Engine {
                                 )))
                 });
             let multi_instance_enabled = s.database.multi_instance_enabled;
+            let has_retired = retired_blocks_launch(&s.database, id);
             let a = account_mut(s,id)?; a.finish_run(Utc::now()); a.desired_running = action != "stop";
-            if a.process.is_none() { a.tracker=None;a.ownership_deadline=None; }
-            a.generation = generation; a.close_intent = if action == "stop" || a.process.is_some() { Some(close_intent) } else { None }; a.failures = 0; a.transient_failures = 0;
+            if a.process.is_none() { a.tracker=None; a.exit_pending = false; }
+            a.ownership_deadline = None;
+            a.generation = generation; a.close_intent = if action == "stop" || a.process.is_some() || (action == "restart" && has_retired) { Some(close_intent) } else { None }; a.failures = 0; a.transient_failures = 0;
             a.next_retry = if single_instance_deferred {
                 Some(Utc::now() + ChronoDuration::seconds(5))
             } else {
@@ -1436,6 +1502,14 @@ impl Engine {
             a.connected_since = None; a.disconnected_since = None;
             a.last_error = if single_instance_deferred {
                 Some(single_instance_wait_error(multi_instance_enabled).into())
+            } else if action == "restart" && a.process.is_some() {
+                Some(if a.exit_pending {
+                    "Restart pending; checking for surviving client"
+                } else {
+                    "Restart pending; waiting for old client to exit"
+                }.into())
+            } else if action == "restart" && has_retired {
+                Some("Restart pending; waiting for previous launch to clear".into())
             } else {
                 None
             };
@@ -3037,6 +3111,7 @@ impl Engine {
     async fn monitor_loop(&self) {
         let mut tails: HashMap<(u32, String), crate::logs::Tail> = HashMap::new();
         let mut last_discovery = Instant::now() - Duration::from_secs(30);
+        let mut discovery_started = Instant::now() - Duration::from_secs(30);
         let mut discovery_started_utc = Utc::now();
         let mut last_log_discovery = Instant::now() - Duration::from_secs(30);
         let mut close_attempts = CloseAttempts::default();
@@ -3099,6 +3174,7 @@ impl Engine {
                 && last_discovery.elapsed() >= discovery_interval
                 && should_discover
             {
+                discovery_started = Instant::now();
                 discovery_started_utc = Utc::now();
                 #[cfg(windows)]
                 let engine = self.clone();
@@ -3125,8 +3201,8 @@ impl Engine {
                     for a in self.snapshot().accounts {
                         if let Some(p) = &a.process
                             && let Some(exit) = pending_exits.get(&(p.pid, p.creation_time.clone()))
-                            && last_discovery >= exit.observed
-                            && exit.settled(&a, Instant::now(), Utc::now())
+                            && discovery_started >= exit.observed
+                            && exit.bootstrapper_timed_out(&a, Instant::now(), Utc::now())
                         {
                             self.pause_unresolved_exit(&a, p);
                         }
@@ -3164,16 +3240,41 @@ impl Engine {
                             continue;
                         };
                         let key = (identity.pid, identity.creation_time.clone());
-                        let Some(pending) = pending_exits.get(&key) else {
+                        let Some(pending) = pending_exits.get_mut(&key) else {
                             continue;
                         };
                         // A scan started before the exit cannot establish successor absence.
-                        if last_discovery < pending.observed {
+                        if discovery_started < pending.observed {
                             continue;
                         }
-                        let settled = pending.settled(&account, Instant::now(), Utc::now());
+                        let settled = pending.settled(&account, Instant::now());
                         match scan.verified_for_target(identity) {
                             Ok(players) => {
+                                let has_successor = players.iter().any(|p| {
+                                    p.tracker == identity.tracker
+                                        && (p.pid != identity.pid
+                                            || p.creation_time != identity.creation_time)
+                                });
+                                if !has_successor && scan.bootstrapper_active {
+                                    if !pending.bootstrapper_blocked_logged {
+                                        pending.bootstrapper_blocked_logged = true;
+                                        self.0.journal.record(
+                                            "recovery_blocked",
+                                            serde_json::json!({
+                                                "account": crate::diagnostics::account(&account),
+                                                "reason": "bootstrapper_active",
+                                            }),
+                                        );
+                                    }
+                                    if pending.bootstrapper_timed_out(
+                                        &account,
+                                        Instant::now(),
+                                        Utc::now(),
+                                    ) {
+                                        self.pause_unresolved_exit(&account, identity);
+                                    }
+                                    continue;
+                                }
                                 if self.reconcile_exit(
                                     &account,
                                     identity,
@@ -3181,11 +3282,40 @@ impl Engine {
                                     &players,
                                     settled,
                                 ) {
-                                    pending_exits.remove(&key);
+                                    if let Some(exit) = pending_exits.remove(&key) {
+                                        let successor_attached =
+                                            self.snapshot().accounts.iter().any(|a| {
+                                                a.id == account.id
+                                                    && a.generation == account.generation
+                                                    && a.process.is_some()
+                                            });
+                                        self.0.journal.record(
+                                            "exit_reconciled",
+                                            serde_json::json!({
+                                                "account_id": account.id.parse::<u64>().ok(),
+                                                "generation": account.generation,
+                                                "pid": identity.pid,
+                                                "exit_code": exit.exit_code,
+                                                "clean_exit": exit.clean,
+                                                "settlement_ms": exit.observed.elapsed().as_millis(),
+                                                "reconciliation_outcome": if successor_attached {
+                                                    "successor_verified"
+                                                } else {
+                                                    "confirmed_exit"
+                                                },
+                                            }),
+                                        );
+                                    }
                                     last_log_discovery = Instant::now() - Duration::from_secs(30);
                                 }
                             }
-                            Err(_) if settled => {
+                            Err(_)
+                                if pending.bootstrapper_timed_out(
+                                    &account,
+                                    Instant::now(),
+                                    Utc::now(),
+                                ) =>
+                            {
                                 self.pause_unresolved_exit(&account, identity);
                             }
                             Err(_) => {}
@@ -3202,6 +3332,7 @@ impl Engine {
                                         && r.tracker == old.tracker
                                         && r.process.as_ref() == Some(identity))
                                 });
+                                Self::clear_retired_restart_intent(s, &old.account_id);
                                 Ok(())
                             });
                             close_attempts.remove(identity);
@@ -3224,6 +3355,7 @@ impl Engine {
                                         && r.generation == old.generation
                                         && r.process.is_none())
                                 });
+                                Self::clear_retired_restart_intent(s, &old.account_id);
                                 Ok(())
                             });
                             continue;
@@ -3254,7 +3386,7 @@ impl Engine {
                         let Some(pending) = pending_exits.get(&key) else {
                             continue;
                         };
-                        if last_discovery < pending.observed {
+                        if discovery_started < pending.observed {
                             continue;
                         }
                         if self.reconcile_exit(
@@ -3262,7 +3394,7 @@ impl Engine {
                             identity,
                             pending.clean,
                             &players,
-                            pending.settled(&account, Instant::now(), Utc::now()),
+                            pending.settled(&account, Instant::now()),
                         ) {
                             pending_exits.remove(&key);
                             last_log_discovery = Instant::now() - Duration::from_secs(30);
@@ -3279,6 +3411,7 @@ impl Engine {
                                         && r.generation == old.generation
                                         && r.process.is_none())
                                 });
+                                Self::clear_retired_restart_intent(s, &old.account_id);
                                 Ok(())
                             });
                             continue;
@@ -3293,6 +3426,7 @@ impl Engine {
                                         && r.tracker == old.tracker
                                         && r.process.as_ref() == Some(identity))
                                 });
+                                Self::clear_retired_restart_intent(s, &old.account_id);
                                 Ok(())
                             });
                             close_attempts.remove(identity);
@@ -3392,8 +3526,9 @@ impl Engine {
                 );
                 match alive {
                     Ok(false) => {
-                        let clean =
-                            exit_watches.remove(&key).and_then(|w| w.clean_exit()) == Some(true);
+                        let watch = exit_watches.remove(&key);
+                        let exit_code = watch.as_ref().and_then(|w| w.exit_code());
+                        let clean = watch.and_then(|w| w.clean_exit()) == Some(true);
                         tails.remove(&key);
                         close_attempts.remove(&identity);
                         pending_exits.insert(
@@ -3401,12 +3536,20 @@ impl Engine {
                             PendingExit {
                                 observed: Instant::now(),
                                 clean,
+                                exit_code,
+                                bootstrapper_blocked_logged: false,
                             },
                         );
-                        self.0.journal.record("process_exit_pending", serde_json::json!({
-                            "account": crate::diagnostics::account(&account), "clean_exit": clean,
-                            "reason": "checking_for_surviving_client_before_replacement",
-                        }));
+                        self.0.journal.record(
+                            "process_exit_pending",
+                            serde_json::json!({
+                                "account": crate::diagnostics::account(&account),
+                                "clean_exit": clean,
+                                "exit_code": exit_code,
+                                "close_requested": account.close_intent.is_some(),
+                                "reason": "checking_for_surviving_client_before_replacement",
+                            }),
+                        );
                         let _ = self.update(&account.id, account.generation, |a| {
                             note_process_exit(a, &identity, clean);
                         });
@@ -3678,6 +3821,26 @@ impl Engine {
         }
     }
 
+    fn clear_retired_restart_intent(s: &mut State, account_id: &str) {
+        if !retired_blocks_launch(&s.database, account_id)
+            && let Ok(account) = account_mut(s, account_id)
+            && account.process.is_none()
+            && account.desired_running
+            && account.status == Status::Queued
+            && account
+                .close_intent
+                .as_ref()
+                .is_some_and(|i| !i.denied && i.reason == CloseReason::ManualRestart)
+        {
+            account.close_intent = None;
+            if account.last_error.as_deref()
+                == Some("Restart pending; waiting for previous launch to clear")
+            {
+                account.last_error = None;
+            }
+        }
+    }
+
     fn confirmed_exit(&self, id: &str, generation: Uuid, identity: &ProcessIdentity, clean: bool) {
         let _ = self.transaction(|state| {
             let network_suspended = state.network_suspended;
@@ -3685,7 +3848,14 @@ impl Engine {
             if account.generation != generation || account.process.as_ref() != Some(identity) {
                 return Ok(());
             }
-            self.0.journal.record("process_exit_confirmed", serde_json::json!({"account": crate::diagnostics::account(account), "clean_exit": clean}));
+            self.0.journal.record(
+                "process_exit_confirmed",
+                serde_json::json!({
+                    "account": crate::diagnostics::account(account),
+                    "clean_exit": clean,
+                    "close_requested": account.close_intent.is_some(),
+                }),
+            );
             resume_verified_handoff(account);
             let ordinary_exit = account.recovery_evidence != RecoveryEvidence::RecoveryStarted
                 && account.status != Status::NeedsAttention
@@ -3693,6 +3863,7 @@ impl Engine {
             account.process = None;
             account.tracker = None;
             account.ownership_deadline = None;
+            account.exit_pending = false;
             account.connected_since = None;
             account.disconnected_since = None;
             account.recovery_evidence = RecoveryEvidence::Unavailable;
@@ -3705,6 +3876,17 @@ impl Engine {
                 account.close_intent = None;
             }
             resume_after_confirmed_close(account);
+            if account.status == Status::Queued
+                && matches!(
+                    account.last_error.as_deref(),
+                    Some(
+                        "Restart pending; checking for surviving client"
+                            | "Restart pending; waiting for old client to exit"
+                    )
+                )
+            {
+                account.last_error = None;
+            }
             if account.desired_running
                 && account.auto_recovery
                 && !matches!(
@@ -3718,8 +3900,16 @@ impl Engine {
                 apply_failure(
                     account,
                     &Failure::new(
-                        if network_suspended { FailureKind::Network } else { FailureKind::Other },
-                        if network_suspended { "Waiting for internet / Roblox service" } else { "Managed client exited; scheduling recovery" },
+                        if network_suspended {
+                            FailureKind::Network
+                        } else {
+                            FailureKind::Other
+                        },
+                        if network_suspended {
+                            "Waiting for internet / Roblox service"
+                        } else {
+                            "Managed client exited; scheduling recovery"
+                        },
                     ),
                 );
                 if network_suspended {
@@ -3730,7 +3920,12 @@ impl Engine {
                 account.desired_running = false;
                 account.status = Status::Stopped;
             }
-            if clean && ordinary_exit && !active_cooldown(account) {
+            if clean
+                && ordinary_exit
+                && account.desired_running
+                && account.status != Status::Queued
+                && !active_cooldown(account)
+            {
                 account.last_error = Some("Client closed normally".into());
                 account.recovery_reason = "NormalExit".into();
             }
