@@ -1,6 +1,6 @@
 # RoLauncher 2.0.1
 
-Upcoming Windows release.
+Released November 14, 2026.
 
 ## Fixed
 

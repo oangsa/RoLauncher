@@ -1,6 +1,10 @@
 # Changelog
 
-## [2.0.2] — Unreleased
+## [2.0.3] — 2026-11-22
+
+- Mark published release dates in the in-app changelog and GitHub release notes instead of showing Unreleased.
+
+## [2.0.2] — 2026-11-22
 
 - Recheck startup conflicts after empty cleanup scans and clear resolved coordination warnings automatically.
 - Resume recovery after temporary network or inspection outages and pace per-account API retries without burning retry budgets.
