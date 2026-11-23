@@ -158,10 +158,46 @@ where
     Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountLifecycleView {
+    #[serde(default)]
+    pub phase: String,
+    #[serde(default)]
+    pub process_status: String,
+    #[serde(default)]
+    pub process_exit_observed: bool,
+    #[serde(default)]
+    pub exit_reconciliation_pending: bool,
+    #[serde(default)]
+    pub pending_reason: Option<String>,
+    #[serde(default)]
+    pub handoff_deadline: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub outstanding_launch_attempt: bool,
+    #[serde(default)]
+    pub outstanding_retired_launches: usize,
+    #[serde(default)]
+    pub next_retry_eligible_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub current_retry_blocker: Option<String>,
+    #[serde(default)]
+    pub last_verified_launch_stage: Option<String>,
+    #[serde(default)]
+    pub last_confirmed_connection_state: String,
+    #[serde(default)]
+    pub last_exit_code: Option<u32>,
+    #[serde(default)]
+    pub last_process_lifetime_ms: Option<u64>,
+    #[serde(default)]
+    pub last_termination_source: String,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Snapshot {
     #[serde(default, deserialize_with = "deserialize_null_default")]
     pub accounts: Vec<Account>,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub account_lifecycle: std::collections::BTreeMap<String, AccountLifecycleView>,
     #[serde(default)]
     pub network_suspended: bool,
     #[serde(default)]
@@ -503,16 +539,26 @@ pub fn format_waiting_detail(
         let remaining = (next - now).num_seconds().max(0);
         return format!("Rate-limit cooldown · {remaining}s");
     }
+    if account
+        .last_error
+        .as_deref()
+        .is_some_and(|e| e.starts_with("Restart pending"))
+    {
+        return "Restart pending".to_string();
+    }
     if account.process.is_some()
         && matches!(account.status.as_str(), "queued" | "stopping" | "backoff")
     {
         return "Waiting for old process to exit".to_string();
     }
     if account.last_error.as_deref().is_some_and(|e| {
+        e.contains("surviving Roblox client") || e.contains("checking for a surviving")
+    }) {
+        return "Checking for process handoff".to_string();
+    }
+    if account.last_error.as_deref().is_some_and(|e| {
         e.contains("unverified Roblox process")
             || e.contains("startup is still in progress")
-            || e.contains("surviving Roblox client")
-            || e.contains("checking for a surviving")
             || e.contains("watching for a late client")
             || e.contains("Launch tracker has no verified instance")
     }) {
@@ -526,6 +572,73 @@ pub fn format_waiting_detail(
     } else {
         format_error(account.last_error.as_deref())
     }
+}
+
+pub fn format_waiting_detail_with_lifecycle(
+    account: &Account,
+    lifecycle: Option<&AccountLifecycleView>,
+    network_suspended: bool,
+    now: DateTime<Utc>,
+) -> String {
+    if account.recovery_reason == "SessionConflict"
+        && let Some(next) = account.next_retry.filter(|t| *t > now)
+    {
+        let remaining = (next - now).num_seconds().max(0);
+        return format!("Cooldown for duplicate session · {remaining}s");
+    }
+    if account.recovery_reason == "RateLimit"
+        && let Some(next) = account.next_retry.filter(|t| *t > now)
+    {
+        let remaining = (next - now).num_seconds().max(0);
+        return format!("Rate-limit cooldown · {remaining}s");
+    }
+    if let Some(lc) = lifecycle {
+        match lc.phase.as_str() {
+            "waiting_for_startup" => return "Waiting for Roblox startup".to_string(),
+            "waiting_for_ownership" => {
+                return "Waiting for verified process ownership".to_string();
+            }
+            "checking_for_handoff" => return "Checking for process handoff".to_string(),
+            "old_process_exited" => return "Old Roblox process exited".to_string(),
+            "checking_for_surviving_client" => {
+                return "Checking for surviving client".to_string();
+            }
+            "preparing_replacement" => {
+                return if lc.outstanding_retired_launches > 0 {
+                    "Restart pending · waiting for previous launch to clear".to_string()
+                } else {
+                    "Preparing replacement launch".to_string()
+                };
+            }
+            "waiting_for_network" => return "Waiting for internet / Roblox service".to_string(),
+            "launch_failed_before_connection" => {
+                return if account.next_retry.is_some() {
+                    format!(
+                        "Launch failed before connection · {}",
+                        format_retry(account, now)
+                    )
+                } else {
+                    "Launch failed before connection".to_string()
+                };
+            }
+            "retry_scheduled" => {
+                return if account.next_retry.is_some() {
+                    format!("Recovery retry scheduled · {}", format_retry(account, now))
+                } else {
+                    "Recovery retry scheduled".to_string()
+                };
+            }
+            "action_required" => {
+                return account
+                    .last_error
+                    .as_deref()
+                    .map(|_| format_error(account.last_error.as_deref()))
+                    .unwrap_or_else(|| "Action required".to_string());
+            }
+            _ => {}
+        }
+    }
+    format_waiting_detail(account, network_suspended, now)
 }
 
 pub fn coordination_warning(compatibility: &str) -> Option<&str> {
@@ -637,6 +750,85 @@ mod tests {
                 "OS multi-instance coordination initialized; Waiting for launch coordination"
             )
             .is_some()
+        );
+    }
+
+    #[test]
+    fn lifecycle_view_formats_all_phases_accurately_and_avoids_stale_late_launch_label() {
+        let now = Utc::now();
+        let mut account = Account {
+            status: "unknown".into(),
+            desired_running: true,
+            last_error: Some(
+                "Managed process exited; checking for a surviving Roblox client before rejoin"
+                    .into(),
+            ),
+            ..Default::default()
+        };
+        assert_eq!(
+            format_waiting_detail(&account, false, now),
+            "Checking for process handoff"
+        );
+        for (phase, expected) in [
+            ("waiting_for_startup", "Waiting for Roblox startup"),
+            (
+                "waiting_for_ownership",
+                "Waiting for verified process ownership",
+            ),
+            ("checking_for_handoff", "Checking for process handoff"),
+            ("old_process_exited", "Old Roblox process exited"),
+            (
+                "checking_for_surviving_client",
+                "Checking for surviving client",
+            ),
+            ("preparing_replacement", "Preparing replacement launch"),
+            (
+                "waiting_for_network",
+                "Waiting for internet / Roblox service",
+            ),
+            (
+                "launch_failed_before_connection",
+                "Launch failed before connection",
+            ),
+            ("retry_scheduled", "Recovery retry scheduled"),
+        ] {
+            let lc = AccountLifecycleView {
+                phase: phase.into(),
+                ..Default::default()
+            };
+            assert_eq!(
+                format_waiting_detail_with_lifecycle(&account, Some(&lc), false, now),
+                expected,
+                "{phase}"
+            );
+        }
+        account.next_retry = Some(now + ChronoDuration::seconds(15));
+        let failed_lc = AccountLifecycleView {
+            phase: "launch_failed_before_connection".into(),
+            ..Default::default()
+        };
+        assert!(
+            format_waiting_detail_with_lifecycle(&account, Some(&failed_lc), false, now)
+                .starts_with("Launch failed before connection · Retry in ")
+        );
+        let retired_lc = AccountLifecycleView {
+            phase: "preparing_replacement".into(),
+            outstanding_retired_launches: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            format_waiting_detail_with_lifecycle(&account, Some(&retired_lc), false, now),
+            "Restart pending · waiting for previous launch to clear"
+        );
+        let restart_acct = Account {
+            status: "queued".into(),
+            desired_running: true,
+            last_error: Some("Restart pending; waiting for previous launch to clear".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            format_waiting_detail(&restart_acct, false, now),
+            "Restart pending"
         );
     }
 }

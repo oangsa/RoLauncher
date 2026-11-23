@@ -8,15 +8,11 @@ try {
         & python "$PSScriptRoot\versioning.py"
         if ($LASTEXITCODE -ne 0) { throw 'Development version stamping failed' }
     }
-    $taskArgs = @('build', '--locked')
-    if (-not $Debug) { $taskArgs += '--release' }
-    & cargo @taskArgs
-    if ($LASTEXITCODE -ne 0) { throw 'Rust build failed' }
     $taskProfile = if ($Debug) { 'debug' } else { 'release' }
     $taskDist = if ([IO.Path]::IsPathRooted($OutputDirectory)) { $OutputDirectory } else { Join-Path $taskRoot $OutputDirectory }
     New-Item -ItemType Directory -Force -Path $taskDist | Out-Null
-    & "$PSScriptRoot\build-desktop.ps1" -OutputDirectory (Join-Path $taskDist 'desktop')
-    if ($LASTEXITCODE -ne 0) { throw 'Desktop build failed' }
+    & "$PSScriptRoot\build-desktop.ps1" -Workspace -Debug:$Debug -OutputDirectory (Join-Path $taskDist 'desktop')
+    if ($LASTEXITCODE -ne 0) { throw 'Workspace build failed' }
     Copy-Item -LiteralPath "target\$taskProfile\RoLauncher.exe" -Destination $taskDist
     Copy-Item -LiteralPath 'README.md','LICENSE','THIRD_PARTY_NOTICES.md' -Destination $taskDist
     Copy-Item -LiteralPath 'docs' -Destination $taskDist -Recurse -Force

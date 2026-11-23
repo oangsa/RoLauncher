@@ -39,6 +39,13 @@ impl ExitWatch {
     pub fn new(identity: &ProcessIdentity) -> Option<Self> {
         Some(Self(identity.tracker.clone()))
     }
+    pub fn exit_info(&self) -> Option<super::ProcessExitInfo> {
+        self.clean_exit().map(|clean| super::ProcessExitInfo {
+            clean,
+            exit_code: None,
+            lifetime_ms: None,
+        })
+    }
     pub fn clean_exit(&self) -> Option<bool> {
         LAUNCH_EXITS.lock().ok()?.remove(&self.0)
     }

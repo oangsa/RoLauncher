@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.4] — 2026-11-23
+
+- Fixed process-exit reconciliation waiting up to 90 seconds or blocking on unrelated accounts' bootstrappers and metadata failures.
+- Fixed manual Restart across unresolved trackers, pending-exit, pre-dispatch, paused, and launcher-reopen states without Stop then Start.
+- Added read-only OS exit codes, process lifetimes, and final pre-exit log drains to diagnostics for early client exits.
+- Fixed support export `exit_pending`, exited PID display, and lifecycle waiting labels in the Accounts view.
+
 ## [2.0.3] — 2026-11-22
 
 - Mark published release dates in the in-app changelog and GitHub release notes instead of showing Unreleased.

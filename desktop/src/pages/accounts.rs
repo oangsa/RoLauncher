@@ -8,7 +8,7 @@ use crate::components::primitives::{
 use crate::domain::filter::{REJOIN_FILTER_OPTIONS, STATUS_FILTER_OPTIONS, matches_account};
 use crate::domain::models::{
     can_retry, format_account_status, format_destination_kind, format_duration, format_group,
-    format_waiting_detail, longest_seconds, running_seconds,
+    format_waiting_detail_with_lifecycle, longest_seconds, running_seconds,
 };
 use crate::state::{ConfirmAction, ConfirmModal, OpenMenu};
 use chrono::Utc;
@@ -375,11 +375,20 @@ pub fn render(
                 (None, _) => "Choose a game".to_string(),
             };
             let dest_kind = format_destination_kind(acct.target.as_ref());
-            let pid_str = acct
-                .process
+            let lifecycle = app
+                .snapshot
                 .as_ref()
-                .map(|p| p.pid.to_string())
-                .unwrap_or_else(|| "—".to_string());
+                .and_then(|s| s.account_lifecycle.get(&acct.id));
+            let hide_stale_pid = lifecycle
+                .is_some_and(|lc| lc.process_exit_observed || lc.exit_reconciliation_pending);
+            let pid_str = if hide_stale_pid {
+                "—".to_string()
+            } else {
+                acct.process
+                    .as_ref()
+                    .map(|p| p.pid.to_string())
+                    .unwrap_or_else(|| "—".to_string())
+            };
             let now = Utc::now();
             let run_secs = running_seconds(acct, now);
             let run_str = if run_secs > 0 {
@@ -395,7 +404,8 @@ pub fn render(
                     "—".to_string()
                 }
             };
-            let err_text = format_waiting_detail(acct, network_suspended, now);
+            let err_text =
+                format_waiting_detail_with_lifecycle(acct, lifecycle, network_suspended, now);
             let aid_chk = acct.id.clone();
             let aid_row = acct.id.clone();
             let aid_start = acct.id.clone();

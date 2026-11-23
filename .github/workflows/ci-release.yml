@@ -2,10 +2,14 @@ name: CI and release
 
 on:
   push:
-    branches: [main, dev, 'feature/**', 'fix/**', 'codex/**', 'hotfix/**']
+    branches: [main, dev]
   pull_request:
     branches: [dev, main]
   workflow_dispatch:
+
+concurrency:
+  group: ci-release-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -39,25 +43,57 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+      - name: Check version and release notes
+        run: python scripts/check-release.py
       - name: Install pinned Rust toolchain
         run: |
           rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
           if ($LASTEXITCODE -ne 0) { throw 'Rust installation failed' }
           rustup default 1.99.0
-      - name: Check version and release notes
-        run: python scripts/check-release.py
+      - name: Formatting check
+        run: cargo fmt --all -- --check
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: ci-release-windows-2025-rust-1.99.0
+          cache-on-failure: true
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - name: Determine release packaging scope
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          $package = 'false'
+          if ($env:EVENT_NAME -ne 'pull_request' -or $env:BASE_REF -eq 'main') {
+            $package = 'true'
+          } else {
+            $changed = git diff --name-only "$($env:BASE_SHA)...$($env:HEAD_SHA)"
+            if ($LASTEXITCODE -ne 0) {
+              $package = 'true'
+            } elseif ($changed | Where-Object { $_ -match '^(Cargo\.toml|Cargo\.lock|desktop/Cargo\.toml|build\.rs|desktop/build\.rs|scripts/|installer/|\.github/workflows/)' }) {
+              $package = 'true'
+            }
+          }
+          "package=$package" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
       - name: Rust, desktop and GPUI smoke tests
         timeout-minutes: 25
         run: ./scripts/test.ps1
+      - name: Prune temporary UI smoke binaries before cache save
+        run: Remove-Item -Recurse -Force -ErrorAction SilentlyContinue target\ui-smoke, target\ui-bridge
       - name: Clippy
         run: cargo clippy --workspace --locked --all-targets -- -D warnings
       - name: Test isolated installer and update handoff
         run: ./scripts/test-installer.ps1
       - name: Package executable installer, portable app and corresponding source
+        if: steps.scope.outputs.package == 'true'
         run: ./scripts/package.ps1 -UseCurrentVersion
       - name: Verify packaged files and published desktop
+        if: steps.scope.outputs.package == 'true'
         run: python scripts/verify-package.py --smoke-shell
       - uses: actions/upload-artifact@v4
+        if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' }}
         with:
           name: release-files-attempt-${{ github.run_attempt }}
           path: |

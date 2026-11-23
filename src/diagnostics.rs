@@ -161,7 +161,7 @@ pub(crate) fn account(a: &Account) -> Value {
             "Network" | "RateLimit" | "Auth" | "Permission" | "TargetUnavailable" |
             "Unsupported" | "Other" | "SessionLost" | "ConnectionFailed" |
             "ConfirmedTerminalDisconnect" | "NormalExit" | "SessionConflict" |
-            "NetworkDisconnect" | "AfkKick" => a.recovery_reason.as_str(),
+            "NetworkDisconnect" | "AfkKick" | "StartupExit" => a.recovery_reason.as_str(),
             _ => "unspecified",
         },
         "reason": reason(a.last_error.as_deref().unwrap_or("")),
@@ -339,6 +339,23 @@ pub(crate) fn reason(message: &str) -> &'static str {
             "launch_coordination_unavailable",
         ),
         ("Restart is already in progress", "restart_already_pending"),
+        (
+            "Restart pending; waiting for previous launch to clear",
+            "restart_waiting_retired_launch",
+        ),
+        (
+            "Restart pending; waiting for old client to exit",
+            "restart_waiting_old_process",
+        ),
+        (
+            "Restart pending; checking for surviving client",
+            "restart_exit_pending",
+        ),
+        (
+            "Launch failed before connection",
+            "exited_before_connection",
+        ),
+        ("Reconciling exited client", "process_exit_pending"),
         ("Idle disconnect", "afk_kick"),
         ("Launch ended without a client", "verified_launch_absence"),
     ] {
