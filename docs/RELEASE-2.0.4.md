@@ -1,6 +1,8 @@
 # RoLauncher 2.0.4
 
-Upcoming release fixing process-exit reconciliation delays, manual Restart reliability, and lifecycle status reporting after Roblox exits before connection.
+Released November 23, 2026.
+
+Fixes process-exit reconciliation delays, manual Restart reliability, and lifecycle status reporting after Roblox exits before connection.
 
 ## Highlights
 
@@ -12,5 +14,4 @@ Upcoming release fixing process-exit reconciliation delays, manual Restart relia
 
 ## Upgrade notes
 
-- Local builds use `2.0.4-dev.<hex>` development identities until `2.0.4` is published.
-- Saved account lists remain compatible with 2.0.3 without manual migration.
+- Install over 2.0.3 or earlier 2.0.x releases to keep your existing accounts, saved games, and settings.

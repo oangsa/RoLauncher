@@ -1,4 +1,4 @@
-2.0.4 — Upcoming release
+2.0.4 — 2026-11-23
 
 - Fixed process-exit reconciliation waiting up to 90 seconds or blocking on unrelated accounts' bootstrappers and metadata failures.
 - Fixed manual Restart across unresolved trackers, pending-exit, pre-dispatch, paused, and launcher-reopen states without Stop then Start.
