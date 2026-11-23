@@ -6294,3 +6294,690 @@ async fn six_accounts_simultaneous_api_failure_and_complete_outage_recovery() {
     drop(engine);
     std::fs::remove_dir_all(path).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn group_c_immediate_exit_loop_recovers_fast_and_updates_diagnostics() {
+    let prep = Preparation::default();
+    let (url, server) = http_fixture(prep.clone()).await;
+    let (mut engine, path) = engine_fixture(2, &url, true);
+
+    #[derive(Default)]
+    struct Sim {
+        players: Vec<platform::Player>,
+        alive: HashMap<u32, bool>,
+        exit_codes: HashMap<u32, u32>,
+        next_pid: u32,
+        launches: Vec<(String, String)>,
+    }
+    let sim = Arc::new(Mutex::new(Sim {
+        next_pid: 10_000,
+        ..Default::default()
+    }));
+    let now_cell = Arc::new(Mutex::new(Instant::now()));
+
+    {
+        let sim_l = sim.clone();
+        let sim_d = sim.clone();
+        let sim_a = sim.clone();
+        let sim_e = sim.clone();
+        let clock_ref = now_cell.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_spacing = Duration::from_millis(10);
+        inner.launch_readiness_timeout = Duration::from_millis(50);
+        inner.clock = Some(Arc::new(move || *clock_ref.lock().unwrap()));
+        inner.launch_hook = Some(Arc::new(move |uri, account_id| {
+            let tracker = uri
+                .split("browsertrackerid:")
+                .nth(1)
+                .and_then(|rest| rest.split('+').next())
+                .unwrap_or("")
+                .to_string();
+            let mut s = sim_l.lock().unwrap();
+            s.next_pid += 1;
+            let pid = s.next_pid;
+            s.launches.push((account_id.to_string(), tracker.clone()));
+            s.players.push(platform::Player {
+                pid,
+                creation_time: format!("ct-{pid}"),
+                tracker,
+            });
+            s.alive.insert(pid, true);
+            s.exit_codes.insert(pid, 0xc000_0005);
+            Ok(())
+        }));
+        inner.discovery_hook = Some(Arc::new(move || {
+            let s = sim_d.lock().unwrap();
+            let mut scan = platform::ProcessScan::default();
+            scan.players = s.players.clone();
+            Ok(scan)
+        }));
+        inner.alive_hook = Some(Arc::new(move |id| {
+            let s = sim_a.lock().unwrap();
+            Ok(*s.alive.get(&id.pid).unwrap_or(&false))
+        }));
+        inner.close_hook = None;
+        inner.owned_logs_hook = Some(Arc::new(|_| Ok(HashMap::new())));
+        inner.exit_info_hook = Some(Arc::new(move |id| {
+            let s = sim_e.lock().unwrap();
+            let code = *s.exit_codes.get(&id.pid).unwrap_or(&1);
+            Some(platform::ProcessExitInfo {
+                clean: code == 0,
+                exit_code: Some(code),
+                lifetime_ms: Some(850),
+            })
+        }));
+    }
+
+    // Account 2 is healthy and running throughout.
+    let acc2_id = platform::Player {
+        pid: 20196,
+        creation_time: "healthy-2".into(),
+        tracker: "201960000001".into(),
+    };
+    {
+        let mut s = sim.lock().unwrap();
+        s.players.push(acc2_id.clone());
+        s.alive.insert(20196, true);
+    }
+    let acc2_gen = engine.snapshot().accounts[1].generation;
+    engine
+        .update("2", acc2_gen, |a| {
+            a.desired_running = true;
+            a.status = Status::Running;
+            a.tracker = Some("201960000001".into());
+            a.process = Some(acc2_id.identity(acc2_gen));
+            a.connected_since = Some(Utc::now());
+        })
+        .unwrap();
+
+    let e_launch = engine.clone();
+    let launcher = tokio::spawn(async move { e_launch.launch_loop().await });
+    let e_mon = engine.clone();
+    let monitor = tokio::spawn(async move { e_mon.monitor_loop().await });
+
+    // Cycle 1..5: Account 1 launches, attaches PID, exits within 1s, reconciles in 5s (NOT 90s!).
+    for cycle in 1..=5 {
+        if cycle > 1 {
+            // Fast-forward next_retry so Backoff dispatches immediately without sleeping 10..160s.
+            let g = engine.snapshot().accounts[0].generation;
+            engine
+                .update("1", g, |a| {
+                    a.next_retry = Some(Utc::now() - ChronoDuration::seconds(1));
+                })
+                .unwrap();
+            engine.0.wake.notify_waiters();
+        }
+        wait_for(&prep.tickets, cycle, &prep.entered).await;
+        prep.release.notify_one();
+        prep.release.notify_waiters();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while sim.lock().unwrap().launches.len() < cycle {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        *now_cell.lock().unwrap() += Duration::from_secs(2);
+        engine.0.wake.notify_waiters();
+
+        // Wait for process attachment (Status::Unknown + process Some).
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let a = &engine.snapshot().accounts[0];
+                if a.process.is_some() && a.status == Status::Unknown {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let pid = engine.snapshot().accounts[0].process.as_ref().unwrap().pid;
+        // Simulate immediate exit (~1s after launch) with no successor.
+        {
+            let mut s = sim.lock().unwrap();
+            s.alive.insert(pid, false);
+            s.players.retain(|p| p.pid != pid);
+        }
+        engine.0.wake.notify_waiters();
+
+        // Wait for monitor to observe exit and enter pending reconciliation.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let snap = engine.snapshot();
+                if snap
+                    .account_lifecycle
+                    .get("1")
+                    .is_some_and(|lc| lc.process_exit_observed && lc.exit_reconciliation_pending)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        // Check diagnostics accuracy while exit_reconciliation_pending is true.
+        let diag = engine.diagnostics();
+        let d1 = &diag["accounts"][0];
+        assert_eq!(d1["exit_pending"], true);
+        assert_eq!(d1["exit_reconciliation_pending"], true);
+        assert_eq!(d1["process_exit_observed"], true);
+        assert!(d1["verified_pid"].is_null());
+        assert_eq!(d1["exited_pid"], pid);
+        assert_eq!(d1["last_exit_code"], 0xc000_0005u32);
+        assert_eq!(d1["last_process_lifetime_ms"], 850);
+        assert_eq!(d1["last_termination_source"], "external_or_client_exit");
+
+        // Advance virtual clock by 6s (far less than the old 90s ownership_deadline!).
+        *now_cell.lock().unwrap() += Duration::from_secs(6);
+        engine.0.wake.notify_waiters();
+
+        let expected_status = if cycle < 5 {
+            Status::Backoff
+        } else {
+            Status::NeedsAttention
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let a = &engine.snapshot().accounts[0];
+                if a.process.is_none() && a.status == expected_status {
+                    break;
+                }
+                *now_cell.lock().unwrap() += Duration::from_millis(250);
+                engine.0.wake.notify_waiters();
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let snap = engine.snapshot();
+        assert_eq!(snap.accounts[0].failures, cycle as u32);
+        assert_eq!(snap.accounts[1].status, Status::Running);
+        assert_eq!(snap.accounts[1].process.as_ref().unwrap().pid, 20196);
+        if cycle < 5 {
+            assert_eq!(
+                snap.account_lifecycle["1"].phase,
+                LifecyclePhase::LaunchFailedBeforeConnection
+            );
+        } else {
+            assert_eq!(
+                snap.account_lifecycle["1"].phase,
+                LifecyclePhase::ActionRequired
+            );
+        }
+    }
+
+    // Manual Restart from NeedsAttention recovers Account 1 and launches cycle 6!
+    engine.command("1", "restart").unwrap();
+    wait_for(&prep.tickets, 6, &prep.entered).await;
+    prep.release.notify_one();
+    prep.release.notify_waiters();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while sim.lock().unwrap().launches.len() < 6 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    *now_cell.lock().unwrap() += Duration::from_secs(2);
+    engine.0.wake.notify_waiters();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let a = &engine.snapshot().accounts[0];
+            if a.process.is_some() && a.failures == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(sim.lock().unwrap().launches.len(), 6);
+
+    let diag_text = engine.diagnostics().to_string();
+    assert!(!diag_text.contains("DISPOSABLE_FIXTURE"));
+    assert!(!diag_text.contains("roblox-player:"));
+    assert!(!diag_text.contains(".ROBLOSECURITY"));
+    assert!(!diag_text.contains("privateServerLinkCode"));
+
+    engine.shutdown();
+    launcher.await.unwrap();
+    monitor.await.unwrap();
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn group_c_pre_exit_final_log_drain_captures_last_signal_before_tail_removal() {
+    let prep = Preparation::default();
+    let (url, server) = http_fixture(prep.clone()).await;
+    let (mut engine, path) = engine_fixture(1, &url, false);
+    let log_path = path.join("player-11001.log");
+    std::fs::write(&log_path, "").unwrap();
+
+    let identity = ProcessIdentity {
+        pid: 11001,
+        creation_time: "ct-11001".into(),
+        tracker: "110010000001".into(),
+        generation: engine.snapshot().accounts[0].generation,
+    };
+    let alive = Arc::new(AtomicBool::new(true));
+    {
+        let alive_flag = alive.clone();
+        let log_file = log_path.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.alive_hook = Some(Arc::new(move |_| Ok(alive_flag.load(Ordering::Acquire))));
+        inner.discovery_hook = Some(Arc::new(move || Ok(platform::ProcessScan::default())));
+        inner.exit_info_hook = Some(Arc::new(|_| {
+            Some(platform::ProcessExitInfo {
+                clean: false,
+                exit_code: Some(1),
+                lifetime_ms: Some(750),
+            })
+        }));
+        inner.owned_logs_hook = Some(Arc::new(move |ids| {
+            let mut map = HashMap::new();
+            for id in ids {
+                if id.pid == 11001
+                    && let Ok(tail) = crate::logs::Tail::new(log_file.clone(), false)
+                {
+                    map.insert((id.pid, id.creation_time.clone()), tail);
+                }
+            }
+            Ok(map)
+        }));
+    }
+    let g = identity.generation;
+    engine
+        .update("1", g, |a| {
+            a.desired_running = true;
+            a.status = Status::Unknown;
+            a.tracker = Some(identity.tracker.clone());
+            a.process = Some(identity.clone());
+            a.connected_since = None;
+        })
+        .unwrap();
+
+    let e_mon = engine.clone();
+    let monitor = tokio::spawn(async move { e_mon.monitor_loop().await });
+
+    // Wait until monitor_loop has attached the owned log tail.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if engine
+                .0
+                .journal
+                .recent()
+                .iter()
+                .any(|e| e["event"] == "owned_log_attached")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    // Write final pre-exit log lines AND immediately mark process dead before next monitor tick.
+    std::fs::write(
+        &log_path,
+        "2026-11-23T09:00:01.000Z,1.0,1,6 [FLog::Network] Connection accepted from 127.0.0.1|53640\n",
+    )
+    .unwrap();
+    alive.store(false, Ordering::Release);
+    engine.0.wake.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if engine
+                .0
+                .journal
+                .recent()
+                .iter()
+                .any(|e| e["event"] == "process_exit_pending")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let journal = engine.0.journal.recent();
+    let pending_ev = journal
+        .iter()
+        .find(|e| e["event"] == "process_exit_pending")
+        .unwrap();
+    assert_eq!(pending_ev["details"]["owned_log_attached"], true);
+    assert_eq!(pending_ev["details"]["connected_before_exit"], true);
+    assert!(
+        journal.iter().any(
+            |e| e["event"] == "connection_signal" && e["details"]["source"] == "owned_disk_log"
+        )
+    );
+
+    engine.shutdown();
+    monitor.await.unwrap();
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn group_d_six_account_multi_instance_isolation_and_fairness() {
+    let prep = Preparation::default();
+    let (url, server) = http_fixture(prep.clone()).await;
+    let (mut engine, path) = engine_fixture(6, &url, true);
+
+    #[derive(Default)]
+    struct MultiSim {
+        players: Vec<platform::Player>,
+        alive: HashMap<u32, bool>,
+        discovery_outage: bool,
+        handoff_uninspected: bool,
+        next_pid: u32,
+        launches: Vec<(String, String)>,
+    }
+    let sim = Arc::new(Mutex::new(MultiSim {
+        next_pid: 30_000,
+        ..Default::default()
+    }));
+    let now_cell = Arc::new(Mutex::new(Instant::now()));
+
+    {
+        let sim_l = sim.clone();
+        let sim_d = sim.clone();
+        let sim_a = sim.clone();
+        let clock_ref = now_cell.clone();
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        inner.launch_spacing = Duration::from_millis(10);
+        inner.launch_readiness_timeout = Duration::from_millis(50);
+        inner.clock = Some(Arc::new(move || *clock_ref.lock().unwrap()));
+        inner.launch_hook = Some(Arc::new(move |uri, account_id| {
+            let tracker = uri
+                .split("browsertrackerid:")
+                .nth(1)
+                .and_then(|rest| rest.split('+').next())
+                .unwrap_or("")
+                .to_string();
+            let mut s = sim_l.lock().unwrap();
+            s.next_pid += 1;
+            let pid = s.next_pid;
+            s.launches.push((account_id.to_string(), tracker.clone()));
+            s.players.push(platform::Player {
+                pid,
+                creation_time: format!("ct-{pid}"),
+                tracker,
+            });
+            s.alive.insert(pid, true);
+            Ok(())
+        }));
+        inner.discovery_hook = Some(Arc::new(move || {
+            let s = sim_d.lock().unwrap();
+            if s.discovery_outage {
+                return Err("Transient WMI outage".into());
+            }
+            let mut scan = platform::ProcessScan::default();
+            scan.players = s.players.clone();
+            scan.uninspected = usize::from(s.handoff_uninspected);
+            scan.metadata_pending = s.handoff_uninspected;
+            Ok(scan)
+        }));
+        inner.alive_hook = Some(Arc::new(move |id| {
+            let s = sim_a.lock().unwrap();
+            Ok(*s.alive.get(&id.pid).unwrap_or(&false))
+        }));
+        inner.close_hook = Some(Arc::new(|_, _| Ok(())));
+        inner.owned_logs_hook = Some(Arc::new(|_| Ok(HashMap::new())));
+    }
+
+    // Seed accounts 1..3 (Running), 4 (Unknown exiting during startup), 5 (Running -> handoff), 6 (Backoff -> Restart),
+    // plus an unrelated external Roblox process (PID 20196).
+    {
+        let mut s = sim.lock().unwrap();
+        for i in 1..=5u32 {
+            let pid = 20_000 + i;
+            let tracker = format!("10000000000{i}");
+            s.players.push(platform::Player {
+                pid,
+                creation_time: format!("ct-{pid}"),
+                tracker: tracker.clone(),
+            });
+            s.alive.insert(pid, true);
+        }
+        s.players.push(platform::Player {
+            pid: 20196,
+            creation_time: "external-20196".into(),
+            tracker: "999999999999".into(),
+        });
+    }
+    for i in 1..=6usize {
+        let id = i.to_string();
+        let g = engine.snapshot().accounts[i - 1].generation;
+        engine
+            .update(&id, g, |a| {
+                a.desired_running = true;
+                if i <= 3 || i == 5 {
+                    let pid = 20_000 + i as u32;
+                    a.status = Status::Running;
+                    a.tracker = Some(format!("10000000000{i}"));
+                    a.process = Some(ProcessIdentity {
+                        pid,
+                        creation_time: format!("ct-{pid}"),
+                        tracker: format!("10000000000{i}"),
+                        generation: g,
+                    });
+                    a.connected_since = Some(Utc::now());
+                } else if i == 4 {
+                    a.status = Status::Unknown;
+                    a.tracker = Some("100000000004".into());
+                    a.ownership_deadline = Some(Utc::now() + ChronoDuration::seconds(90));
+                    a.process = Some(ProcessIdentity {
+                        pid: 20004,
+                        creation_time: "ct-20004".into(),
+                        tracker: "100000000004".into(),
+                        generation: g,
+                    });
+                } else {
+                    a.status = Status::Backoff;
+                    a.failures = 1;
+                    a.next_retry = Some(Utc::now() + ChronoDuration::seconds(60));
+                }
+            })
+            .unwrap();
+    }
+
+    let e_launch = engine.clone();
+    let launcher = tokio::spawn(async move { e_launch.launch_loop().await });
+    let e_mon = engine.clone();
+    let monitor = tokio::spawn(async move { e_mon.monitor_loop().await });
+
+    // Trigger Account 4 immediate exit, Account 5 handoff (initially uninspected), and Account 6 Manual Restart.
+    {
+        let mut s = sim.lock().unwrap();
+        s.alive.insert(20004, false);
+        s.players.retain(|p| p.pid != 20004);
+        s.alive.insert(20005, false);
+        s.players.retain(|p| p.pid != 20005);
+        s.handoff_uninspected = true;
+        s.discovery_outage = true;
+    }
+    engine.command("6", "restart").unwrap();
+    wait_for(&prep.tickets, 1, &prep.entered).await;
+    prep.release.notify_one();
+    prep.release.notify_waiters();
+    engine.0.wake.notify_waiters();
+
+    // Wait until monitor_loop has observed both exits before advancing the virtual clock.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let snap = engine.snapshot();
+            let p4 = snap
+                .account_lifecycle
+                .get("4")
+                .is_some_and(|lc| lc.exit_reconciliation_pending);
+            let p5 = snap
+                .account_lifecycle
+                .get("5")
+                .is_some_and(|lc| lc.exit_reconciliation_pending);
+            if p4 && p5 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    // Advance 6s during transient outage: Account 4 & 5 must NOT falsely pause into NeedsAttention!
+    *now_cell.lock().unwrap() += Duration::from_secs(6);
+    engine.0.wake.notify_waiters();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_ne!(engine.snapshot().accounts[3].status, Status::NeedsAttention);
+    assert_ne!(engine.snapshot().accounts[4].status, Status::NeedsAttention);
+
+    // Clear outage; provide Account 5's successor and clear uninspected.
+    {
+        let mut s = sim.lock().unwrap();
+        s.discovery_outage = false;
+        s.handoff_uninspected = false;
+        s.players.push(platform::Player {
+            pid: 20505,
+            creation_time: "ct-20505".into(),
+            tracker: "100000000005".into(),
+        });
+        s.alive.insert(20505, true);
+    }
+    *now_cell.lock().unwrap() += Duration::from_secs(2);
+    engine.0.wake.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let snap = engine.snapshot();
+            if snap.accounts[3].status == Status::Backoff
+                && snap.accounts[3].process.is_none()
+                && snap.accounts[4].process.as_ref().map(|p| p.pid) == Some(20505)
+                && snap.accounts[5].process.is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    // Accounts 1..3 remained healthy and untouched throughout.
+    let final_snap = engine.snapshot();
+    for i in 0..3 {
+        assert_eq!(final_snap.accounts[i].status, Status::Running);
+        assert_eq!(
+            final_snap.accounts[i].process.as_ref().map(|p| p.pid),
+            Some(20001 + i as u32)
+        );
+    }
+
+    engine.shutdown();
+    launcher.await.unwrap();
+    monitor.await.unwrap();
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn group_e_deterministic_exit_reconciliation_latency_benchmark() {
+    let mut unplanned_ms = Vec::new();
+    let mut restart_ms = Vec::new();
+    for _ in 0..10 {
+        for is_restart in [false, true] {
+            let (engine, path) = super::tests::fixture(1);
+            engine.command("1", "start").unwrap();
+            let g = engine.snapshot().accounts[0].generation;
+            let identity = ProcessIdentity {
+                pid: 4100,
+                creation_time: "bench".into(),
+                tracker: "123456789012".into(),
+                generation: g,
+            };
+            engine
+                .update("1", g, |a| {
+                    a.status = Status::Unknown;
+                    a.tracker = Some(identity.tracker.clone());
+                    a.ownership_deadline = Some(Utc::now() + ChronoDuration::seconds(90));
+                    a.process = Some(identity.clone());
+                })
+                .unwrap();
+            if is_restart {
+                engine.command("1", "restart").unwrap();
+            }
+            let acc = engine.snapshot().accounts[0].clone();
+            let id = acc.process.clone().unwrap();
+            let t0 = Instant::now();
+            let pending = PendingExit {
+                observed: t0,
+                observed_utc: Utc::now(),
+                clean: false,
+                exit_code: Some(1),
+                lifetime_ms: Some(900),
+                connected_before_exit: false,
+                launcher_requested_close: is_restart,
+                owned_log_attached: false,
+            };
+            let mut step = Duration::ZERO;
+            while step <= Duration::from_secs(10) {
+                if engine.reconcile_exit_scan(
+                    &acc,
+                    &id,
+                    &pending,
+                    t0 + step,
+                    t0 + step,
+                    ExitScan {
+                        available: true,
+                        players: &[],
+                        inaccessible: 0,
+                        uninspected: 0,
+                        metadata_pending: false,
+                        bootstrapper_active: false,
+                        has_unowned_child: false,
+                        target_metadata_pending: false,
+                    },
+                    None,
+                ) == ExitReconciliation::ConfirmedExited
+                {
+                    break;
+                }
+                step += Duration::from_millis(250);
+            }
+            assert!(engine.snapshot().accounts[0].process.is_none());
+            if is_restart {
+                restart_ms.push(step.as_millis() as f64);
+            } else {
+                unplanned_ms.push(step.as_millis() as f64);
+            }
+            drop(engine);
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+    unplanned_ms.sort_by(f64::total_cmp);
+    restart_ms.sort_by(f64::total_cmp);
+    assert!(unplanned_ms[9] <= 5000.0);
+    assert!(restart_ms[9] <= 1000.0);
+    println!(
+        "EXIT_RECONCILIATION_LATENCY {}",
+        serde_json::json!({
+            "unplanned_exit_p50_ms": unplanned_ms[5],
+            "unplanned_exit_p95_ms": unplanned_ms[9],
+            "manual_restart_p50_ms": restart_ms[5],
+            "manual_restart_p95_ms": restart_ms[9],
+            "prior_coupled_deadline_ms": 90000.0
+        })
+    );
+}

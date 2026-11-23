@@ -1060,27 +1060,29 @@ fn handoff_discards_old_automatic_authority_but_retains_explicit_commands_and_pa
 }
 
 #[test]
-fn exit_settlement_requires_both_a_five_second_grace_and_the_existing_launch_deadline() {
+fn exit_settlement_decouples_from_ownership_deadline_and_bounds_bootstrapper_wait() {
     let now = Instant::now();
     let utc = Utc::now();
     let pending = PendingExit {
         observed: now,
+        observed_utc: utc,
         clean: true,
+        exit_code: Some(0),
+        lifetime_ms: Some(1200),
+        connected_before_exit: false,
+        launcher_requested_close: false,
+        owned_log_attached: false,
     };
     let mut a = Account::new("1".into(), "fixture".into());
-    assert!(!pending.settled(&a, now + Duration::from_secs(4), utc));
-    assert!(pending.settled(&a, now + Duration::from_secs(5), utc));
+    assert!(!pending.settled(&a, now + Duration::from_secs(4), false));
+    assert!(pending.settled(&a, now + Duration::from_secs(5), false));
+    // Even with a 90s ownership_deadline still set on the account, confirmed exit settles at 5s.
     a.ownership_deadline = Some(utc + ChronoDuration::seconds(90));
-    assert!(!pending.settled(
-        &a,
-        now + Duration::from_secs(89),
-        utc + ChronoDuration::seconds(89)
-    ));
-    assert!(pending.settled(
-        &a,
-        now + Duration::from_secs(90),
-        utc + ChronoDuration::seconds(90)
-    ));
+    assert!(!pending.settled(&a, now + Duration::from_secs(4), false));
+    assert!(pending.settled(&a, now + Duration::from_secs(5), false));
+    // An active bootstrapper during an unplanned pre-connection exit extends grace up to 15s (not 90s).
+    assert!(!pending.settled(&a, now + Duration::from_secs(14), true));
+    assert!(pending.settled(&a, now + Duration::from_secs(15), true));
 }
 
 #[test]
@@ -1106,10 +1108,16 @@ fn connected_game_retires_bootstrap_deadline_and_cleanup_settles_in_one_second()
     let now = Instant::now();
     let pending = PendingExit {
         observed: now,
+        observed_utc: Utc::now(),
         clean: true,
+        exit_code: Some(0),
+        lifetime_ms: Some(1200),
+        connected_before_exit: true,
+        launcher_requested_close: true,
+        owned_log_attached: true,
     };
-    assert!(!pending.settled(&f.account(), now + Duration::from_millis(999), Utc::now()));
-    assert!(pending.settled(&f.account(), now + Duration::from_secs(1), Utc::now()));
+    assert!(!pending.settled(&f.account(), now + Duration::from_millis(999), false));
+    assert!(pending.settled(&f.account(), now + Duration::from_secs(1), false));
 }
 
 #[test]
@@ -3642,4 +3650,698 @@ fn target_scoped_verification_refuses_inaccessible_uninspected_conflicting_and_h
         f_handoff.account().process.as_ref().map(|p| p.pid),
         Some(parent_id.pid + 500)
     );
+}
+
+fn make_pending_exit(observed: Instant, clean: bool, connected_before_exit: bool) -> PendingExit {
+    PendingExit {
+        observed,
+        observed_utc: Utc::now(),
+        clean,
+        exit_code: Some(if clean { 0 } else { 1 }),
+        lifetime_ms: Some(900),
+        connected_before_exit,
+        launcher_requested_close: false,
+        owned_log_attached: false,
+    }
+}
+
+#[test]
+fn group_a_exit_settlement_all_scenarios() {
+    // 1 & 2. Immediate post-verification exit with 90s ownership_deadline settles at 5s (not 90s),
+    // and stale pre-exit scan returns AwaitingFreshObservation.
+    {
+        let f = Fixture::new();
+        let acc = f.account();
+        let identity = acc.process.clone().unwrap();
+        f.engine
+            .update("1", acc.generation, |a| {
+                a.status = Status::Unknown;
+                a.connected_since = None;
+                a.ownership_deadline = Some(Utc::now() + ChronoDuration::seconds(90));
+            })
+            .unwrap();
+        let acc = f.account();
+        let t0 = Instant::now();
+        let pending = make_pending_exit(t0 + Duration::from_secs(1), false, false);
+
+        // Stale scan started BEFORE pending.observed -> AwaitingFreshObservation.
+        let decision = f.engine.reconcile_exit_scan(
+            &acc,
+            &identity,
+            &pending,
+            t0,
+            t0 + Duration::from_secs(10),
+            ExitScan {
+                available: true,
+                players: &[],
+                inaccessible: 0,
+                uninspected: 0,
+                metadata_pending: false,
+                bootstrapper_active: false,
+                has_unowned_child: false,
+                target_metadata_pending: false,
+            },
+            None,
+        );
+        assert_eq!(decision, ExitReconciliation::AwaitingFreshObservation);
+        assert!(f.account().process.is_some());
+
+        // Fresh scan before 5s grace -> AwaitingHandoff.
+        let decision = f.engine.reconcile_exit_scan(
+            &acc,
+            &identity,
+            &pending,
+            t0 + Duration::from_secs(2),
+            t0 + Duration::from_secs(5),
+            ExitScan {
+                available: true,
+                players: &[],
+                inaccessible: 0,
+                uninspected: 0,
+                metadata_pending: false,
+                bootstrapper_active: false,
+                has_unowned_child: false,
+                target_metadata_pending: false,
+            },
+            None,
+        );
+        assert_eq!(decision, ExitReconciliation::AwaitingHandoff);
+
+        // Fresh complete scan at 5s with 0 successors, even though ownership_deadline is still +85s -> ConfirmedExited.
+        let decision = f.engine.reconcile_exit_scan(
+            &acc,
+            &identity,
+            &pending,
+            t0 + Duration::from_secs(6),
+            t0 + Duration::from_secs(6),
+            ExitScan {
+                available: true,
+                players: &[],
+                inaccessible: 0,
+                uninspected: 0,
+                metadata_pending: false,
+                bootstrapper_active: false,
+                has_unowned_child: false,
+                target_metadata_pending: false,
+            },
+            None,
+        );
+        assert_eq!(decision, ExitReconciliation::ConfirmedExited);
+        let after = f.account();
+        assert!(after.process.is_none() && after.tracker.is_none());
+        assert_eq!(after.status, Status::Backoff);
+        assert_eq!(after.failures, 1);
+    }
+
+    // 3. Another account has a different tracker (e.g. PID 20196) -> does not block affected account.
+    {
+        let f = Fixture::new();
+        let acc = f.account();
+        let identity = acc.process.clone().unwrap();
+        let t0 = Instant::now();
+        let pending = make_pending_exit(t0, false, false);
+        let unrelated = vec![platform::Player {
+            pid: 20196,
+            creation_time: "other-account-20196".into(),
+            tracker: f.engine.snapshot().accounts[1].tracker.clone().unwrap(),
+        }];
+        let decision = f.engine.reconcile_exit_scan(
+            &acc,
+            &identity,
+            &pending,
+            t0 + Duration::from_secs(5),
+            t0 + Duration::from_secs(5),
+            ExitScan {
+                available: true,
+                players: &unrelated,
+                inaccessible: 0,
+                uninspected: 0,
+                metadata_pending: false,
+                bootstrapper_active: false,
+                has_unowned_child: false,
+                target_metadata_pending: false,
+            },
+            None,
+        );
+        assert_eq!(decision, ExitReconciliation::ConfirmedExited);
+        assert!(f.account().process.is_none());
+    }
+
+    // 4 & 5. Late handoff metadata waits without false NeedsAttention, then attaches successor.
+    {
+        let f = Fixture::new();
+        let acc = f.account();
+        let identity = acc.process.clone().unwrap();
+        let t0 = Instant::now();
+        let pending = make_pending_exit(t0, true, false);
+        let wait_decision = f.engine.reconcile_exit_scan(
+            &acc,
+            &identity,
+            &pending,
+            t0 + Duration::from_secs(6),
+            t0 + Duration::from_secs(6),
+            ExitScan {
+                available: true,
+                players: &[],
+                inaccessible: 0,
+                uninspected: 1,
+                metadata_pending: true,
+                bootstrapper_active: false,
+                has_unowned_child: true,
+                target_metadata_pending: false,
+            },
+            None,
+        );
+        assert_eq!(wait_decision, ExitReconciliation::ObservationUnavailable);
+        assert_ne!(f.account().status, Status::NeedsAttention);
+
+        let mut successor = f.players();
+        successor[0].pid += 200;
+        successor[0].creation_time = "handoff-child".into();
+        let attach_decision = f.engine.reconcile_exit_scan(
+            &f.account(),
+            &identity,
+            &pending,
+            t0 + Duration::from_secs(7),
+            t0 + Duration::from_secs(7),
+            ExitScan {
+                available: true,
+                players: &successor,
+                inaccessible: 0,
+                uninspected: 0,
+                metadata_pending: false,
+                bootstrapper_active: false,
+                has_unowned_child: false,
+                target_metadata_pending: false,
+            },
+            None,
+        );
+        assert_eq!(attach_decision, ExitReconciliation::SuccessorFound);
+        assert_eq!(
+            f.account().process.as_ref().map(|p| p.pid),
+            Some(identity.pid + 200)
+        );
+    }
+
+    // 6. Discovery temporarily unavailable retains state at 5s and escalates only at 30s.
+    {
+        let f = Fixture::new();
+        let acc = f.account();
+        let identity = acc.process.clone().unwrap();
+        let t0 = Instant::now();
+        let pending = make_pending_exit(t0, false, false);
+        let early = f.engine.reconcile_exit_scan(
+            &acc,
+            &identity,
+            &pending,
+            t0 + Duration::from_secs(6),
+            t0 + Duration::from_secs(6),
+            ExitScan {
+                available: false,
+                players: &[],
+                inaccessible: 1,
+                uninspected: 0,
+                metadata_pending: false,
+                bootstrapper_active: false,
+                has_unowned_child: false,
+                target_metadata_pending: false,
+            },
+            None,
+        );
+        assert_eq!(early, ExitReconciliation::ObservationUnavailable);
+        assert_ne!(f.account().status, Status::NeedsAttention);
+
+        let late = f.engine.reconcile_exit_scan(
+            &f.account(),
+            &identity,
+            &pending,
+            t0 + Duration::from_secs(31),
+            t0 + Duration::from_secs(31),
+            ExitScan {
+                available: false,
+                players: &[],
+                inaccessible: 1,
+                uninspected: 0,
+                metadata_pending: false,
+                bootstrapper_active: false,
+                has_unowned_child: false,
+                target_metadata_pending: false,
+            },
+            None,
+        );
+        assert_eq!(late, ExitReconciliation::ObservationUnavailable);
+        assert_eq!(f.account().status, Status::NeedsAttention);
+        assert_eq!(f.account().last_error.as_deref(), Some(HANDOFF_UNRESOLVED));
+    }
+
+    // 7. PID reused by unrelated process (different creation_time & empty/different tracker) is not misidentified.
+    {
+        let f = Fixture::new();
+        let acc = f.account();
+        let identity = acc.process.clone().unwrap();
+        let t0 = Instant::now();
+        let pending = make_pending_exit(t0, false, false);
+        let reused = vec![platform::Player {
+            pid: identity.pid,
+            creation_time: "reused-process-start".into(),
+            tracker: String::new(),
+        }];
+        let decision = f.engine.reconcile_exit_scan(
+            &acc,
+            &identity,
+            &pending,
+            t0 + Duration::from_secs(5),
+            t0 + Duration::from_secs(5),
+            ExitScan {
+                available: true,
+                players: &reused,
+                inaccessible: 0,
+                uninspected: 0,
+                metadata_pending: false,
+                bootstrapper_active: false,
+                has_unowned_child: false,
+                target_metadata_pending: false,
+            },
+            None,
+        );
+        assert_eq!(decision, ExitReconciliation::ConfirmedExited);
+        assert!(f.account().process.is_none());
+    }
+
+    // 8. Old process exit arriving during a new generation never overwrites current generation.
+    {
+        let f = Fixture::new();
+        let old_acc = f.account();
+        let old_id = old_acc.process.clone().unwrap();
+        f.engine.command("1", "restart").unwrap();
+        let new_acc = f.account();
+        assert_ne!(new_acc.generation, old_acc.generation);
+        let t0 = Instant::now();
+        let pending = make_pending_exit(t0, false, false);
+        let stale = f.engine.reconcile_exit_scan(
+            &old_acc,
+            &old_id,
+            &pending,
+            t0 + Duration::from_secs(5),
+            t0 + Duration::from_secs(5),
+            ExitScan {
+                available: true,
+                players: &[],
+                inaccessible: 0,
+                uninspected: 0,
+                metadata_pending: false,
+                bootstrapper_active: false,
+                has_unowned_child: false,
+                target_metadata_pending: false,
+            },
+            None,
+        );
+        assert_eq!(stale, ExitReconciliation::AwaitingFreshObservation);
+        assert_eq!(f.account().generation, new_acc.generation);
+    }
+
+    // 9. Launcher restarts during pending exit -> recovers from persisted state without 90s wait.
+    {
+        let f = Fixture::new();
+        let acc = f.account();
+        let identity = acc.process.clone().unwrap();
+        f.engine
+            .update("1", acc.generation, |a| {
+                a.status = Status::Unknown;
+                a.connected_since = None;
+                a.ownership_deadline = Some(Utc::now() + ChronoDuration::seconds(90));
+            })
+            .unwrap();
+        let reopened = Engine::open(Store::new(f.path.clone()).unwrap(), "fixture".into()).unwrap();
+        let restored = reopened.snapshot().accounts[0].clone();
+        assert_eq!(restored.status, Status::Unknown);
+        let t0 = Instant::now();
+        let pending = make_pending_exit(t0, false, false);
+        let decision = reopened.reconcile_exit_scan(
+            &restored,
+            &identity,
+            &pending,
+            t0 + Duration::from_secs(5),
+            t0 + Duration::from_secs(5),
+            ExitScan {
+                available: true,
+                players: &[],
+                inaccessible: 0,
+                uninspected: 0,
+                metadata_pending: false,
+                bootstrapper_active: false,
+                has_unowned_child: false,
+                target_metadata_pending: false,
+            },
+            None,
+        );
+        assert_eq!(decision, ExitReconciliation::ConfirmedExited);
+        assert!(reopened.snapshot().accounts[0].process.is_none());
+        assert_eq!(reopened.snapshot().accounts[0].status, Status::Backoff);
+    }
+}
+
+#[test]
+fn group_b_manual_restart_across_states_parity_and_edge_cases() {
+    // 1. Restart from Running, Unknown (alive and exited), Backoff (with auto_recovery true & false),
+    // Reconnecting, NeedsAttention (recoverable), Queued (pre-dispatch), Launching (pre-dispatch), PendingExit.
+    for state_case in [
+        "running",
+        "unknown_alive",
+        "unknown_exited_with_90s_deadline",
+        "backoff",
+        "backoff_auto_recovery_off",
+        "reconnecting",
+        "needs_attention_handoff",
+        "needs_attention_close_failed",
+        "needs_attention_retry_limit",
+        "needs_attention_rejoin_disabled",
+        "needs_attention_ambiguous_timeout",
+        "queued_pre_dispatch",
+        "launching_pre_dispatch",
+        "pending_exit",
+    ] {
+        let f = Fixture::new();
+        let acc = f.account();
+        let identity = acc.process.clone().unwrap();
+        let mut has_live_process = true;
+        match state_case {
+            "running" => {}
+            "unknown_alive" => {
+                f.engine
+                    .update("1", acc.generation, |a| {
+                        a.status = Status::Unknown;
+                        a.connected_since = None;
+                    })
+                    .unwrap();
+            }
+            "unknown_exited_with_90s_deadline" => {
+                f.engine
+                    .update("1", acc.generation, |a| {
+                        a.status = Status::Unknown;
+                        a.connected_since = None;
+                        a.ownership_deadline = Some(Utc::now() + ChronoDuration::seconds(90));
+                    })
+                    .unwrap();
+            }
+            "backoff" => {
+                f.engine
+                    .confirmed_exit("1", acc.generation, &identity, false);
+                has_live_process = false;
+            }
+            "backoff_auto_recovery_off" => {
+                f.engine
+                    .update("1", acc.generation, |a| {
+                        a.auto_recovery = false;
+                        a.status = Status::Backoff;
+                    })
+                    .unwrap();
+            }
+            "reconnecting" => {
+                f.engine
+                    .signal("1", acc.generation, Signal::SessionLost(Some(277)));
+                assert_eq!(f.account().status, Status::Reconnecting);
+            }
+            "needs_attention_handoff" => {
+                f.engine.pause_unresolved_exit(&acc, &identity);
+            }
+            "needs_attention_close_failed" => {
+                f.engine
+                    .update("1", acc.generation, |a| {
+                        a.status = Status::NeedsAttention;
+                        a.last_error = Some(CLOSE_FAILED_ERROR.into());
+                    })
+                    .unwrap();
+            }
+            "needs_attention_retry_limit" => {
+                f.engine
+                    .confirmed_exit("1", acc.generation, &identity, false);
+                let g = f.account().generation;
+                f.engine
+                    .update("1", g, |a| {
+                        a.failures = 5;
+                        a.status = Status::NeedsAttention;
+                    })
+                    .unwrap();
+                has_live_process = false;
+            }
+            "needs_attention_rejoin_disabled" => {
+                f.engine
+                    .update("1", acc.generation, |a| {
+                        a.auto_recovery = false;
+                        a.status = Status::NeedsAttention;
+                        a.last_error = Some(REJOIN_DISABLED.into());
+                        a.process = None;
+                        a.tracker = None;
+                    })
+                    .unwrap();
+                has_live_process = false;
+            }
+            "needs_attention_ambiguous_timeout" => {
+                f.engine
+                    .update("1", acc.generation, |a| {
+                        a.status = Status::NeedsAttention;
+                        a.last_error = Some(STARTUP_AMBIGUOUS_TIMEOUT_ERROR.into());
+                        a.process = None;
+                        a.tracker = None;
+                    })
+                    .unwrap();
+                has_live_process = false;
+            }
+            "queued_pre_dispatch" | "launching_pre_dispatch" => {
+                f.engine
+                    .update("1", acc.generation, |a| {
+                        a.process = None;
+                        a.tracker = None;
+                        a.ownership_deadline = None;
+                        a.status = if state_case == "queued_pre_dispatch" {
+                            Status::Queued
+                        } else {
+                            Status::Launching
+                        };
+                    })
+                    .unwrap();
+                has_live_process = false;
+            }
+            "pending_exit" => {
+                f.engine
+                    .update("1", acc.generation, |a| {
+                        a.status = Status::Unknown;
+                        a.connected_since = None;
+                        a.ownership_deadline = Some(Utc::now() + ChronoDuration::seconds(90));
+                    })
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+
+        let op = f.engine.command("1", "restart").unwrap();
+        let after_restart = f.account();
+        assert_eq!(after_restart.status, Status::Queued, "{state_case}");
+        assert!(after_restart.desired_running, "{state_case}");
+        assert_eq!(after_restart.failures, 0, "{state_case}");
+        assert_eq!(after_restart.operation_id, Some(op.id), "{state_case}");
+
+        if has_live_process {
+            assert_eq!(
+                after_restart.close_intent.as_ref().map(|i| i.reason),
+                Some(CloseReason::ManualRestart),
+                "{state_case}"
+            );
+            let t0 = Instant::now();
+            let pending = make_pending_exit(t0, false, false);
+            // Even with 90s ownership_deadline or pending_exit, ManualRestart settles in 1s!
+            assert!(!pending.settled(&after_restart, t0 + Duration::from_millis(900), false));
+            assert!(pending.settled(&after_restart, t0 + Duration::from_secs(1), false));
+            let decision = f.engine.reconcile_exit_scan(
+                &after_restart,
+                &identity,
+                &pending,
+                t0 + Duration::from_secs(1),
+                t0 + Duration::from_secs(1),
+                ExitScan {
+                    available: true,
+                    players: &[],
+                    inaccessible: 0,
+                    uninspected: 0,
+                    metadata_pending: false,
+                    bootstrapper_active: false,
+                    has_unowned_child: false,
+                    target_metadata_pending: false,
+                },
+                None,
+            );
+            assert_eq!(
+                decision,
+                ExitReconciliation::ConfirmedExited,
+                "{state_case}"
+            );
+        }
+
+        let final_acc = f.account();
+        assert_eq!(final_acc.status, Status::Queued, "{state_case}");
+        assert!(final_acc.process.is_none(), "{state_case}");
+        assert!(final_acc.tracker.is_none(), "{state_case}");
+        assert!(launch_ready(&final_acc, Utc::now()), "{state_case}");
+    }
+
+    // 2. Parity check: Restart reaches the same launch-ready final state as Stop -> Start.
+    {
+        let f_restart = Fixture::new();
+        let f_stop_start = Fixture::new();
+        let id_r = f_restart.account().process.clone().unwrap();
+        let id_s = f_stop_start.account().process.clone().unwrap();
+        f_restart.engine.command("1", "restart").unwrap();
+        f_restart
+            .engine
+            .confirmed_exit("1", f_restart.account().generation, &id_r, true);
+        f_stop_start.engine.command("1", "stop").unwrap();
+        f_stop_start
+            .engine
+            .confirmed_exit("1", f_stop_start.account().generation, &id_s, true);
+        f_stop_start.engine.command("1", "start").unwrap();
+
+        let ar = f_restart.account();
+        let as_ = f_stop_start.account();
+        assert_eq!(ar.status, as_.status);
+        assert_eq!(ar.desired_running, as_.desired_running);
+        assert_eq!(ar.process, as_.process);
+        assert_eq!(ar.tracker, as_.tracker);
+        assert_eq!(ar.failures, as_.failures);
+        assert!(launch_ready(&ar, Utc::now()));
+        assert!(launch_ready(&as_, Utc::now()));
+    }
+
+    // 3. Simultaneous Restarts, Stop while Restart is pending, and Restart surviving Engine::open.
+    {
+        let f = Fixture::new();
+        let first = f.engine.command("1", "restart").unwrap();
+        let dup = f.engine.command("1", "restart").unwrap_err();
+        assert!(dup.contains("Restart is already in progress"));
+        assert_eq!(f.account().operation_id, Some(first.id));
+
+        // Reopen preserves Status::Queued + ManualRestart so close_owned remains eligible!
+        let reopened = Engine::open(Store::new(f.path.clone()).unwrap(), "fixture".into()).unwrap();
+        let restored = reopened.snapshot().accounts[0].clone();
+        assert_eq!(restored.status, Status::Queued);
+        assert_eq!(
+            restored.close_intent.as_ref().map(|i| i.reason),
+            Some(CloseReason::ManualRestart)
+        );
+        let players = vec![platform::Player {
+            pid: restored.process.as_ref().unwrap().pid,
+            creation_time: restored.process.as_ref().unwrap().creation_time.clone(),
+            tracker: restored.process.as_ref().unwrap().tracker.clone(),
+        }];
+        let mut attempts = CloseAttempts::default();
+        assert!(
+            reopened
+                .close_owned(
+                    &restored,
+                    Instant::now(),
+                    &mut attempts,
+                    || Ok(players.clone()),
+                    |_, _| Ok(()),
+                )
+                .unwrap()
+        );
+
+        // Stop while Restart is pending cancels Restart and transitions to Stopping -> Stopped.
+        let stop_op = reopened.command("1", "stop").unwrap();
+        assert_eq!(reopened.snapshot().accounts[0].status, Status::Stopping);
+        let acc = reopened.snapshot().accounts[0].clone();
+        let id = acc.process.clone().unwrap();
+        reopened.owned_exit_observed_with_info(
+            &acc,
+            &id,
+            &make_pending_exit(Instant::now(), true, true),
+        );
+        assert_eq!(reopened.snapshot().accounts[0].status, Status::Stopped);
+        assert_eq!(reopened.operation(stop_op.id).unwrap().state, "completed");
+    }
+
+    // 4. Pre-dispatch Queued simultaneous Restarts supersede cleanly with 1 launch.
+    {
+        let f = Fixture::new();
+        let g = f.account().generation;
+        f.engine
+            .update("1", g, |a| {
+                a.process = None;
+                a.tracker = None;
+                a.status = Status::Queued;
+            })
+            .unwrap();
+        let op1 = f.engine.command("1", "restart").unwrap();
+        let op2 = f.engine.command("1", "restart").unwrap();
+        assert_ne!(op1.id, op2.id);
+        assert_eq!(f.engine.operation(op1.id).unwrap().state, "cancelled");
+        assert_eq!(f.engine.operation(op2.id).unwrap().state, "queued");
+        assert_eq!(f.account().operation_id, Some(op2.id));
+    }
+
+    // 5. Restart after failed protocol launch recovers from NeedsAttention to Queued.
+    {
+        let f = Fixture::new();
+        let g = f.account().generation;
+        f.engine
+            .update("1", g, |a| {
+                a.process = None;
+                a.tracker = None;
+                a.ownership_deadline = None;
+            })
+            .unwrap();
+        f.engine.failure(
+            "1",
+            g,
+            Failure::new(FailureKind::Unsupported, "Protocol launch failed"),
+        );
+        assert_eq!(f.account().status, Status::NeedsAttention);
+        f.engine.command("1", "restart").unwrap();
+        let after = f.account();
+        assert_eq!(after.status, Status::Queued);
+        assert_eq!(after.failures, 0);
+        assert!(launch_ready(&after, Utc::now()));
+    }
+
+    // 6. Restart during active automatic recovery upgrades close intent to ManualRestart.
+    {
+        let f = Fixture::new();
+        let g = f.account().generation;
+        f.engine
+            .update("1", g, |a| {
+                a.status = Status::Backoff;
+                a.close_intent = Some(CloseIntent {
+                    id: Uuid::new_v4(),
+                    generation: g,
+                    reason: CloseReason::AutomaticRecovery,
+                    operation_id: None,
+                    denied: false,
+                });
+            })
+            .unwrap();
+        let op = f.engine.command("1", "restart").unwrap();
+        let after = f.account();
+        assert_eq!(after.status, Status::Queued);
+        assert_eq!(after.operation_id, Some(op.id));
+        assert_eq!(
+            after.close_intent.as_ref().map(|i| i.reason),
+            Some(CloseReason::ManualRestart)
+        );
+    }
+
+    // 7. Restart on unresolved prior launch (process is None, tracker is Some) is cleanly rejected.
+    {
+        let f = Fixture::new();
+        let g = f.account().generation;
+        f.engine
+            .update("1", g, |a| {
+                a.process = None;
+                a.tracker = Some("987654321000".into());
+                a.status = Status::Unknown;
+            })
+            .unwrap();
+        let err = f.engine.command("1", "restart").unwrap_err();
+        assert!(err.contains("Stop"));
+        assert_eq!(f.account().tracker.as_deref(), Some("987654321000"));
+    }
 }
