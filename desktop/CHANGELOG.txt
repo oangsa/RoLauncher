@@ -1,3 +1,10 @@
+2.0.4 — Upcoming release
+
+- Fixed process-exit reconciliation waiting up to 90 seconds after a verified Roblox process exits before connection.
+- Fixed manual Restart across pending-exit, pre-dispatch, paused, and launcher-reopen states without requiring Stop then Start.
+- Added read-only OS exit codes, process lifetimes, and final pre-exit log drains to diagnostics for early client exits.
+- Fixed support export exit_pending, exited PID display, and lifecycle waiting labels in the Accounts view.
+
 2.0.3 — 2026-11-22
 
 - Mark published release dates in the in-app changelog and GitHub release notes instead of showing Upcoming release.
