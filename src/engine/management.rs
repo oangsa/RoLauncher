@@ -440,7 +440,48 @@ impl Engine {
         // Allowlist only: no aliases, private destinations, trackers, errors, tokens or credentials.
         serde_json::json!({ "version": env!("CARGO_PKG_VERSION"), "generated_at": Utc::now(), "network_suspended": s.network_suspended,
             "live_validation": "See docs/VALIDATION.md; unperformed checks remain unverified",
-            "accounts": s.database.accounts.iter().map(|a| serde_json::json!({"id": a.account.id,"status": a.account.status,"desired_running": a.account.desired_running,"operation_id": a.account.operation_id,"generation": a.account.generation,"exit_pending": a.account.status == Status::Stopping,"failures": a.account.failures,"next_retry": a.account.next_retry,"verified_pid": a.account.process.as_ref().map(|p|p.pid),"fallback_policy": a.account.fallback_policy,"public_fallback_active": a.account.public_fallback_active})).collect::<Vec<_>>(),
+            "accounts": s.database.accounts.iter().map(|a| {
+                let view = derive_lifecycle_view(&s, &a.account);
+                let verified_pid = if view.process_exit_observed {
+                    None
+                } else {
+                    a.account.process.as_ref().map(|p| p.pid)
+                };
+                let exited_pid = if view.process_exit_observed {
+                    a.account.process.as_ref().map(|p| p.pid)
+                } else {
+                    None
+                };
+                serde_json::json!({
+                    "id": a.account.id,
+                    "status": a.account.status,
+                    "lifecycle_phase": view.phase,
+                    "desired_running": a.account.desired_running,
+                    "operation_id": a.account.operation_id,
+                    "generation": a.account.generation,
+                    "process_identity_status": view.process_status,
+                    "process_exit_observed": view.process_exit_observed,
+                    "exit_pending": view.exit_reconciliation_pending || a.account.status == Status::Stopping,
+                    "exit_reconciliation_pending": view.exit_reconciliation_pending,
+                    "pending_reason": view.pending_reason,
+                    "handoff_deadline": view.handoff_deadline,
+                    "outstanding_launch_attempt": view.outstanding_launch_attempt,
+                    "outstanding_retired_launches": view.outstanding_retired_launches,
+                    "failures": a.account.failures,
+                    "next_retry": a.account.next_retry,
+                    "next_retry_eligible_at": view.next_retry_eligible_at,
+                    "current_retry_blocker": view.current_retry_blocker,
+                    "last_verified_launch_stage": view.last_verified_launch_stage,
+                    "last_confirmed_connection_state": view.last_confirmed_connection_state,
+                    "last_exit_code": view.last_exit_code,
+                    "last_process_lifetime_ms": view.last_process_lifetime_ms,
+                    "last_termination_source": view.last_termination_source,
+                    "verified_pid": verified_pid,
+                    "exited_pid": exited_pid,
+                    "fallback_policy": a.account.fallback_policy,
+                    "public_fallback_active": a.account.public_fallback_active
+                })
+            }).collect::<Vec<_>>(),
             "activity": s.database.activity, "recovery_log": self.0.journal.health(),
             "recent_recovery_events": self.0.journal.recent() })
     }

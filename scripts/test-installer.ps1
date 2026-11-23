@@ -106,5 +106,6 @@ fn main() {
         if (-not $taskProcess.HasExited) { $taskProcess.Kill(); $taskProcess.WaitForExit() }
         $taskProcess.Dispose()
     }
+    Remove-Item -LiteralPath $taskTest -Recurse -Force -ErrorAction SilentlyContinue
     Pop-Location
 }

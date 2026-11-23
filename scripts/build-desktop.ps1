@@ -1,4 +1,4 @@
-param([string]$OutputDirectory = 'target\desktop', [switch]$Smoke, [switch]$Debug)
+param([string]$OutputDirectory = 'target\desktop', [switch]$Smoke, [switch]$Debug, [switch]$Workspace)
 $ErrorActionPreference = 'Stop'
 $taskRoot = Split-Path -Parent $PSScriptRoot
 Push-Location -LiteralPath $taskRoot
@@ -91,13 +91,17 @@ int main(int argc, char **argv) {
     }
 
     $taskProfile = if ($Debug -or $OutputDirectory -match '(^|[\\/])debug([\\/]|$)') { 'debug' } else { 'release' }
-    $taskArgs = @('build', '-p', 'rolauncher-desktop', '--locked')
+    $taskArgs = if ($Workspace) {
+        @('build', '--workspace', '--locked')
+    } else {
+        @('build', '--workspace', '--bin', 'rolauncher-desktop', '--locked')
+    }
     if ($taskProfile -eq 'release') {
         $env:GPUI_FXC_PATH = Resolve-GpuiFxcCompiler -RootDir $taskRoot
         $taskArgs += '--release'
     }
     if ($Smoke) {
-        $taskArgs += '--features', 'ui-smoke'
+        $taskArgs += '--features', 'rolauncher-desktop/ui-smoke'
     }
 
     & cargo @taskArgs

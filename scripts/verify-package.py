@@ -130,3 +130,19 @@ if args.smoke_shell:
             process.terminate()
             process.wait(timeout=10)
         server.shutdown()
+    import shutil
+    import tempfile
+    diag_dir = Path(tempfile.mkdtemp(prefix="rolauncher-release-diag-"))
+    try:
+        subprocess.run(
+            [str(dist / name / "RoLauncher.exe"), "--diagnose", "--data-dir", str(diag_dir)],
+            check=True,
+            timeout=30,
+        )
+        compat = json.loads((diag_dir / "compatibility.json").read_text(encoding="utf-8"))
+        assert compat.get("platform") == "windows", compat
+        assert compat.get("memory_access") == "none", compat
+        assert compat.get("live_account_tests") == "not performed", compat
+        print("Published RoLauncher.exe --diagnose passed against an isolated temp directory.")
+    finally:
+        shutil.rmtree(diag_dir, ignore_errors=True)

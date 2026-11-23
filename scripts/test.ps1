@@ -19,7 +19,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
     & cargo fmt --check
     if ($LASTEXITCODE -ne 0) { throw 'Formatting check failed' }
-    & "$PSScriptRoot\build-desktop.ps1" -Smoke -OutputDirectory 'target\ui-smoke'
+    & "$PSScriptRoot\build-desktop.ps1" -Smoke -Debug -OutputDirectory 'target\ui-smoke'
     $taskSmokeFixture = Join-Path $PSScriptRoot 'test-ui-smoke.py'
     if (-not (Test-Path -LiteralPath $taskSmokeFixture)) {
         $taskSmokeFixture = Join-Path $PSScriptRoot 'ui-smoke.py'
@@ -29,7 +29,7 @@ try {
     $env:ROLAUNCHER_DESKTOP_TEST_EXE = Join-Path $taskRoot 'target\ui-smoke\RoLauncher.Desktop.exe'
     $env:ROLAUNCHER_UI_SMOKE_DIR = Join-Path $taskRoot 'target\ui-bridge'
     $env:ROLAUNCHER_UI_BRIDGE_SMOKE = '1'
-    & cargo test --locked desktop::tests::desktop_bootstrap_pipe_connects_to_real_rust_api_and_exits -- --ignored
+    & cargo test --workspace --locked --lib desktop::tests::desktop_bootstrap_pipe_connects_to_real_rust_api_and_exits -- --ignored
     if ($LASTEXITCODE -ne 0) { throw 'Rust/GPUI bootstrap test failed' }
     Remove-Item Env:ROLAUNCHER_DESKTOP_TEST_EXE,Env:ROLAUNCHER_UI_SMOKE_DIR,Env:ROLAUNCHER_UI_BRIDGE_SMOKE
 } finally { Pop-Location }

@@ -69,7 +69,9 @@ fn verified_handle_evidence_survives_wmi_outage_but_new_unknown_processes_block_
 fn metadata_recovery_binds_only_the_process_observed_with_the_same_creation_time() {
     let player = current_player();
     let (sender, receiver) = std::sync::mpsc::channel();
-    sender.send(Ok(vec![tracked(&player)])).unwrap();
+    sender
+        .send(Ok((vec![tracked(&player)], Vec::new())))
+        .unwrap();
     let mut discovery = Discovery {
         tracked: Vec::new(),
         pending: Some(receiver),
@@ -109,7 +111,9 @@ fn refreshed_tracker_conflict_revokes_cached_attribution_without_rebinding_an_ac
     let mut updated = old.clone();
     updated.tracker = "987654321012".into();
     let (sender, receiver) = std::sync::mpsc::channel();
-    sender.send(Ok(vec![tracked(&updated)])).unwrap();
+    sender
+        .send(Ok((vec![tracked(&updated)], Vec::new())))
+        .unwrap();
     let mut discovery = Discovery {
         tracked: vec![tracked(&old)],
         pending: Some(receiver),
@@ -455,4 +459,84 @@ fn lifecycle_native_discovery_latency() {
         );
     }
     println!("LIFECYCLE_NATIVE_DISCOVERY {}", serde_json::json!(reports));
+}
+
+#[test]
+fn account_scoped_scan_filters_unrelated_bootstrapper_inaccessible_and_uninspected_processes() {
+    let target = ProcessIdentity {
+        pid: 1001,
+        creation_time: "133000000000000000".into(),
+        tracker: "111111111111".into(),
+        generation: Uuid::nil(),
+    };
+    let mut other_owned = std::collections::HashSet::new();
+    other_owned.insert(2001);
+
+    let mut scan = ProcessScan {
+        players: vec![
+            Player {
+                pid: 2001,
+                creation_time: "133000000000000000".into(),
+                tracker: String::new(),
+            },
+            Player {
+                pid: 2002,
+                creation_time: "133000000000000000".into(),
+                tracker: String::new(),
+            },
+            Player {
+                pid: 9001,
+                creation_time: "132999900000000000".into(), // > 60s older than target
+                tracker: String::new(),
+            },
+        ],
+        inaccessible: 1,
+        uninspected: 3,
+        inaccessible_processes: vec![InaccessibleProcess {
+            pid: 8888,
+            parent_pid: 2001,
+        }],
+        bootstrappers: vec![ObservedBootstrapper {
+            pid: 3001,
+            parent_pid: 0,
+            creation_time: "133000000000000000".into(),
+            tracker: "222222222222".into(),
+            inspected: true,
+        }],
+        ..Default::default()
+    };
+    scan.uninspected_pids.insert(2001);
+    scan.uninspected_pids.insert(2002);
+    scan.uninspected_pids.insert(9001);
+    scan.set_parent(2002, 3001);
+
+    assert!(!scan.bootstrapper_relevant_for(&target.tracker, Some(target.pid), &other_owned, true));
+    assert_eq!(scan.inaccessible_relevant_for(&target), 0);
+    assert_eq!(scan.uninspected_relevant_for(&target, &other_owned), 0);
+
+    // Bootstrapper belonging to target account IS relevant, and its uninspected child is relevant.
+    scan.bootstrappers.push(ObservedBootstrapper {
+        pid: 3002,
+        parent_pid: 0,
+        creation_time: "133000000000000000".into(),
+        tracker: target.tracker.clone(),
+        inspected: true,
+    });
+    scan.players.push(Player {
+        pid: 1002,
+        creation_time: "133000000000000000".into(),
+        tracker: String::new(),
+    });
+    scan.uninspected_pids.insert(1002);
+    scan.set_parent(1002, 3002);
+    assert!(scan.bootstrapper_relevant_for(&target.tracker, Some(target.pid), &other_owned, true));
+    assert_eq!(scan.uninspected_relevant_for(&target, &other_owned), 1);
+
+    // Inaccessible direct child of target IS relevant.
+    scan.inaccessible_processes.push(InaccessibleProcess {
+        pid: 1003,
+        parent_pid: target.pid,
+    });
+    assert!(scan.has_unowned_child(target.pid));
+    assert_eq!(scan.inaccessible_relevant_for(&target), 1);
 }

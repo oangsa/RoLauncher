@@ -8,7 +8,11 @@ pub struct ProcessScan {
     pub unowned: usize,
     pub uninspected: usize,
     pub metadata_pending: bool,
+    pub metadata_failed: bool,
     pub bootstrapper_active: bool,
+    pub uninspected_pids: std::collections::HashSet<u32>,
+    pub inaccessible_processes: Vec<InaccessibleProcess>,
+    pub bootstrappers: Vec<ObservedBootstrapper>,
     parents: std::collections::HashMap<u32, u32>,
 }
 impl ProcessScan {
@@ -21,10 +25,161 @@ impl ProcessScan {
         Ok(self.players)
     }
 
+    pub fn parent_pid(&self, pid: u32) -> Option<u32> {
+        self.parents.get(&pid).copied()
+    }
+
+    #[cfg(test)]
+    pub fn set_parent(&mut self, child_pid: u32, parent_pid: u32) {
+        self.parents.insert(child_pid, parent_pid);
+    }
+
     pub fn has_unowned_child(&self, parent_pid: u32) -> bool {
         self.players.iter().any(|p| {
             p.tracker.is_empty() && self.parents.get(&p.pid).copied() == Some(parent_pid)
+        }) || self
+            .inaccessible_processes
+            .iter()
+            .any(|ip| ip.parent_pid == parent_pid)
+    }
+
+    pub fn bootstrapper_relevant_for(
+        &self,
+        tracker: &str,
+        target_pid: Option<u32>,
+        other_owned_pids: &std::collections::HashSet<u32>,
+        other_account_launching: bool,
+    ) -> bool {
+        if self.bootstrappers.is_empty() {
+            return self.bootstrapper_active;
+        }
+        let other_bootstrapper_pids: std::collections::HashSet<u32> = self
+            .bootstrappers
+            .iter()
+            .filter(|b| !b.tracker.is_empty() && b.tracker != tracker)
+            .map(|b| b.pid)
+            .collect();
+        self.bootstrappers.iter().any(|b| {
+            (!tracker.is_empty() && b.tracker == tracker)
+                || target_pid.is_some_and(|pid| b.parent_pid == pid)
+                || (b.tracker.is_empty()
+                    && !other_owned_pids.contains(&b.parent_pid)
+                    && !other_bootstrapper_pids.contains(&b.parent_pid)
+                    && (b.inspected || self.metadata_pending || !other_account_launching))
         })
+    }
+
+    pub fn inaccessible_relevant_for(&self, target: &ProcessIdentity) -> usize {
+        if self.inaccessible_processes.is_empty() {
+            return self.inaccessible;
+        }
+        let relevant_bootstrappers: std::collections::HashSet<u32> = self
+            .bootstrappers
+            .iter()
+            .filter(|b| {
+                (!target.tracker.is_empty() && b.tracker == target.tracker)
+                    || b.parent_pid == target.pid
+            })
+            .map(|b| b.pid)
+            .collect();
+        self.inaccessible_processes
+            .iter()
+            .filter(|ip| {
+                ip.pid == target.pid
+                    || ip.parent_pid == target.pid
+                    || relevant_bootstrappers.contains(&ip.parent_pid)
+            })
+            .count()
+    }
+
+    pub fn uninspected_relevant_for(
+        &self,
+        target: &ProcessIdentity,
+        other_owned_pids: &std::collections::HashSet<u32>,
+    ) -> usize {
+        if self.uninspected_pids.is_empty() {
+            return self.uninspected;
+        }
+        let other_bootstrapper_pids: std::collections::HashSet<u32> = self
+            .bootstrappers
+            .iter()
+            .filter(|b| !b.tracker.is_empty() && b.tracker != target.tracker)
+            .map(|b| b.pid)
+            .collect();
+        let target_birth = target.creation_time.parse::<u64>().ok();
+        self.uninspected_pids
+            .iter()
+            .filter(|pid| {
+                if other_owned_pids.contains(pid) {
+                    return false;
+                }
+                if self.parents.get(pid).is_some_and(|pp| {
+                    other_owned_pids.contains(pp) || other_bootstrapper_pids.contains(pp)
+                }) {
+                    return false;
+                }
+                if let Some(tb) = target_birth
+                    && let Some(p) = self.players.iter().find(|p| p.pid == **pid)
+                    && let Ok(pb) = p.creation_time.parse::<u64>()
+                    && pb.saturating_add(600_000_000) < tb
+                {
+                    return false;
+                }
+                true
+            })
+            .count()
+    }
+
+    pub fn inaccessible_relevant_for_retired(
+        &self,
+        tracker: &str,
+        process: Option<&ProcessIdentity>,
+    ) -> usize {
+        if self.inaccessible_processes.is_empty() {
+            return self.inaccessible;
+        }
+        let target_pid = process.map(|p| p.pid);
+        let relevant_bootstrappers: std::collections::HashSet<u32> = self
+            .bootstrappers
+            .iter()
+            .filter(|b| {
+                (!tracker.is_empty() && b.tracker == tracker)
+                    || target_pid.is_some_and(|pid| b.parent_pid == pid)
+            })
+            .map(|b| b.pid)
+            .collect();
+        self.inaccessible_processes
+            .iter()
+            .filter(|ip| {
+                target_pid.is_some_and(|pid| ip.pid == pid || ip.parent_pid == pid)
+                    || relevant_bootstrappers.contains(&ip.parent_pid)
+            })
+            .count()
+    }
+
+    pub fn uninspected_relevant_for_retired(
+        &self,
+        tracker: &str,
+        other_owned_pids: &std::collections::HashSet<u32>,
+    ) -> usize {
+        if self.uninspected_pids.is_empty() {
+            return self.uninspected;
+        }
+        let other_bootstrapper_pids: std::collections::HashSet<u32> = self
+            .bootstrappers
+            .iter()
+            .filter(|b| !b.tracker.is_empty() && b.tracker != tracker)
+            .map(|b| b.pid)
+            .collect();
+        self.uninspected_pids
+            .iter()
+            .filter(|pid| {
+                !other_owned_pids.contains(pid)
+                    && !self.parents.get(pid).is_some_and(|pp| {
+                        other_owned_pids.contains(pp) || other_bootstrapper_pids.contains(pp)
+                    })
+            })
+            .count()
     }
 
     pub fn verified_for_target(&self, target: &ProcessIdentity) -> Result<Vec<Player>, String> {
@@ -87,12 +242,19 @@ struct TrackedProcess {
 // Windows process handles support query/wait from another thread. Ownership is
 // transferred, never duplicated without the kernel, and Drop closes each once.
 unsafe impl Send for TrackedProcess {}
-type MetadataResult = Result<Vec<TrackedProcess>, String>;
+struct TrackedBootstrapper {
+    handle: Handle,
+    bootstrapper: ObservedBootstrapper,
+}
+unsafe impl Send for TrackedBootstrapper {}
+type MetadataResult = Result<(Vec<TrackedProcess>, Vec<TrackedBootstrapper>), String>;
 #[derive(Default)]
 struct Discovery {
     tracked: Vec<TrackedProcess>,
+    tracked_bootstrappers: Vec<TrackedBootstrapper>,
     pending: Option<std::sync::mpsc::Receiver<MetadataResult>>,
     last_query: Option<std::time::Instant>,
+    last_query_failed: bool,
 }
 static DISCOVERY: std::sync::LazyLock<std::sync::Mutex<Discovery>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(Discovery::default()));
@@ -122,6 +284,10 @@ fn native_players(verify: impl Fn(HANDLE) -> bool) -> Result<ProcessScan, String
             if unsafe { ProcessIdToSessionId(row.th32ProcessID, &mut owner_session) } == 0 {
                 if unsafe { GetLastError() } != ERROR_INVALID_PARAMETER {
                     scan.inaccessible += 1;
+                    scan.inaccessible_processes.push(InaccessibleProcess {
+                        pid: row.th32ProcessID,
+                        parent_pid: row.th32ParentProcessID,
+                    });
                 }
             } else if owner_session == session {
                 match process_handle(
@@ -132,6 +298,10 @@ fn native_players(verify: impl Fn(HANDLE) -> bool) -> Result<ProcessScan, String
                         if unsafe { WaitForSingleObject(handle.0, 0) } == WAIT_TIMEOUT {
                             if image_path(handle.0).is_none() {
                                 scan.inaccessible += 1;
+                                scan.inaccessible_processes.push(InaccessibleProcess {
+                                    pid: row.th32ProcessID,
+                                    parent_pid: row.th32ParentProcessID,
+                                });
                                 next = unsafe { Process32NextW(snapshot.0, &mut row) } != 0;
                                 continue;
                             }
@@ -146,12 +316,24 @@ fn native_players(verify: impl Fn(HANDLE) -> bool) -> Result<ProcessScan, String
                                     })
                                 }
                                 Ok(_) => scan.rejected += 1,
-                                Err(_) => scan.inaccessible += 1,
+                                Err(_) => {
+                                    scan.inaccessible += 1;
+                                    scan.inaccessible_processes.push(InaccessibleProcess {
+                                        pid: row.th32ProcessID,
+                                        parent_pid: row.th32ParentProcessID,
+                                    });
+                                }
                             }
                         }
                     }
                     Err(_) if unsafe { GetLastError() } == ERROR_INVALID_PARAMETER => {}
-                    Err(_) => scan.inaccessible += 1,
+                    Err(_) => {
+                        scan.inaccessible += 1;
+                        scan.inaccessible_processes.push(InaccessibleProcess {
+                            pid: row.th32ProcessID,
+                            parent_pid: row.th32ParentProcessID,
+                        });
+                    }
                 }
             }
         } else if exe_name.eq_ignore_ascii_case("RobloxPlayerLauncher.exe")
@@ -168,6 +350,13 @@ fn native_players(verify: impl Fn(HANDLE) -> bool) -> Result<ProcessScan, String
                 && valid_bootstrapper_image(handle.0)
             {
                 scan.bootstrapper_active = true;
+                scan.bootstrappers.push(ObservedBootstrapper {
+                    pid: row.th32ProcessID,
+                    parent_pid: row.th32ParentProcessID,
+                    creation_time: process_time(handle.0).unwrap_or_default(),
+                    tracker: String::new(),
+                    inspected: false,
+                });
             }
         }
         next = unsafe { Process32NextW(snapshot.0, &mut row) } != 0;
@@ -178,7 +367,10 @@ fn native_players(verify: impl Fn(HANDLE) -> bool) -> Result<ProcessScan, String
     Ok(scan)
 }
 
-fn query_trackers(mut candidates: Vec<TrackedProcess>) -> MetadataResult {
+fn query_trackers(
+    mut candidates: Vec<TrackedProcess>,
+    mut bootstrapper_candidates: Vec<TrackedBootstrapper>,
+) -> MetadataResult {
     #[derive(Deserialize)]
     #[serde(rename_all = "PascalCase")]
     struct Row {
@@ -190,10 +382,11 @@ fn query_trackers(mut candidates: Vec<TrackedProcess>) -> MetadataResult {
         wmi::WMIConnection::new().map_err(|_| "Windows process metadata unavailable")?;
     let rows: Vec<Row> = connection
         .raw_query(
-            "SELECT ProcessId, ParentProcessId, CommandLine FROM Win32_Process WHERE Name = 'RobloxPlayerBeta.exe'",
+            "SELECT ProcessId, ParentProcessId, CommandLine FROM Win32_Process WHERE Name = 'RobloxPlayerBeta.exe' OR Name = 'RobloxPlayerLauncher.exe' OR Name = 'RobloxPlayerInstaller.exe'",
         )
         .map_err(|_| "Windows process query failed")?;
     let mut inspected = Vec::new();
+    let mut inspected_bootstrappers = Vec::new();
     for row in rows {
         if let Some(pos) = candidates
             .iter()
@@ -221,10 +414,23 @@ fn query_trackers(mut candidates: Vec<TrackedProcess>) -> MetadataResult {
             } else if candidate.parent.is_none() && !candidate.roblox_parent && no_tracker_args {
                 inspected.push(candidate);
             }
+        } else if let Some(pos) = bootstrapper_candidates
+            .iter()
+            .position(|b| b.bootstrapper.pid == row.process_id)
+            && unsafe { WaitForSingleObject(bootstrapper_candidates[pos].handle.0, 0) }
+                == WAIT_TIMEOUT
+            && let Some(cmd) = row.command_line.as_deref()
+        {
+            let mut b = bootstrapper_candidates.swap_remove(pos);
+            b.bootstrapper.tracker = tracker_from_command_line(cmd).unwrap_or_default();
+            b.bootstrapper.inspected = true;
+            inspected_bootstrappers.push(b);
         }
     }
     inspected.retain(|c| unsafe { WaitForSingleObject(c.handle.0, 0) } == WAIT_TIMEOUT);
-    Ok(inspected)
+    inspected_bootstrappers
+        .retain(|b| unsafe { WaitForSingleObject(b.handle.0, 0) } == WAIT_TIMEOUT);
+    Ok((inspected, inspected_bootstrappers))
 }
 
 impl Discovery {
@@ -234,14 +440,28 @@ impl Discovery {
                 Ok(result) => {
                     self.pending = None;
                     self.last_query = Some(std::time::Instant::now());
-                    if let Ok(found) = result {
-                        self.tracked.retain(|old| {
-                            !found.iter().any(|new| {
-                                old.player.pid == new.player.pid
-                                    && old.player.creation_time == new.player.creation_time
-                            })
-                        });
-                        self.tracked.extend(found);
+                    match result {
+                        Ok((found, found_bootstrappers)) => {
+                            self.last_query_failed = false;
+                            self.tracked.retain(|old| {
+                                !found.iter().any(|new| {
+                                    old.player.pid == new.player.pid
+                                        && old.player.creation_time == new.player.creation_time
+                                })
+                            });
+                            self.tracked.extend(found);
+                            self.tracked_bootstrappers.retain(|old| {
+                                !found_bootstrappers.iter().any(|new| {
+                                    old.bootstrapper.pid == new.bootstrapper.pid
+                                        && old.bootstrapper.creation_time
+                                            == new.bootstrapper.creation_time
+                                })
+                            });
+                            self.tracked_bootstrappers.extend(found_bootstrappers);
+                        }
+                        Err(_) => {
+                            self.last_query_failed = true;
+                        }
                     }
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => self.pending = None,
@@ -274,6 +494,22 @@ impl Discovery {
                 }
                 _ => false,
             });
+        self.tracked_bootstrappers.retain(|b| {
+            let alive = unsafe { WaitForSingleObject(b.handle.0, 0) } == WAIT_TIMEOUT;
+            alive
+                && scan.bootstrappers.iter().any(|obs| {
+                    obs.pid == b.bootstrapper.pid
+                        && obs.creation_time == b.bootstrapper.creation_time
+                })
+        });
+        for obs in &mut scan.bootstrappers {
+            if let Some(cached) = self.tracked_bootstrappers.iter().find(|b| {
+                b.bootstrapper.pid == obs.pid && b.bootstrapper.creation_time == obs.creation_time
+            }) {
+                obs.tracker.clone_from(&cached.bootstrapper.tracker);
+                obs.inspected = cached.bootstrapper.inspected;
+            }
+        }
         let mut uninspected = 0;
         for player in &mut scan.players {
             if let Some(cached) = self.tracked.iter().find(|c| {
@@ -284,18 +520,28 @@ impl Discovery {
                 player.tracker.clone_from(&cached.player.tracker);
             } else if player.tracker.is_empty() {
                 uninspected += 1;
+                scan.uninspected_pids.insert(player.pid);
             }
         }
         scan.unowned = scan.players.iter().filter(|p| p.tracker.is_empty()).count();
         scan.uninspected = uninspected;
+        scan.metadata_failed = self.last_query_failed;
+        scan.bootstrapper_active = scan.bootstrapper_active || !scan.bootstrappers.is_empty();
+        let has_uninspected_bootstrappers = scan.bootstrappers.iter().any(|b| !b.inspected);
         if self.pending.is_none()
-            && !scan.players.is_empty()
+            && (!scan.players.is_empty() || !scan.bootstrappers.is_empty())
             && self.last_query.is_none_or(|last| {
                 last.elapsed()
-                    >= std::time::Duration::from_secs(if scan.uninspected > 0 { 1 } else { 5 })
+                    >= std::time::Duration::from_secs(
+                        if scan.uninspected > 0 || has_uninspected_bootstrappers {
+                            1
+                        } else {
+                            5
+                        },
+                    )
             })
         {
-            if scan.players.len() > 512 {
+            if scan.players.len() + scan.bootstrappers.len() > 512 {
                 return Err("Process observation budget exceeded".into());
             }
             let candidates = scan
@@ -330,11 +576,30 @@ impl Discovery {
                         })
                 })
                 .collect();
+            let bootstrapper_candidates = scan
+                .bootstrappers
+                .iter()
+                .filter_map(|b| {
+                    let handle =
+                        process_handle(b.pid, PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE)
+                            .ok()?;
+                    (process_time(handle.0).ok()? == b.creation_time
+                        && unsafe { WaitForSingleObject(handle.0, 0) } == WAIT_TIMEOUT)
+                        .then(|| TrackedBootstrapper {
+                            handle,
+                            bootstrapper: ObservedBootstrapper {
+                                tracker: String::new(),
+                                inspected: false,
+                                ..b.clone()
+                            },
+                        })
+                })
+                .collect();
             let (sender, receiver) = std::sync::mpsc::sync_channel(1);
             std::thread::Builder::new()
                 .name("roblox-metadata".into())
                 .spawn(move || {
-                    let _ = sender.send(query_trackers(candidates));
+                    let _ = sender.send(query_trackers(candidates, bootstrapper_candidates));
                 })
                 .map_err(|_| "Process metadata worker unavailable")?;
             self.pending = Some(receiver);
