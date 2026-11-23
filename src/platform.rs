@@ -20,6 +20,21 @@ impl Player {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObservedBootstrapper {
+    pub pid: u32,
+    pub parent_pid: u32,
+    pub creation_time: String,
+    pub tracker: String,
+    pub inspected: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InaccessibleProcess {
+    pub pid: u32,
+    pub parent_pid: u32,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ProcessExitInfo {
     pub clean: bool,
@@ -272,6 +287,21 @@ mod imp {
                 && same_session(identity.pid)
                 && valid_player_image(handle.0))
             .then_some(Self(handle, identity.clone()))
+        }
+        #[cfg(test)]
+        pub fn from_test_pid(pid: u32) -> Option<Self> {
+            let handle =
+                process_handle(pid, PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE).ok()?;
+            let creation_time = process_time(handle.0).ok()?;
+            Some(Self(
+                handle,
+                ProcessIdentity {
+                    pid,
+                    creation_time,
+                    tracker: "123456".into(),
+                    generation: Uuid::nil(),
+                },
+            ))
         }
         pub fn exit_info(&self) -> Option<ProcessExitInfo> {
             let mut code = 0;
@@ -1528,5 +1558,20 @@ mod tests {
         assert!(!encrypted.contains("sample-session"));
         assert_eq!(&*unprotect(&encrypted).unwrap(), "sample-session");
         assert!(unprotect("bad-data").is_err());
+    }
+    #[cfg(windows)]
+    #[test]
+    fn exit_watch_records_nonzero_windows_exit_code_and_lifetime() {
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/C", "exit", "42"])
+            .spawn()
+            .unwrap();
+        let watch = imp::ExitWatch::from_test_pid(child.id()).unwrap();
+        let status = child.wait().unwrap();
+        assert_eq!(status.code(), Some(42));
+        let info = watch.exit_info().unwrap();
+        assert!(!info.clean);
+        assert_eq!(info.exit_code, Some(42));
+        assert!(info.lifetime_ms.is_some());
     }
 }

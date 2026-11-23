@@ -537,7 +537,7 @@ async fn accepted_protocol_without_a_process_retains_tracking_and_blocks_duplica
     let a = engine.snapshot().accounts[0].clone();
     assert!(a.tracker.is_some() && a.process.is_none());
     assert!(!launch_ready(&a, Utc::now() + ChronoDuration::hours(1)));
-    assert!(engine.command("1", "restart").is_err());
+    assert!(engine.command("1", "restart").is_ok());
     engine.command("1", "stop").unwrap();
     assert_eq!(engine.snapshot().accounts[0].status, Status::Stopping);
     assert!(engine.command("1", "start").is_err());
@@ -1715,8 +1715,15 @@ async fn cancel_first_launch_restart_unresolved_and_engine_shutdown_during_readi
     state.release.notify_waiters();
     t1.await.unwrap();
 
-    // Restarting an unresolved launch must be rejected until Stop + discovery clears its retired tracker.
+    // Restarting an unresolved launch retires its tracker safely, blocks duplicate launch,
+    // and rejects a second concurrent restart while pending.
+    let restart_op = engine.command("1", "restart").unwrap();
+    assert_eq!(restart_op.state, "queued");
     assert!(engine.command("1", "restart").is_err());
+    assert!(retired_blocks_launch(
+        &engine.0.state.lock().unwrap().database,
+        "1"
+    ));
 
     let e2 = engine.clone();
     let a2 = accounts[1].clone();
@@ -6945,7 +6952,9 @@ fn group_e_deterministic_exit_reconciliation_latency_benchmark() {
                         inaccessible: 0,
                         uninspected: 0,
                         metadata_pending: false,
+                        metadata_failed: false,
                         bootstrapper_active: false,
+                        other_account_launching: false,
                         has_unowned_child: false,
                         target_metadata_pending: false,
                     },
@@ -6980,4 +6989,205 @@ fn group_e_deterministic_exit_reconciliation_latency_benchmark() {
             "prior_coupled_deadline_ms": 90000.0
         })
     );
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn six_accounts_cross_account_bootstrapper_and_metadata_isolation_in_monitor_loop() {
+    struct ScanState {
+        now: Instant,
+        alive: HashMap<u32, bool>,
+        players: Vec<platform::Player>,
+        uninspected_pids: std::collections::HashSet<u32>,
+        inaccessible_processes: Vec<platform::InaccessibleProcess>,
+        bootstrappers: Vec<platform::ObservedBootstrapper>,
+        parents: HashMap<u32, u32>,
+        metadata_failed: bool,
+    }
+    let t0 = Instant::now();
+    let shared = Arc::new(Mutex::new(ScanState {
+        now: t0,
+        alive: HashMap::from([(101, false), (201, true), (301, true), (401, false)]),
+        players: vec![
+            // Account 3's process is live but uninspected (metadata unavailable for Account 3).
+            platform::Player {
+                pid: 301,
+                creation_time: "c301".into(),
+                tracker: String::new(),
+            },
+            // Account 2's launching process is live and uninspected under Account 2's bootstrapper.
+            platform::Player {
+                pid: 201,
+                creation_time: "c201".into(),
+                tracker: String::new(),
+            },
+        ],
+        uninspected_pids: std::collections::HashSet::from([301, 201]),
+        inaccessible_processes: vec![platform::InaccessibleProcess {
+            pid: 9901,
+            parent_pid: 301,
+        }],
+        bootstrappers: vec![platform::ObservedBootstrapper {
+            pid: 2200,
+            parent_pid: 0,
+            creation_time: "b2200".into(),
+            tracker: "200000000002".into(),
+            inspected: true,
+        }],
+        parents: HashMap::from([(201, 2200)]),
+        metadata_failed: false,
+    }));
+
+    let (mut engine, path) = super::tests::fixture(6);
+    {
+        let inner = Arc::get_mut(&mut engine.0).unwrap();
+        let s_clock = shared.clone();
+        inner.clock = Some(Arc::new(move || s_clock.lock().unwrap().now));
+        let s_alive = shared.clone();
+        inner.alive_hook = Some(Arc::new(move |id| {
+            Ok(*s_alive.lock().unwrap().alive.get(&id.pid).unwrap_or(&false))
+        }));
+        let s_disc = shared.clone();
+        inner.discovery_hook = Some(Arc::new(move || {
+            let s = s_disc.lock().unwrap();
+            let mut scan = platform::ProcessScan::default();
+            scan.players = s.players.clone();
+            scan.inaccessible = s.inaccessible_processes.len();
+            scan.unowned = s.uninspected_pids.len();
+            scan.uninspected = s.uninspected_pids.len();
+            scan.metadata_pending = false;
+            scan.metadata_failed = s.metadata_failed;
+            scan.bootstrapper_active = !s.bootstrappers.is_empty();
+            scan.uninspected_pids = s.uninspected_pids.clone();
+            scan.inaccessible_processes = s.inaccessible_processes.clone();
+            scan.bootstrappers = s.bootstrappers.clone();
+            for (child, parent) in &s.parents {
+                scan.set_parent(*child, *parent);
+            }
+            Ok(scan)
+        }));
+    }
+
+    // Account 1: Running, will exit immediately (no bootstrapper of its own).
+    // Account 2: Launching with attributed bootstrapper 2200 + uninspected child 201.
+    // Account 3: Running with process 301 whose metadata is uninspected & has inaccessible child 9901.
+    // Account 4: Exited process 401 with delayed direct-child handoff 402 (parent_pid = 401).
+    // Account 5: Unresolved tracker ("500000000005") -> manual Restart retires it.
+    // Account 6: Active SessionConflict cooldown + Restart.
+    engine
+        .transaction(|s| {
+            let specs = [
+                (
+                    "1",
+                    Status::Running,
+                    Some((101, "c101", "100000000001")),
+                    None,
+                ),
+                ("2", Status::Launching, None, Some("200000000002")),
+                (
+                    "3",
+                    Status::Running,
+                    Some((301, "c301", "300000000003")),
+                    None,
+                ),
+                (
+                    "4",
+                    Status::Running,
+                    Some((401, "c401", "400000000004")),
+                    None,
+                ),
+                ("5", Status::Launching, None, Some("500000000005")),
+                ("6", Status::Backoff, None, None),
+            ];
+            for (id, status, proc_spec, tracker_spec) in specs {
+                let a = account_mut(s, id)?;
+                a.desired_running = true;
+                a.status = status;
+                if let Some((pid, ct, tr)) = proc_spec {
+                    a.process = Some(ProcessIdentity {
+                        pid,
+                        creation_time: ct.into(),
+                        tracker: tr.into(),
+                        generation: a.generation,
+                    });
+                    a.tracker = Some(tr.into());
+                } else if let Some(tr) = tracker_spec {
+                    a.tracker = Some(tr.into());
+                    a.ownership_deadline = Some(Utc::now() + ChronoDuration::seconds(90));
+                }
+                if id == "6" {
+                    a.recovery_reason = "SessionConflict".into();
+                    a.next_retry = Some(Utc::now() + ChronoDuration::seconds(60));
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    // Restart Account 5 (unresolved tracker) and Account 6 (cooldown).
+    engine.command("5", "restart").unwrap();
+    engine.command("6", "restart").unwrap();
+    assert!(retired_blocks_launch(
+        &engine.0.state.lock().unwrap().database,
+        "5"
+    ));
+
+    // Attach Account 4's delayed direct-child handoff 402 in scan.
+    {
+        let mut s = shared.lock().unwrap();
+        s.players.push(platform::Player {
+            pid: 402,
+            creation_time: "c402".into(),
+            tracker: "400000000004".into(),
+        });
+        s.parents.insert(402, 401);
+        s.alive.insert(402, true);
+    }
+
+    let running = engine.clone();
+    let monitor = tokio::spawn(async move { running.monitor_loop().await });
+
+    // Let monitor observe initial exits (Account 1 & Account 4) and attach Account 4's successor.
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    // Advance clock by 6s (> 5s unplanned grace, < 15s bootstrapper ceiling).
+    // Account 1 MUST settle at 5s despite Account 2's active bootstrapper & Account 3's uninspected/inaccessible procs!
+    shared.lock().unwrap().now = t0 + Duration::from_secs(6);
+    engine.0.wake.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let snap = engine.snapshot();
+            let a1 = snap.accounts.iter().find(|a| a.id == "1").unwrap();
+            let a4 = snap.accounts.iter().find(|a| a.id == "4").unwrap();
+            if a1.process.is_none()
+                && a1.status == Status::Backoff
+                && a4.process.as_ref().map(|p| p.pid) == Some(402)
+            {
+                break;
+            }
+            engine.0.wake.notify_waiters();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("Account 1 should settle in 5s and Account 4 should attach successor 402");
+
+    let snap = engine.snapshot();
+    let a3 = snap.accounts.iter().find(|a| a.id == "3").unwrap();
+    assert_eq!(a3.process.as_ref().map(|p| p.pid), Some(301));
+    assert_ne!(a3.status, Status::NeedsAttention);
+    let a5 = snap.accounts.iter().find(|a| a.id == "5").unwrap();
+    assert_eq!(a5.status, Status::Queued);
+    let a6 = snap.accounts.iter().find(|a| a.id == "6").unwrap();
+    assert_eq!(a6.status, Status::Queued);
+    assert_eq!(a6.recovery_reason, "SessionConflict");
+    assert!(!launch_ready(a6, Utc::now()));
+
+    engine.shutdown();
+    tokio::time::timeout(Duration::from_secs(2), monitor)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(engine);
+    std::fs::remove_dir_all(path).unwrap();
 }

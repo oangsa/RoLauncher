@@ -539,6 +539,13 @@ pub fn format_waiting_detail(
         let remaining = (next - now).num_seconds().max(0);
         return format!("Rate-limit cooldown · {remaining}s");
     }
+    if account
+        .last_error
+        .as_deref()
+        .is_some_and(|e| e.starts_with("Restart pending"))
+    {
+        return "Restart pending".to_string();
+    }
     if account.process.is_some()
         && matches!(account.status.as_str(), "queued" | "stopping" | "backoff")
     {
@@ -596,7 +603,13 @@ pub fn format_waiting_detail_with_lifecycle(
             "checking_for_surviving_client" => {
                 return "Checking for surviving client".to_string();
             }
-            "preparing_replacement" => return "Preparing replacement launch".to_string(),
+            "preparing_replacement" => {
+                return if lc.outstanding_retired_launches > 0 {
+                    "Restart pending · waiting for previous launch to clear".to_string()
+                } else {
+                    "Preparing replacement launch".to_string()
+                };
+            }
             "waiting_for_network" => return "Waiting for internet / Roblox service".to_string(),
             "launch_failed_before_connection" => {
                 return if account.next_retry.is_some() {
@@ -797,6 +810,25 @@ mod tests {
         assert!(
             format_waiting_detail_with_lifecycle(&account, Some(&failed_lc), false, now)
                 .starts_with("Launch failed before connection · Retry in ")
+        );
+        let retired_lc = AccountLifecycleView {
+            phase: "preparing_replacement".into(),
+            outstanding_retired_launches: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            format_waiting_detail_with_lifecycle(&account, Some(&retired_lc), false, now),
+            "Restart pending · waiting for previous launch to clear"
+        );
+        let restart_acct = Account {
+            status: "queued".into(),
+            desired_running: true,
+            last_error: Some("Restart pending; waiting for previous launch to clear".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            format_waiting_detail(&restart_acct, false, now),
+            "Restart pending"
         );
     }
 }

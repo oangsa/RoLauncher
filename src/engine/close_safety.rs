@@ -18,7 +18,9 @@ pub(super) struct ExitScan<'a> {
     pub inaccessible: usize,
     pub uninspected: usize,
     pub metadata_pending: bool,
+    pub metadata_failed: bool,
     pub bootstrapper_active: bool,
+    pub other_account_launching: bool,
     pub has_unowned_child: bool,
     pub target_metadata_pending: bool,
 }
@@ -639,7 +641,9 @@ impl Engine {
                     inaccessible: 0,
                     uninspected: 0,
                     metadata_pending: false,
+                    metadata_failed: false,
                     bootstrapper_active: false,
+                    other_account_launching: false,
                     has_unowned_child: false,
                     target_metadata_pending: false,
                 },
@@ -690,11 +694,7 @@ impl Engine {
                     Some(pending.handoff_deadline_utc(&current, scan.bootstrapper_active));
                 return ExitReconciliation::AwaitingFreshObservation;
             }
-            if !scan.available
-                || scan.inaccessible > 0
-                || scan.uninspected > 0
-                || scan.target_metadata_pending
-            {
+            if !scan.available || scan.inaccessible > 0 || scan.target_metadata_pending {
                 let pause = forced_settled.unwrap_or_else(|| pending.observation_pause_due(now));
                 let changed = {
                     let rt = state
@@ -726,6 +726,58 @@ impl Engine {
                         "inaccessible": scan.inaccessible,
                         "uninspected": scan.uninspected,
                         "metadata_pending": scan.metadata_pending,
+                        "metadata_failed": scan.metadata_failed,
+                        "target_metadata_pending": scan.target_metadata_pending,
+                    }),
+                );
+                drop(state);
+                if pause {
+                    self.pause_unresolved_exit(&current, identity);
+                }
+                return ExitReconciliation::ObservationUnavailable;
+            }
+            let elapsed = now.saturating_duration_since(pending.observed);
+            let allow_settle_past_unrelated_metadata = !scan.has_unowned_child
+                && !scan.metadata_pending
+                && elapsed >= UNATTRIBUTED_METADATA_GRACE
+                && (!scan.metadata_failed || scan.other_account_launching);
+            if scan.uninspected > 0 && !allow_settle_past_unrelated_metadata {
+                let should_pause_on_timeout = scan.has_unowned_child
+                    || scan.metadata_pending
+                    || (scan.metadata_failed && !scan.other_account_launching);
+                let pause = forced_settled.unwrap_or_else(|| pending.observation_pause_due(now))
+                    && should_pause_on_timeout;
+                let changed = {
+                    let rt = state
+                        .runtime_lifecycle
+                        .entry(current.id.clone())
+                        .or_default();
+                    let changed = rt.exit_pending_reason != Some("observation_unavailable")
+                        || rt.process_inaccessible;
+                    rt.exit_observed = true;
+                    rt.exit_reconciliation_pending = true;
+                    rt.exit_pending_reason = Some("observation_unavailable");
+                    rt.exit_identity = Some((identity.pid, identity.creation_time.clone()));
+                    rt.process_inaccessible = false;
+                    rt.handoff_deadline =
+                        Some(pending.handoff_deadline_utc(&current, scan.bootstrapper_active));
+                    changed
+                };
+                if changed {
+                    let _ = self.0.events.send(snapshot(&state));
+                }
+                self.0.journal.record(
+                    "exit_reconciliation_checked",
+                    serde_json::json!({
+                        "account": crate::diagnostics::account(&current),
+                        "decision": "observation_unavailable",
+                        "settled": false,
+                        "uniquely_claimed": uniquely_claimed(&state, &current.id, identity, false),
+                        "candidates": [],
+                        "inaccessible": scan.inaccessible,
+                        "uninspected": scan.uninspected,
+                        "metadata_pending": scan.metadata_pending,
+                        "metadata_failed": scan.metadata_failed,
                         "target_metadata_pending": scan.target_metadata_pending,
                     }),
                 );
@@ -896,6 +948,7 @@ impl Engine {
                     "grace_elapsed_ms": elapsed.as_millis(),
                     "grace_required_ms": grace_required.as_millis(),
                     "bootstrapper_active": scan.bootstrapper_active,
+                    "ignored_unrelated_uninspected": scan.uninspected,
                 }),
             );
             if !settled {
@@ -1120,8 +1173,8 @@ impl Engine {
                     "candidates": players.iter().filter(|p| p.pid == identity.pid || p.tracker == identity.tracker)
                         .map(|p| crate::diagnostics::process(&p.identity(expected.generation))).collect::<Vec<_>>(),
                 }));
-                // The process can exit after the monitor's alive check, including after
-                // graceful closure. Absence is not proof of conflicting ownership.
+                // The process can exit after the monitor's alive check, even during an
+                // automatic recovery cycle, without proving conflicting ownership.
                 if (intent.reason == CloseReason::AutomaticRecovery
                     || attempts.graceful_submitted(&expected.id, &intent, identity))
                     && uniquely_claimed(&next, &expected.id, identity, false)
@@ -1282,12 +1335,54 @@ impl Engine {
         let record = &next.database.retired_launches[index];
         let intent = record.close_intent.clone();
         let identity = record.process.clone();
+        let launch_allowed = self.0.launch_allowed.load(Ordering::Acquire);
+        let environment_deferred =
+            identity
+                .as_ref()
+                .zip(intent.as_ref())
+                .is_some_and(|(identity, intent)| {
+                    !attempts.blocked(&expected.account_id, intent, identity)
+                        && intent.reason == CloseReason::ManualRestart
+                        && next
+                            .database
+                            .accounts
+                            .iter()
+                            .find(|a| a.account.id == expected.account_id)
+                            .is_some_and(|a| {
+                                a.account.close_intent.as_ref() == Some(intent)
+                                    && eligible(&a.account, intent, false, true)
+                                    && !eligible(
+                                        &a.account,
+                                        intent,
+                                        next.network_suspended,
+                                        launch_allowed,
+                                    )
+                            })
+                        && verified_unique(&next, &expected.account_id, identity, observed, true)
+                });
+        if environment_deferred {
+            if next.database.retired_launches[index].process != expected.process {
+                self.commit_close_state(&mut state, next)?;
+            }
+            self.0.journal.record(
+                "close_deferred",
+                serde_json::json!({
+                    "account_id": expected.account_id.parse::<u64>().ok(),
+                    "retired": true,
+                    "reason": if state.network_suspended { "network_suspended" } else { "launch_coordination_unavailable" },
+                }),
+            );
+            return Ok(false);
+        }
         let policy = identity
             .as_ref()
             .zip(intent.as_ref())
             .is_some_and(|(identity, intent)| {
                 !attempts.blocked(&expected.account_id, intent, identity)
-                    && intent.reason == CloseReason::UserStop
+                    && matches!(
+                        intent.reason,
+                        CloseReason::UserStop | CloseReason::ManualRestart
+                    )
                     && next
                         .database
                         .accounts
@@ -1295,7 +1390,12 @@ impl Engine {
                         .find(|a| a.account.id == expected.account_id)
                         .is_some_and(|a| {
                             a.account.close_intent.as_ref() == Some(intent)
-                                && eligible(&a.account, intent, next.network_suspended, false)
+                                && eligible(
+                                    &a.account,
+                                    intent,
+                                    next.network_suspended,
+                                    launch_allowed,
+                                )
                         })
                     && verified_unique(&next, &expected.account_id, identity, observed, true)
             });

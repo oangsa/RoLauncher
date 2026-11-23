@@ -3697,7 +3697,9 @@ fn group_a_exit_settlement_all_scenarios() {
                 inaccessible: 0,
                 uninspected: 0,
                 metadata_pending: false,
+                metadata_failed: false,
                 bootstrapper_active: false,
+                other_account_launching: false,
                 has_unowned_child: false,
                 target_metadata_pending: false,
             },
@@ -3719,7 +3721,9 @@ fn group_a_exit_settlement_all_scenarios() {
                 inaccessible: 0,
                 uninspected: 0,
                 metadata_pending: false,
+                metadata_failed: false,
                 bootstrapper_active: false,
+                other_account_launching: false,
                 has_unowned_child: false,
                 target_metadata_pending: false,
             },
@@ -3740,7 +3744,9 @@ fn group_a_exit_settlement_all_scenarios() {
                 inaccessible: 0,
                 uninspected: 0,
                 metadata_pending: false,
+                metadata_failed: false,
                 bootstrapper_active: false,
+                other_account_launching: false,
                 has_unowned_child: false,
                 target_metadata_pending: false,
             },
@@ -3777,7 +3783,9 @@ fn group_a_exit_settlement_all_scenarios() {
                 inaccessible: 0,
                 uninspected: 0,
                 metadata_pending: false,
+                metadata_failed: false,
                 bootstrapper_active: false,
+                other_account_launching: false,
                 has_unowned_child: false,
                 target_metadata_pending: false,
             },
@@ -3806,7 +3814,9 @@ fn group_a_exit_settlement_all_scenarios() {
                 inaccessible: 0,
                 uninspected: 1,
                 metadata_pending: true,
+                metadata_failed: false,
                 bootstrapper_active: false,
+                other_account_launching: false,
                 has_unowned_child: true,
                 target_metadata_pending: false,
             },
@@ -3830,7 +3840,9 @@ fn group_a_exit_settlement_all_scenarios() {
                 inaccessible: 0,
                 uninspected: 0,
                 metadata_pending: false,
+                metadata_failed: false,
                 bootstrapper_active: false,
+                other_account_launching: false,
                 has_unowned_child: false,
                 target_metadata_pending: false,
             },
@@ -3862,7 +3874,9 @@ fn group_a_exit_settlement_all_scenarios() {
                 inaccessible: 1,
                 uninspected: 0,
                 metadata_pending: false,
+                metadata_failed: false,
                 bootstrapper_active: false,
+                other_account_launching: false,
                 has_unowned_child: false,
                 target_metadata_pending: false,
             },
@@ -3883,7 +3897,9 @@ fn group_a_exit_settlement_all_scenarios() {
                 inaccessible: 1,
                 uninspected: 0,
                 metadata_pending: false,
+                metadata_failed: false,
                 bootstrapper_active: false,
+                other_account_launching: false,
                 has_unowned_child: false,
                 target_metadata_pending: false,
             },
@@ -3918,7 +3934,9 @@ fn group_a_exit_settlement_all_scenarios() {
                 inaccessible: 0,
                 uninspected: 0,
                 metadata_pending: false,
+                metadata_failed: false,
                 bootstrapper_active: false,
+                other_account_launching: false,
                 has_unowned_child: false,
                 target_metadata_pending: false,
             },
@@ -3950,7 +3968,9 @@ fn group_a_exit_settlement_all_scenarios() {
                 inaccessible: 0,
                 uninspected: 0,
                 metadata_pending: false,
+                metadata_failed: false,
                 bootstrapper_active: false,
+                other_account_launching: false,
                 has_unowned_child: false,
                 target_metadata_pending: false,
             },
@@ -3989,7 +4009,9 @@ fn group_a_exit_settlement_all_scenarios() {
                 inaccessible: 0,
                 uninspected: 0,
                 metadata_pending: false,
+                metadata_failed: false,
                 bootstrapper_active: false,
+                other_account_launching: false,
                 has_unowned_child: false,
                 target_metadata_pending: false,
             },
@@ -4165,7 +4187,9 @@ fn group_b_manual_restart_across_states_parity_and_edge_cases() {
                     inaccessible: 0,
                     uninspected: 0,
                     metadata_pending: false,
+                    metadata_failed: false,
                     bootstrapper_active: false,
+                    other_account_launching: false,
                     has_unowned_child: false,
                     target_metadata_pending: false,
                 },
@@ -4329,7 +4353,8 @@ fn group_b_manual_restart_across_states_parity_and_edge_cases() {
         );
     }
 
-    // 7. Restart on unresolved prior launch (process is None, tracker is Some) is cleanly rejected.
+    // 7. Restart on unresolved prior launch (process is None, tracker is Some) retires the
+    // unresolved tracker, blocks duplicate Restart, and respects Stop supersession.
     {
         let f = Fixture::new();
         let g = f.account().generation;
@@ -4340,8 +4365,329 @@ fn group_b_manual_restart_across_states_parity_and_edge_cases() {
                 a.status = Status::Unknown;
             })
             .unwrap();
+        let op = f.engine.command("1", "restart").unwrap();
+        assert_eq!(op.state, "queued");
+        assert!(f.account().tracker.is_none());
+        assert!(retired_blocks_launch(
+            &f.engine.0.state.lock().unwrap().database,
+            "1"
+        ));
         let err = f.engine.command("1", "restart").unwrap_err();
-        assert!(err.contains("Stop"));
-        assert_eq!(f.account().tracker.as_deref(), Some("987654321000"));
+        assert!(err.contains("Restart is already in progress"));
+        let stop_op = f.engine.command("1", "stop").unwrap();
+        assert_eq!(stop_op.state, "queued");
+        assert_eq!(f.account().status, Status::Stopping);
+        assert_eq!(
+            f.engine.0.state.lock().unwrap().database.retired_launches[0]
+                .close_intent
+                .as_ref()
+                .map(|i| i.reason),
+            Some(CloseReason::UserStop)
+        );
     }
+}
+
+#[test]
+fn manual_restart_with_unresolved_tracker_recovers_from_all_states_and_persists_across_reopen() {
+    for (status, auto_recovery, last_error) in [
+        (Status::Queued, true, None),
+        (Status::Launching, true, None),
+        (Status::Unknown, true, None),
+        (Status::Backoff, false, None),
+        (Status::Reconnecting, true, None),
+        (Status::NeedsAttention, true, Some(OWNERSHIP_TIMEOUT_ERROR)),
+        (
+            Status::NeedsAttention,
+            false,
+            Some(STARTUP_UNRESOLVED_ERROR),
+        ),
+    ] {
+        let f = Fixture::new();
+        let g = f.account().generation;
+        f.engine
+            .update("1", g, |a| {
+                a.process = None;
+                a.tracker = Some("777000111222".into());
+                a.status = status.clone();
+                a.auto_recovery = auto_recovery;
+                a.last_error = last_error.map(str::to_owned);
+                a.ownership_deadline = Some(Utc::now() + ChronoDuration::seconds(90));
+            })
+            .unwrap();
+
+        let op = f.engine.command("1", "restart").unwrap();
+        let after = f.account();
+        assert_eq!(after.status, Status::Queued, "{status:?}");
+        assert!(after.desired_running, "{status:?}");
+        assert!(after.tracker.is_none(), "{status:?}");
+        assert!(after.process.is_none(), "{status:?}");
+        assert_eq!(after.operation_id, Some(op.id), "{status:?}");
+        assert_eq!(
+            after.close_intent.as_ref().map(|i| i.reason),
+            Some(CloseReason::ManualRestart),
+            "{status:?}"
+        );
+        // Retired tracker blocks duplicate launch until cleared, even across reopen.
+        {
+            let state = f.engine.0.state.lock().unwrap();
+            assert!(retired_blocks_launch(&state.database, "1"));
+            assert!(Engine::check_dispatch_authorization(&state, &after, false, true).is_err());
+        }
+
+        let reopened = Engine::open(Store::new(f.path.clone()).unwrap(), "fixture".into()).unwrap();
+        let restored = reopened.snapshot().accounts[0].clone();
+        assert_eq!(restored.status, Status::Queued, "{status:?}");
+        assert_eq!(
+            restored.close_intent.as_ref().map(|i| i.reason),
+            Some(CloseReason::ManualRestart),
+            "{status:?}"
+        );
+        let lc = &reopened.snapshot().account_lifecycle["1"];
+        assert_eq!(lc.phase, LifecyclePhase::PreparingReplacement);
+        assert_eq!(lc.outstanding_retired_launches, 1);
+    }
+}
+
+#[test]
+fn manual_restart_with_retired_late_client_closes_then_clears_and_respects_cooldowns() {
+    // 1. Late client matching retired tracker is closed, retired launch removed, and
+    //    ManualRestart intent cleared so exactly one replacement is launch_ready (even with auto_recovery=false).
+    let f = Fixture::new();
+    let g = f.account().generation;
+    f.engine
+        .update("1", g, |a| {
+            a.process = None;
+            a.tracker = Some("777000333444".into());
+            a.status = Status::Launching;
+            a.auto_recovery = false;
+            a.ownership_deadline = Some(Utc::now() + ChronoDuration::seconds(90));
+        })
+        .unwrap();
+    f.engine.command("1", "restart").unwrap();
+
+    let late_player = platform::Player {
+        pid: 8401,
+        creation_time: "late-client-start".into(),
+        tracker: "777000333444".into(),
+    };
+    let retired = f.engine.0.state.lock().unwrap().database.retired_launches[0].clone();
+    let mut attempts = CloseAttempts::default();
+    let closed = f
+        .engine
+        .close_retired(
+            &retired,
+            std::slice::from_ref(&late_player),
+            Instant::now(),
+            &mut attempts,
+            || Ok(vec![late_player.clone()]),
+            |_, _| Ok(()),
+        )
+        .unwrap();
+    assert!(closed);
+
+    // Late client exits: monitor cleanup removes retired launch and clears ManualRestart intent.
+    f.engine
+        .transaction(|s| {
+            s.database.retired_launches.retain(|r| r.account_id != "1");
+            Engine::clear_retired_restart_intent(s, "1");
+            Ok(())
+        })
+        .unwrap();
+    let final_acc = f.account();
+    assert_eq!(final_acc.status, Status::Queued);
+    assert!(final_acc.close_intent.is_none());
+    assert!(final_acc.last_error.is_none());
+    assert!(launch_ready(&final_acc, Utc::now()));
+
+    // 2. Active SessionConflict & RateLimit cooldowns are preserved across Restart with unresolved tracker.
+    for reason in ["SessionConflict", "RateLimit"] {
+        let fc = Fixture::new();
+        let gc = fc.account().generation;
+        let retry_at = Utc::now() + ChronoDuration::seconds(45);
+        fc.engine
+            .update("1", gc, |a| {
+                a.process = None;
+                a.tracker = Some("777000555666".into());
+                a.status = Status::Backoff;
+                a.recovery_reason = reason.into();
+                a.next_retry = Some(retry_at);
+            })
+            .unwrap();
+        fc.engine.command("1", "restart").unwrap();
+        fc.engine
+            .transaction(|s| {
+                s.database.retired_launches.clear();
+                Engine::clear_retired_restart_intent(s, "1");
+                Ok(())
+            })
+            .unwrap();
+        let after = fc.account();
+        assert_eq!(after.recovery_reason, reason);
+        assert_eq!(after.next_retry, Some(retry_at));
+        assert!(!launch_ready(&after, Utc::now()));
+        assert!(launch_ready(&after, retry_at + ChronoDuration::seconds(1)));
+    }
+}
+
+#[test]
+fn manual_restart_unsubmitted_cleanup_clears_retired_intent_and_close_retired_defers_cleanly() {
+    let f = Fixture::new();
+    let g = f.account().generation;
+    f.engine
+        .update("1", g, |a| {
+            a.process = None;
+            a.tracker = Some("777000777888".into());
+            a.status = Status::Launching;
+            a.ownership_deadline = Some(Utc::now() + ChronoDuration::seconds(90));
+        })
+        .unwrap();
+    f.engine.command("1", "restart").unwrap();
+    let retired = f.engine.0.state.lock().unwrap().database.retired_launches[0].clone();
+
+    // 1. If launch_allowed is false when a late client appears under ManualRestart, close_retired
+    //    must defer without latching intent.denied = true or NeedsAttention.
+    let late_player = platform::Player {
+        pid: 8501,
+        creation_time: "late-deferred".into(),
+        tracker: "777000777888".into(),
+    };
+    f.engine.set_launch_allowed(false);
+    let mut attempts = CloseAttempts::default();
+    let res = f
+        .engine
+        .close_retired(
+            &retired,
+            std::slice::from_ref(&late_player),
+            Instant::now(),
+            &mut attempts,
+            || Ok(vec![late_player.clone()]),
+            |_, _| Ok(()),
+        )
+        .unwrap();
+    assert!(!res);
+    assert_eq!(f.account().status, Status::Queued);
+    assert!(
+        !f.engine.0.state.lock().unwrap().database.retired_launches[0]
+            .close_intent
+            .as_ref()
+            .unwrap()
+            .denied
+    );
+
+    // 2. Once launch_allowed recovers, close_retired closes the frozen late client cleanly.
+    let frozen_retired = f.engine.0.state.lock().unwrap().database.retired_launches[0].clone();
+    assert_eq!(
+        frozen_retired.process.as_ref().map(|p| p.pid),
+        Some(late_player.pid)
+    );
+    f.engine.set_launch_allowed(true);
+    let mut closed_pids = Vec::new();
+    let res_recovered = f
+        .engine
+        .close_retired(
+            &frozen_retired,
+            std::slice::from_ref(&late_player),
+            Instant::now(),
+            &mut attempts,
+            || Ok(vec![late_player.clone()]),
+            |identity, force| {
+                assert!(!force);
+                closed_pids.push(identity.pid);
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert!(res_recovered);
+    assert_eq!(closed_pids, vec![late_player.pid]);
+    assert_eq!(f.account().status, Status::Queued);
+
+    // 3. cleanup_unsubmitted_launch removes the unsubmitted retired launch AND clears ManualRestart
+    //    intent so the replacement launch passes check_dispatch_authorization!
+    let f2 = Fixture::new();
+    let g2 = f2.account().generation;
+    f2.engine
+        .update("1", g2, |a| {
+            a.process = None;
+            a.tracker = Some("777000999000".into());
+            a.status = Status::Launching;
+            a.ownership_deadline = Some(Utc::now() + ChronoDuration::seconds(90));
+        })
+        .unwrap();
+    f2.engine.command("1", "restart").unwrap();
+    let retired2 = f2.engine.0.state.lock().unwrap().database.retired_launches[0].clone();
+    f2.engine
+        .cleanup_unsubmitted_launch(
+            &retired2.account_id,
+            retired2.generation,
+            &retired2.tracker,
+            retired2.close_intent.as_ref().and_then(|i| i.operation_id),
+        )
+        .unwrap();
+    assert!(!retired_blocks_launch(
+        &f2.engine.0.state.lock().unwrap().database,
+        "1"
+    ));
+    let acc2 = f2.account();
+    assert!(acc2.close_intent.is_none());
+    assert!(launch_ready(&acc2, Utc::now()));
+    let state = f2.engine.0.state.lock().unwrap();
+    assert!(Engine::check_dispatch_authorization(&state, &acc2, false, true).is_ok());
+}
+
+#[test]
+fn cross_account_metadata_failure_does_not_false_pause_unrelated_exiting_account() {
+    let f = Fixture::new();
+    let acc = f.account();
+    let identity = acc.process.clone().unwrap();
+    let t0 = Instant::now();
+    let pending = make_pending_exit(t0, false, false);
+
+    // Uninspected non-child process while another account is launching:
+    // waits up to UNATTRIBUTED_METADATA_GRACE (8s), then settles instead of false NeedsAttention at 30s!
+    let early = f.engine.reconcile_exit_scan(
+        &acc,
+        &identity,
+        &pending,
+        t0 + Duration::from_secs(6),
+        t0 + Duration::from_secs(6),
+        ExitScan {
+            available: true,
+            players: &[],
+            inaccessible: 0,
+            uninspected: 1,
+            metadata_pending: false,
+            metadata_failed: true,
+            bootstrapper_active: false,
+            other_account_launching: true,
+            has_unowned_child: false,
+            target_metadata_pending: false,
+        },
+        None,
+    );
+    assert_eq!(early, ExitReconciliation::ObservationUnavailable);
+    assert_ne!(f.account().status, Status::NeedsAttention);
+
+    let settled = f.engine.reconcile_exit_scan(
+        &f.account(),
+        &identity,
+        &pending,
+        t0 + Duration::from_secs(9),
+        t0 + Duration::from_secs(9),
+        ExitScan {
+            available: true,
+            players: &[],
+            inaccessible: 0,
+            uninspected: 1,
+            metadata_pending: false,
+            metadata_failed: true,
+            bootstrapper_active: false,
+            other_account_launching: true,
+            has_unowned_child: false,
+            target_metadata_pending: false,
+        },
+        None,
+    );
+    assert_eq!(settled, ExitReconciliation::ConfirmedExited);
+    assert!(f.account().process.is_none());
+    assert_eq!(f.account().status, Status::Backoff);
 }
