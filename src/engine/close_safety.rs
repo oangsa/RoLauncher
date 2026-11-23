@@ -2,6 +2,27 @@ use super::*;
 
 pub(super) const FORCE_EXIT_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ExitReconciliation {
+    SuccessorFound,
+    ConfirmedExited,
+    AwaitingFreshObservation,
+    AwaitingHandoff,
+    ObservationUnavailable,
+    OwnershipConflict,
+}
+
+pub(super) struct ExitScan<'a> {
+    pub available: bool,
+    pub players: &'a [platform::Player],
+    pub inaccessible: usize,
+    pub uninspected: usize,
+    pub metadata_pending: bool,
+    pub bootstrapper_active: bool,
+    pub has_unowned_child: bool,
+    pub target_metadata_pending: bool,
+}
+
 #[derive(Default)]
 pub(super) struct CloseAttempts(Vec<CloseAttempt>);
 struct CloseAttempt {
@@ -552,6 +573,7 @@ impl Engine {
     }
 
     /// Non-destructive observation: stale exit reports cannot erase current ownership.
+    #[cfg(test)]
     pub(super) fn owned_exit_observed(
         &self,
         account: &Account,
@@ -564,8 +586,27 @@ impl Engine {
         }
     }
 
+    pub(super) fn owned_exit_observed_with_info(
+        &self,
+        account: &Account,
+        identity: &ProcessIdentity,
+        pending: &PendingExit,
+    ) {
+        self.confirmed_exit_with_info(
+            &account.id,
+            account.generation,
+            identity,
+            Some(pending),
+            pending.clean,
+        );
+        if !account.desired_running {
+            self.finish_operation(&account.id, account.generation, None);
+        }
+    }
+
     // Exit reconciliation is separate from the exact-process exit transition so
     // monitor discovery can establish whether the launch has a surviving client.
+    #[cfg(test)]
     pub(super) fn reconcile_exit(
         &self,
         account: &Account,
@@ -574,6 +615,51 @@ impl Engine {
         players: &[platform::Player],
         settled: bool,
     ) -> bool {
+        let now = self.now();
+        let pending = PendingExit {
+            observed: now,
+            observed_utc: Utc::now(),
+            clean,
+            exit_code: None,
+            lifetime_ms: None,
+            connected_before_exit: account.connected_since.is_some(),
+            launcher_requested_close: account.close_intent.as_ref().is_some_and(|i| !i.denied),
+            owned_log_attached: false,
+        };
+        matches!(
+            self.reconcile_exit_scan(
+                account,
+                identity,
+                &pending,
+                now,
+                now,
+                ExitScan {
+                    available: true,
+                    players,
+                    inaccessible: 0,
+                    uninspected: 0,
+                    metadata_pending: false,
+                    bootstrapper_active: false,
+                    has_unowned_child: false,
+                    target_metadata_pending: false,
+                },
+                Some(settled),
+            ),
+            ExitReconciliation::ConfirmedExited | ExitReconciliation::SuccessorFound
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn reconcile_exit_scan(
+        &self,
+        account: &Account,
+        identity: &ProcessIdentity,
+        pending: &PendingExit,
+        scan_started: Instant,
+        now: Instant,
+        scan: ExitScan<'_>,
+        forced_settled: Option<bool>,
+    ) -> ExitReconciliation {
         {
             let mut state = self.0.state.lock().unwrap();
             let Some(current) = state
@@ -582,65 +668,267 @@ impl Engine {
                 .iter()
                 .map(|s| &s.account)
                 .find(|a| a.id == account.id)
+                .cloned()
             else {
-                return false;
+                return ExitReconciliation::AwaitingFreshObservation;
             };
             if current.generation != account.generation
                 || current.process.as_ref() != Some(identity)
             {
-                return false;
+                return ExitReconciliation::AwaitingFreshObservation;
             }
-            let matches: Vec<_> = players
+            if scan_started < pending.observed {
+                let rt = state
+                    .runtime_lifecycle
+                    .entry(current.id.clone())
+                    .or_default();
+                rt.exit_observed = true;
+                rt.exit_reconciliation_pending = true;
+                rt.exit_pending_reason = Some("awaiting_fresh_observation");
+                rt.exit_identity = Some((identity.pid, identity.creation_time.clone()));
+                rt.handoff_deadline =
+                    Some(pending.handoff_deadline_utc(&current, scan.bootstrapper_active));
+                return ExitReconciliation::AwaitingFreshObservation;
+            }
+            if !scan.available
+                || scan.inaccessible > 0
+                || scan.uninspected > 0
+                || scan.target_metadata_pending
+            {
+                let pause = forced_settled.unwrap_or_else(|| pending.observation_pause_due(now));
+                let changed = {
+                    let rt = state
+                        .runtime_lifecycle
+                        .entry(current.id.clone())
+                        .or_default();
+                    let changed = rt.exit_pending_reason != Some("observation_unavailable")
+                        || rt.process_inaccessible != (scan.inaccessible > 0);
+                    rt.exit_observed = true;
+                    rt.exit_reconciliation_pending = true;
+                    rt.exit_pending_reason = Some("observation_unavailable");
+                    rt.exit_identity = Some((identity.pid, identity.creation_time.clone()));
+                    rt.process_inaccessible = scan.inaccessible > 0;
+                    rt.handoff_deadline =
+                        Some(pending.handoff_deadline_utc(&current, scan.bootstrapper_active));
+                    changed
+                };
+                if changed {
+                    let _ = self.0.events.send(snapshot(&state));
+                }
+                self.0.journal.record(
+                    "exit_reconciliation_checked",
+                    serde_json::json!({
+                        "account": crate::diagnostics::account(&current),
+                        "decision": "observation_unavailable",
+                        "settled": false,
+                        "uniquely_claimed": uniquely_claimed(&state, &current.id, identity, false),
+                        "candidates": [],
+                        "inaccessible": scan.inaccessible,
+                        "uninspected": scan.uninspected,
+                        "metadata_pending": scan.metadata_pending,
+                        "target_metadata_pending": scan.target_metadata_pending,
+                    }),
+                );
+                drop(state);
+                if pause {
+                    self.pause_unresolved_exit(&current, identity);
+                }
+                return ExitReconciliation::ObservationUnavailable;
+            }
+            if scan.has_unowned_child {
+                let pause = forced_settled.unwrap_or_else(|| pending.observation_pause_due(now));
+                let changed = {
+                    let rt = state
+                        .runtime_lifecycle
+                        .entry(current.id.clone())
+                        .or_default();
+                    let changed = rt.exit_pending_reason != Some("awaiting_handoff_child");
+                    rt.exit_observed = true;
+                    rt.exit_reconciliation_pending = true;
+                    rt.exit_pending_reason = Some("awaiting_handoff_child");
+                    rt.exit_identity = Some((identity.pid, identity.creation_time.clone()));
+                    rt.process_inaccessible = false;
+                    rt.handoff_deadline =
+                        Some(pending.handoff_deadline_utc(&current, scan.bootstrapper_active));
+                    changed
+                };
+                if changed {
+                    let _ = self.0.events.send(snapshot(&state));
+                }
+                self.0.journal.record(
+                    "exit_reconciliation_checked",
+                    serde_json::json!({
+                        "account": crate::diagnostics::account(&current),
+                        "decision": "awaiting_handoff_child",
+                        "settled": false,
+                        "uniquely_claimed": uniquely_claimed(&state, &current.id, identity, false),
+                        "candidates": [],
+                    }),
+                );
+                drop(state);
+                if pause {
+                    self.pause_unresolved_exit(&current, identity);
+                }
+                return ExitReconciliation::AwaitingHandoff;
+            }
+            let matches: Vec<_> = scan
+                .players
                 .iter()
                 .filter(|p| p.tracker == identity.tracker)
                 .collect();
-            self.0.journal.record("exit_reconciliation_checked", serde_json::json!({
-                "account": crate::diagnostics::account(current), "settled": settled,
-                "uniquely_claimed": uniquely_claimed(&state, &current.id, identity, false),
-                "candidates": matches.iter().map(|p| crate::diagnostics::process(&p.identity(current.generation))).collect::<Vec<_>>(),
-            }));
             if matches.len() == 1 {
                 let successor = matches[0].identity(current.generation);
                 if successor.pid == identity.pid
                     && successor.creation_time == identity.creation_time
                 {
-                    return false;
+                    return ExitReconciliation::AwaitingFreshObservation;
                 }
-                if !verified_unique(&state, &current.id, &successor, players, false) {
-                    drop(state);
-                    if settled {
-                        self.pause_unresolved_exit(account, identity);
+                if !verified_unique(&state, &current.id, &successor, scan.players, false) {
+                    let pause = forced_settled.unwrap_or_else(|| {
+                        pending.settled(&current, now, scan.bootstrapper_active)
+                    });
+                    {
+                        let rt = state
+                            .runtime_lifecycle
+                            .entry(current.id.clone())
+                            .or_default();
+                        rt.exit_pending_reason = Some("ownership_conflict");
                     }
-                    return false;
+                    self.0.journal.record(
+                        "exit_reconciliation_checked",
+                        serde_json::json!({
+                            "account": crate::diagnostics::account(&current),
+                            "decision": "ownership_conflict",
+                            "settled": pause,
+                            "uniquely_claimed": uniquely_claimed(&state, &current.id, identity, false),
+                            "candidates": matches.iter().map(|p| crate::diagnostics::process(&p.identity(current.generation))).collect::<Vec<_>>(),
+                        }),
+                    );
+                    drop(state);
+                    if pause {
+                        self.pause_unresolved_exit(&current, identity);
+                    }
+                    return ExitReconciliation::OwnershipConflict;
                 }
                 let mut next = state.clone();
                 let network_suspended = next.network_suspended;
+                {
+                    let rt = next
+                        .runtime_lifecycle
+                        .entry(current.id.clone())
+                        .or_default();
+                    rt.exit_observed = false;
+                    rt.exit_reconciliation_pending = false;
+                    rt.exit_pending_reason = None;
+                    rt.exit_identity = None;
+                    rt.handoff_deadline = None;
+                    rt.process_inaccessible = false;
+                    rt.exited_before_connection_recent = false;
+                }
                 let a = account_mut(&mut next, &account.id).unwrap();
                 resume_verified_handoff(a);
                 #[cfg(windows)]
                 let direct_child = platform::direct_successor(identity, &successor);
                 #[cfg(not(windows))]
                 let direct_child = false;
-                attach_surviving_player(a, &successor, clean, direct_child, network_suspended);
+                attach_surviving_player(
+                    a,
+                    &successor,
+                    pending.clean,
+                    direct_child,
+                    network_suspended,
+                );
                 self.0.journal.record("process_handoff_verified", serde_json::json!({
                     "account_id": a.id.parse::<u64>().ok(), "old_process": crate::diagnostics::process(identity),
                     "successor": crate::diagnostics::process(&successor), "reason": if direct_child { "verified_direct_child" } else { "same_tracker_unique_successor" },
                 }));
-                return self.commit_close_state(&mut state, next).is_ok();
+                return if self.commit_close_state(&mut state, next).is_ok() {
+                    ExitReconciliation::SuccessorFound
+                } else {
+                    ExitReconciliation::ObservationUnavailable
+                };
             }
-            if !matches.is_empty()
-                || !settled
-                || !uniquely_claimed(&state, &current.id, identity, false)
-            {
-                drop(state);
-                if settled {
-                    self.pause_unresolved_exit(account, identity);
+            if !matches.is_empty() || !uniquely_claimed(&state, &current.id, identity, false) {
+                let pause = forced_settled
+                    .unwrap_or_else(|| pending.settled(&current, now, scan.bootstrapper_active));
+                {
+                    let rt = state
+                        .runtime_lifecycle
+                        .entry(current.id.clone())
+                        .or_default();
+                    rt.exit_pending_reason = Some("ownership_conflict");
                 }
-                return false;
+                self.0.journal.record(
+                    "exit_reconciliation_checked",
+                    serde_json::json!({
+                        "account": crate::diagnostics::account(&current),
+                        "decision": "ownership_conflict",
+                        "settled": pause,
+                        "uniquely_claimed": uniquely_claimed(&state, &current.id, identity, false),
+                        "candidates": matches.iter().map(|p| crate::diagnostics::process(&p.identity(current.generation))).collect::<Vec<_>>(),
+                    }),
+                );
+                drop(state);
+                if pause {
+                    self.pause_unresolved_exit(&current, identity);
+                }
+                return ExitReconciliation::OwnershipConflict;
+            }
+            let settled = forced_settled
+                .unwrap_or_else(|| pending.settled(&current, now, scan.bootstrapper_active));
+            let grace_required = pending.grace_duration(&current);
+            let elapsed = now.saturating_duration_since(pending.observed);
+            let decision = if settled {
+                "confirmed_exited"
+            } else if scan.bootstrapper_active && elapsed >= grace_required {
+                "awaiting_handoff_bootstrapper"
+            } else {
+                "awaiting_handoff_grace"
+            };
+            self.0.journal.record(
+                "exit_reconciliation_checked",
+                serde_json::json!({
+                    "account": crate::diagnostics::account(&current),
+                    "decision": decision,
+                    "settled": settled,
+                    "uniquely_claimed": true,
+                    "candidates": [],
+                    "grace_elapsed_ms": elapsed.as_millis(),
+                    "grace_required_ms": grace_required.as_millis(),
+                    "bootstrapper_active": scan.bootstrapper_active,
+                }),
+            );
+            if !settled {
+                let next_reason = if scan.bootstrapper_active && elapsed >= grace_required {
+                    "bootstrapper_active"
+                } else {
+                    "awaiting_handoff_grace"
+                };
+                let changed = {
+                    let rt = state
+                        .runtime_lifecycle
+                        .entry(current.id.clone())
+                        .or_default();
+                    let changed = rt.exit_pending_reason != Some(next_reason)
+                        || !rt.exit_observed
+                        || !rt.exit_reconciliation_pending;
+                    rt.exit_observed = true;
+                    rt.exit_reconciliation_pending = true;
+                    rt.exit_pending_reason = Some(next_reason);
+                    rt.exit_identity = Some((identity.pid, identity.creation_time.clone()));
+                    rt.process_inaccessible = false;
+                    rt.handoff_deadline =
+                        Some(pending.handoff_deadline_utc(&current, scan.bootstrapper_active));
+                    changed
+                };
+                if changed {
+                    let _ = self.0.events.send(snapshot(&state));
+                }
+                return ExitReconciliation::AwaitingHandoff;
             }
         }
-        self.owned_exit_observed(account, identity, clean);
-        true
+        self.owned_exit_observed_with_info(account, identity, pending);
+        ExitReconciliation::ConfirmedExited
     }
 
     // Same durable-before-visible ordering as Engine::transaction; callers already

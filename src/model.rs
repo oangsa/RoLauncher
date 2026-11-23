@@ -397,6 +397,55 @@ pub struct Operation {
     pub error: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecyclePhase {
+    Stopped,
+    Stopping,
+    Queued,
+    WaitingForStartup,
+    WaitingForOwnership,
+    CheckingForHandoff,
+    OldProcessExited,
+    CheckingForSurvivingClient,
+    PreparingReplacement,
+    Running,
+    Reconnecting,
+    RetryScheduled,
+    WaitingForNetwork,
+    LaunchFailedBeforeConnection,
+    ActionRequired,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessIdentityStatus {
+    None,
+    Alive,
+    ExitObserved,
+    Inaccessible,
+    UnverifiedLaunch,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountLifecycleView {
+    pub phase: LifecyclePhase,
+    pub process_status: ProcessIdentityStatus,
+    pub process_exit_observed: bool,
+    pub exit_reconciliation_pending: bool,
+    pub pending_reason: Option<String>,
+    pub handoff_deadline: Option<DateTime<Utc>>,
+    pub outstanding_launch_attempt: bool,
+    pub outstanding_retired_launches: usize,
+    pub next_retry_eligible_at: Option<DateTime<Utc>>,
+    pub current_retry_blocker: Option<String>,
+    pub last_verified_launch_stage: Option<String>,
+    pub last_confirmed_connection_state: String,
+    pub last_exit_code: Option<u32>,
+    pub last_process_lifetime_ms: Option<u64>,
+    pub last_termination_source: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Snapshot {
     pub external_background_cleanup_enabled: bool,
@@ -407,6 +456,8 @@ pub struct Snapshot {
     pub game_profiles: Vec<GameProfile>,
     pub close_to_tray: bool,
     pub accounts: Vec<Account>,
+    #[serde(default)]
+    pub account_lifecycle: std::collections::BTreeMap<String, AccountLifecycleView>,
     pub network_suspended: bool,
     pub compatibility: String,
     pub profiles: Vec<LaunchProfile>,
